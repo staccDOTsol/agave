@@ -248,7 +248,7 @@ pub fn execute(
         column_options,
         // The validator needs to open many files, check that the process has
         // permission to do so in order to fail quickly and give a direct error
-        enforce_ulimit_nofile: true,
+        enforce_ulimit_nofile: false,
         // The validator needs primary (read/write)
         access_type: AccessType::Primary,
         num_rocksdb_compaction_threads: rocksdb_compaction_threads,

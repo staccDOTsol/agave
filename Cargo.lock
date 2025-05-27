@@ -8237,6 +8237,7 @@ version = "2.3.0"
 dependencies = [
  "agave-feature-set",
  "solana-fee-structure",
+ "solana-sdk",
  "solana-svm-transaction",
 ]
 
@@ -11718,9 +11719,9 @@ dependencies = [
 
 [[package]]
 name = "solana-vote-interface"
-version = "2.2.5"
+version = "2.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef4f08746f154458f28b98330c0d55cb431e2de64ee4b8efc98dcbe292e0672b"
+checksum = "78f039b0788337bedc6c5450d2f237718f938defb5ce0e0ad8ef507e78dcd370"
 dependencies = [
  "arbitrary",
  "bincode",

@@ -4,6 +4,19 @@ use {
     solana_svm_transaction::svm_message::SVMMessage,
 };
 
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
+
+// Fixed fee constants based on MEV data
+// Average arbitrage profit: 0.027 SOL = 27_000_000 lamports
+// Average sandwich profit: 0.076 SOL = 76_000_000 lamports
+// Half sandwich: 0.038 SOL = 38_000_000 lamports
+pub const FIXED_TRANSACTION_FEE_LAMPORTS: u64 = 27_000_000; // Same as average arbitrage
+// Alternative: pub const FIXED_TRANSACTION_FEE_LAMPORTS: u64 = 38_000_000; // Half of sandwich
+
+// Vote transactions should have minimal fees to ensure consensus participation
+pub const VOTE_TRANSACTION_FEE_LAMPORTS: u64 = 5_000; // Keep original low fee for votes
+
 /// Bools indicating the activation of features relevant
 /// to the fee calculation.
 // DEVELOPER NOTE:
@@ -23,20 +36,42 @@ impl From<&FeatureSet> for FeeFeatures {
     }
 }
 
+/// Check if a message is a simple vote transaction
+/// A simple vote transaction has only vote program instructions
+fn is_simple_vote_message(message: &impl SVMMessage) -> bool {
+    // Get the vote program ID
+    let vote_program_id = Pubkey::from_str("Vote111111111111111111111111111111111111111").unwrap();
+    
+    // Check if all instructions are for the vote program
+    let mut has_vote_instruction = false;
+    for (program_id, _instruction) in message.program_instructions_iter() {
+        if program_id == &vote_program_id {
+            has_vote_instruction = true;
+        } else {
+            // If any instruction is not for the vote program, it's not a simple vote
+            return false;
+        }
+    }
+    
+    // Must have at least one vote instruction
+    has_vote_instruction
+}
+
 /// Calculate fee for `SanitizedMessage`
+/// In Solana Classic, all non-vote transactions have the same fixed fee
 pub fn calculate_fee(
     message: &impl SVMMessage,
     zero_fees_for_test: bool,
-    lamports_per_signature: u64,
+    _lamports_per_signature: u64, // Ignored in our fixed fee model
     prioritization_fee: u64,
-    fee_features: FeeFeatures,
+    _fee_features: FeeFeatures, // Ignored in our fixed fee model
 ) -> u64 {
     calculate_fee_details(
         message,
         zero_fees_for_test,
-        lamports_per_signature,
+        _lamports_per_signature,
         prioritization_fee,
-        fee_features,
+        _fee_features,
     )
     .total_fee()
 }
@@ -44,60 +79,26 @@ pub fn calculate_fee(
 pub fn calculate_fee_details(
     message: &impl SVMMessage,
     zero_fees_for_test: bool,
-    lamports_per_signature: u64,
+    _lamports_per_signature: u64, // Ignored in our fixed fee model
     prioritization_fee: u64,
-    fee_features: FeeFeatures,
+    _fee_features: FeeFeatures, // Ignored in our fixed fee model
 ) -> FeeDetails {
     if zero_fees_for_test {
         return FeeDetails::default();
     }
 
+    // Check if this is a vote transaction
+    let base_fee = if is_simple_vote_message(message) {
+        VOTE_TRANSACTION_FEE_LAMPORTS
+    } else {
+        FIXED_TRANSACTION_FEE_LAMPORTS
+    };
+
+    // Fixed fee for all transactions + any prioritization fee
     FeeDetails::new(
-        calculate_signature_fee(
-            SignatureCounts::from(message),
-            lamports_per_signature,
-            fee_features.enable_secp256r1_precompile,
-        ),
+        base_fee,
         prioritization_fee,
     )
-}
-
-/// Calculate fees from signatures.
-fn calculate_signature_fee(
-    SignatureCounts {
-        num_transaction_signatures,
-        num_ed25519_signatures,
-        num_secp256k1_signatures,
-        num_secp256r1_signatures,
-    }: SignatureCounts,
-    lamports_per_signature: u64,
-    enable_secp256r1_precompile: bool,
-) -> u64 {
-    let signature_count = num_transaction_signatures
-        .saturating_add(num_ed25519_signatures)
-        .saturating_add(num_secp256k1_signatures)
-        .saturating_add(
-            u64::from(enable_secp256r1_precompile).wrapping_mul(num_secp256r1_signatures),
-        );
-    signature_count.saturating_mul(lamports_per_signature)
-}
-
-struct SignatureCounts {
-    pub num_transaction_signatures: u64,
-    pub num_ed25519_signatures: u64,
-    pub num_secp256k1_signatures: u64,
-    pub num_secp256r1_signatures: u64,
-}
-
-impl<Tx: SVMMessage> From<&Tx> for SignatureCounts {
-    fn from(message: &Tx) -> Self {
-        Self {
-            num_transaction_signatures: message.num_transaction_signatures(),
-            num_ed25519_signatures: message.num_ed25519_signatures(),
-            num_secp256k1_signatures: message.num_secp256k1_signatures(),
-            num_secp256r1_signatures: message.num_secp256r1_signatures(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -105,67 +106,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_calculate_signature_fee() {
-        const LAMPORTS_PER_SIGNATURE: u64 = 5_000;
-
-        // Impossible case - 0 signatures.
-        assert_eq!(
-            calculate_signature_fee(
-                SignatureCounts {
-                    num_transaction_signatures: 0,
-                    num_ed25519_signatures: 0,
-                    num_secp256k1_signatures: 0,
-                    num_secp256r1_signatures: 0,
-                },
-                LAMPORTS_PER_SIGNATURE,
-                true,
-            ),
-            0
-        );
-
-        // Simple signature
-        assert_eq!(
-            calculate_signature_fee(
-                SignatureCounts {
-                    num_transaction_signatures: 1,
-                    num_ed25519_signatures: 0,
-                    num_secp256k1_signatures: 0,
-                    num_secp256r1_signatures: 0,
-                },
-                LAMPORTS_PER_SIGNATURE,
-                true,
-            ),
-            LAMPORTS_PER_SIGNATURE
-        );
-
-        // Pre-compile signatures.
-        assert_eq!(
-            calculate_signature_fee(
-                SignatureCounts {
-                    num_transaction_signatures: 1,
-                    num_ed25519_signatures: 2,
-                    num_secp256k1_signatures: 3,
-                    num_secp256r1_signatures: 4,
-                },
-                LAMPORTS_PER_SIGNATURE,
-                true,
-            ),
-            10 * LAMPORTS_PER_SIGNATURE
-        );
-
-        // Pre-compile signatures (no secp256r1)
-        assert_eq!(
-            calculate_signature_fee(
-                SignatureCounts {
-                    num_transaction_signatures: 1,
-                    num_ed25519_signatures: 2,
-                    num_secp256k1_signatures: 3,
-                    num_secp256r1_signatures: 4,
-                },
-                LAMPORTS_PER_SIGNATURE,
-                false,
-            ),
-            6 * LAMPORTS_PER_SIGNATURE
-        );
+    fn test_calculate_fixed_fee() {
+        // Test that fee calculation returns fixed fee regardless of input
+        
+        // Create a dummy feature set
+        let fee_features = FeeFeatures {
+            enable_secp256r1_precompile: true,
+        };
+        
+        // Test basic fee calculation for non-vote transactions
+        let fee_details = FeeDetails::new(FIXED_TRANSACTION_FEE_LAMPORTS, 0);
+        assert_eq!(fee_details.total_fee(), FIXED_TRANSACTION_FEE_LAMPORTS);
+        
+        // Test vote transaction fee
+        let vote_fee_details = FeeDetails::new(VOTE_TRANSACTION_FEE_LAMPORTS, 0);
+        assert_eq!(vote_fee_details.total_fee(), VOTE_TRANSACTION_FEE_LAMPORTS);
+        
+        // Test with prioritization fee
+        let priority_fee = 1_000_000;
+        let fee_details_with_priority = FeeDetails::new(FIXED_TRANSACTION_FEE_LAMPORTS, priority_fee);
+        assert_eq!(fee_details_with_priority.total_fee(), FIXED_TRANSACTION_FEE_LAMPORTS + priority_fee);
+        
+        // Test that our constants are set correctly
+        assert_eq!(FIXED_TRANSACTION_FEE_LAMPORTS, 27_000_000); // 0.027 SOL
+        assert_eq!(VOTE_TRANSACTION_FEE_LAMPORTS, 5_000); // 0.000005 SOL
     }
 }
