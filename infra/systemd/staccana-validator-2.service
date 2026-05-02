@@ -33,6 +33,7 @@ Environment="STACCANA_THIS_PUBLIC_IP=84.32.220.76"
 ExecStart=/usr/local/bin/agave-validator \
   --identity /etc/staccana/keys-2/identity.json \
   --vote-account /etc/staccana/keys-2/vote.json \
+  --authorized-voter /etc/staccana/keys-2/vote.json \
   --ledger /var/lib/staccana/ledger \
   --accounts /var/lib/staccana/accounts \
   --snapshot-interval-slots 200 \
