@@ -1,0 +1,37 @@
+[Unit]
+Description=Staccana validator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=staccana
+Group=staccana
+LimitNOFILE=2000000
+LimitNPROC=65535
+TimeoutStopSec=180
+Restart=on-failure
+RestartSec=10s
+
+# Adjust these env paths per box
+Environment="RUST_LOG=solana=info,solana_metrics=warn"
+Environment="SOLANA_METRICS_CONFIG=host=https://metrics.example,db=staccana,u=writer,p=changeme"
+
+ExecStart=/usr/local/bin/agave-validator \
+  --identity /etc/staccana/keys/identity.json \
+  --vote-account /etc/staccana/keys/vote.json \
+  --ledger /var/lib/staccana/ledger \
+  --accounts /var/lib/staccana/accounts \
+  --snapshot-interval-slots 100 \
+  --maximum-local-snapshot-age 500 \
+  --limit-ledger-size 200000000 \
+  --no-poh-speed-test \
+  --no-os-network-limits-test \
+  --rpc-port 8899 \
+  --rpc-bind-address 127.0.0.1 \
+  --gossip-port 8001 \
+  --dynamic-port-range 8002-8020 \
+  --log /var/log/staccana/validator.log
+
+[Install]
+WantedBy=multi-user.target

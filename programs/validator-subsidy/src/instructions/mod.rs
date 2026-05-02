@@ -1,0 +1,34 @@
+//! Instruction handlers for the validator-subsidy program.
+//!
+//! Each submodule defines one instruction, its `Accounts` context, and its handler.
+//! Pure helpers (weight + share math, attestation message construction, ed25519
+//! precompile reading) live in `crate::subsidy` and `crate::ed25519` and are unit-tested
+//! there.
+//!
+//! Instruction set (SPEC.md §7.2 / §7.3):
+//!
+//! - [`init_subsidy`]               — governance one-shot bootstrap.
+//! - [`stake_to_productive`]        — governance CPI into bridge `mint`.
+//! - [`unstake_from_productive`]    — governance CPI into bridge `burn`.
+//! - [`register_validator`]         — governance adds a validator to the registry.
+//! - [`update_validator_metrics`]   — federation-attested metrics update.
+//! - [`distribute_yield`]           — permissionless: pays validators their pro-rata
+//!   share of the epoch's observed yield.
+//! - [`bootstrap_distribute`]       — permissionless: replaces yield distribution for
+//!   the first 60 epochs while the productive position has not yet earned anything.
+
+pub mod bootstrap_distribute;
+pub mod distribute_yield;
+pub mod init_subsidy;
+pub mod register_validator;
+pub mod stake_to_productive;
+pub mod unstake_from_productive;
+pub mod update_validator_metrics;
+
+pub use bootstrap_distribute::*;
+pub use distribute_yield::*;
+pub use init_subsidy::*;
+pub use register_validator::*;
+pub use stake_to_productive::*;
+pub use unstake_from_productive::*;
+pub use update_validator_metrics::*;

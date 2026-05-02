@@ -1,0 +1,31 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Solana
+/test-ledger
+/.anchor
+*.so
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local config
+.env
+.env.local
+*.log
+
+# Per-operator infra config (real IPs, keys). Template stays in version control.
+/infra/ansible/inventory.yml
+/infra/ansible/group_vars/*.yml
+!/infra/ansible/inventory.yml.example
+/infra/cloudflare/.env
+/etc/staccana/
+
+# Genesis artifacts (large, regenerable from snapshot tooling)
+/genesis-out
+/snapshot-cache

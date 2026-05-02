@@ -1,0 +1,51 @@
+{
+  "name": "staccana-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Staccana web frontend (claim, bridge, pump). Connects existing Solana wallets to the staccana custom RPC at https://rpc.mp.fun/ and runs the lazy-claim flow.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "1.1.0",
+    "@radix-ui/react-toast": "1.2.2",
+    "@solana/wallet-adapter-base": "0.9.23",
+    "@solana/wallet-adapter-react": "0.15.35",
+    "@solana/wallet-adapter-react-ui": "0.9.35",
+    "@solana/wallet-adapter-wallets": "0.19.32",
+    "@solana/web3.js": "1.95.4",
+    "bs58": "6.0.0",
+    "class-variance-authority": "0.7.0",
+    "clsx": "2.1.1",
+    "idb-keyval": "6.2.1",
+    "lucide-react": "0.468.0",
+    "next": "^14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tailwind-merge": "2.5.4",
+    "tailwindcss-animate": "1.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vercel/config": "^0.3.0",
+    "autoprefixer": "10.4.20",
+    "eslint": "8.57.1",
+    "eslint-config-next": "^14.2.35",
+    "postcss": "8.4.49",
+    "prettier": "3.3.3",
+    "tailwindcss": "3.4.15",
+    "typescript": "5.6.3",
+    "vitest": "2.1.5"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  }
+}
