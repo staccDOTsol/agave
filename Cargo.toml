@@ -10,6 +10,7 @@ members = [
     "programs/megadrop",
     "tools/snapshot-fork",
     "tools/genesis-emit",
+    "tools/genesis-bake",
     "tools/claim-cli",
     "tools/bridge-cli",
     "tools/federation-attestor",

@@ -1,0 +1,56 @@
+[package]
+name = "staccana-genesis-bake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Bake a real Solana genesis.bin from a ComposedGenesis: pre-credits the treasury PDA, embeds the lazy-claim Merkle root, registers the Staccana programs as upgradeable builtins, and activates the four CTE feature gates at slot 0."
+
+[[bin]]
+name = "staccana-genesis-bake"
+path = "src/main.rs"
+
+[lib]
+name = "staccana_genesis_bake"
+path = "src/lib.rs"
+
+[dependencies]
+# Workspace siblings: pull the CTE gate constants, fee governor wire format, and the
+# typed ComposedGenesis from the existing pure pipeline.
+staccana-genesis = { path = "../../genesis" }
+staccana-genesis-emit = { path = "../genesis-emit" }
+staccana-lazy-claim = { path = "../../programs/lazy-claim", default-features = false }
+
+# Solana 2.x crate set. We deliberately avoid `solana-runtime` / `solana-genesis` (the
+# heavy ones) — `solana-genesis-config` carries the GenesisConfig type plus
+# bincode-backed `write` / `load`, which is all we need to produce a validator-readable
+# `genesis.bin`.
+solana-genesis-config = { version = "2", features = ["serde"] }
+solana-account = { version = "2", features = ["bincode", "serde"] }
+solana-pubkey = { version = "2", features = ["serde", "std"] }
+solana-keypair = "2"
+solana-signer = "2"
+solana-hash = { version = "2", features = ["serde"] }
+solana-cluster-type = { version = "2", features = ["serde"] }
+solana-fee-calculator = { version = "2", features = ["serde"] }
+solana-inflation = { version = "2", features = ["serde"] }
+solana-feature-gate-interface = { version = "2", features = ["bincode"] }
+solana-sdk-ids = "2"
+solana-rent = { version = "2", features = ["serde"] }
+solana-loader-v3-interface = { version = "3", features = ["serde", "bincode"] }
+# `solana-program` is needed to bridge into the `solana_program::hash::Hash` and
+# `solana_program::pubkey::Pubkey` types that `staccana-lazy-claim::state::LazyClaimConfig`
+# expects. This is the same crate the `staccana-genesis` crate uses for its own
+# `MerkleRoot(Hash)` so we get a consistent type universe across the workspace.
+solana-program = { workspace = true }
+
+# Auxiliary.
+clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+bincode = "1"
+bs58 = "0.5"
+
+[dev-dependencies]
+tempfile = "3"
