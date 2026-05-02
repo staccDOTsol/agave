@@ -33,12 +33,31 @@ if ! command -v cargo >/dev/null; then
   source "$HOME/.cargo/env"
 fi
 
-# 4. NVMe mount for ledger + accounts
-if [[ -b "$NVME_DEVICE" ]] && ! mountpoint -q "$LEDGER_MOUNT"; then
-  mkfs.ext4 -F "$NVME_DEVICE"
-  mkdir -p "$LEDGER_MOUNT"
-  mount "$NVME_DEVICE" "$LEDGER_MOUNT"
-  echo "$NVME_DEVICE $LEDGER_MOUNT ext4 defaults,noatime,nodiratime 0 0" >> /etc/fstab
+# 4. NVMe mount for ledger + accounts.
+#
+# Three cases handled:
+#   (a) $NVME_DEVICE exists, is NOT in use, is not part of the system → mkfs + mount.
+#   (b) $NVME_DEVICE exists but IS already in use (single-drive box where nvme1n1 is the
+#       OS drive — common on Cherryservers). Skip mkfs; $LEDGER_MOUNT lives on the root fs.
+#   (c) $NVME_DEVICE doesn't exist → skip; $LEDGER_MOUNT lives on the root fs.
+device_in_use() {
+  # Returns 0 if any partition of the device is mounted anywhere
+  lsblk -no MOUNTPOINTS "$1" 2>/dev/null | grep -q .
+}
+
+if [[ -b "$NVME_DEVICE" ]]; then
+  if device_in_use "$NVME_DEVICE"; then
+    echo "[bootstrap] $NVME_DEVICE is already in use (likely the system drive); skipping mkfs."
+    echo "[bootstrap] $LEDGER_MOUNT will live on the root filesystem ($(df -h / | awk 'NR==2 {print $4}') free)."
+  elif ! mountpoint -q "$LEDGER_MOUNT"; then
+    echo "[bootstrap] formatting + mounting $NVME_DEVICE → $LEDGER_MOUNT"
+    mkfs.ext4 -F "$NVME_DEVICE"
+    mkdir -p "$LEDGER_MOUNT"
+    mount "$NVME_DEVICE" "$LEDGER_MOUNT"
+    echo "$NVME_DEVICE $LEDGER_MOUNT ext4 defaults,noatime,nodiratime 0 0" >> /etc/fstab
+  fi
+else
+  echo "[bootstrap] $NVME_DEVICE does not exist; using root filesystem for $LEDGER_MOUNT."
 fi
 mkdir -p "$LEDGER_MOUNT" "$ACCOUNTS_MOUNT" /var/log/staccana /etc/staccana
 
