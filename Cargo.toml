@@ -42,10 +42,11 @@ codegen-units = 1
 
 # cargo-build-sbf bundled with solana 2.0.25 ships with Rust 1.75 (April 2024),
 # but blake3 >= 1.6 and a few other transitive crates require edition2024 which
-# isn't stable until Rust 1.85. Pin them to versions compatible with 1.75 so
-# the SBF build can resolve the dep graph.
-[patch.crates-io]
-blake3 = { version = "=1.5.5" }
+# isn't stable until Rust 1.85. Pin via Cargo.lock with:
+#   cargo update -p blake3 --precise 1.5.5
+# (cargo doesn't permit a [patch.crates-io] entry that resolves to the same
+# crates-io source — it requires a different source like git or path. The
+# Cargo.lock pin is enough since the SBF build reads --frozen-style.)
 
 # Dep-graph note (resolved as of Phase 5.5):
 # `programs/bridge`, `programs/secret-pump`, and `programs/validator-subsidy` are on
