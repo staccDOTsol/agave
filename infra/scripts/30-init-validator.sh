@@ -109,18 +109,13 @@ cargo run --release \
   "${SO_FLAGS[@]}" \
   --output-ledger-dir   "$LEDGER_DIR"
 
-GENESIS_HASH=$(solana-ledger-tool -l "$LEDGER_DIR" genesis-hash 2>/dev/null | tail -1)
-echo "[init] staccana ledger initialized at $LEDGER_DIR"
-echo "[init] genesis hash: $GENESIS_HASH"
-
-# Compute the bank-0 hash for `--expected-bank-hash`. Required by the systemd unit's
-# `--wait-for-supermajority 0` flag, which is what unblocks the single-validator
-# tower-BFT deadlock (the validator can't land its first vote without it — the
-# threshold check rejects every vote with FailedThreshold(_, _, 0, total_stake)).
-# This is the same recipe jito-solana's `bootstrap` script and agave's
-# `multinode-demo/bootstrap-validator.sh` use.
-#
-# `agave-ledger-tool` is the rebrand; older boxes have `solana-ledger-tool`. Try both.
+# Detect the ledger tool binary FIRST, before any invocation. agave 2.x rebrands
+# `solana-ledger-tool` -> `agave-ledger-tool`; on a fresh box only the new name
+# exists. Using the wrong name triggers a `command not found` (exit 127) that
+# `set -o pipefail` (active via `set -euo pipefail` at the top of this script)
+# turns into a silent script abort even when stderr is redirected to /dev/null —
+# this is exactly how an earlier version of this script ate the bank-hash logic
+# without leaving any trace.
 LEDGER_TOOL_BIN=""
 if command -v agave-ledger-tool >/dev/null 2>&1; then
   LEDGER_TOOL_BIN=agave-ledger-tool
@@ -130,6 +125,18 @@ else
   echo "[init] FATAL: neither agave-ledger-tool nor solana-ledger-tool found in PATH" >&2
   exit 1
 fi
+echo "[init] using ledger tool: $LEDGER_TOOL_BIN"
+
+GENESIS_HASH=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" genesis-hash 2>/dev/null | tail -1)
+echo "[init] staccana ledger initialized at $LEDGER_DIR"
+echo "[init] genesis hash: $GENESIS_HASH"
+
+# Compute the bank-0 hash for `--expected-bank-hash`. Required by the systemd unit's
+# `--wait-for-supermajority 0` flag, which is what unblocks the single-validator
+# tower-BFT deadlock (the validator can't land its first vote without it — the
+# threshold check rejects every vote with FailedThreshold(_, _, 0, total_stake)).
+# This is the same recipe jito-solana's `bootstrap` script and agave's
+# `multinode-demo/bootstrap-validator.sh` use.
 BANK_HASH=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" bank-hash 2>/dev/null | tail -1)
 if [[ -z "$BANK_HASH" ]]; then
   echo "[init] FATAL: $LEDGER_TOOL_BIN bank-hash returned empty; ledger may be malformed" >&2
