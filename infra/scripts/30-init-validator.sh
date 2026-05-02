@@ -160,11 +160,19 @@ echo "[init] (verify stdout):"
 printf '%s\n' "$BANK_HASH_STDOUT" | sed 's/^/[init]   /'
 echo "[init] (verify stderr, last 8 lines):"
 tail -8 /tmp/bank-hash.stderr 2>/dev/null | sed 's/^/[init]   /'
-# A bank hash on its own line — excludes hashes that show up as "...: <hash>" in
-# log prefixes, since those have a leading space/colon that breaks the anchor.
+# Output format on agave 2.0.25:
+#   `Bank hash for slot 0: <base58>`
+# (one line on stdout). Extract the hash via awk taking the last field of the
+# matching line — robust against the hash being on its own or prefixed.
 BANK_HASH=$(printf '%s\n' "$BANK_HASH_STDOUT" \
-  | grep -E '^[1-9A-HJ-NP-Za-km-z]{32,44}$' \
+  | awk '/^Bank hash for slot [0-9]+:/ {print $NF}' \
   | tail -1)
+# Fallback: if the format ever changes back to a bare hash on its own line.
+if [[ -z "$BANK_HASH" ]]; then
+  BANK_HASH=$(printf '%s\n' "$BANK_HASH_STDOUT" \
+    | grep -E '^[1-9A-HJ-NP-Za-km-z]{32,44}$' \
+    | tail -1)
+fi
 if [[ -z "$BANK_HASH" ]]; then
   echo "[init] FATAL: could not extract a base58 bank hash from verify stdout" >&2
   echo "[init]        check stderr above; common causes:" >&2
