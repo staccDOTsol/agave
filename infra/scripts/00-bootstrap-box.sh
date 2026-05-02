@@ -37,6 +37,9 @@ if [[ -d "$SOLANA_BIN_DIR" ]]; then
              solana solana-keygen solana-genesis solana-ledger-tool \
              solana-test-validator; do
     if [[ -x "$SOLANA_BIN_DIR/$bin" ]]; then
+      # rm first so a stale symlink from an earlier run doesn't trip cp's
+      # "source and destination are the same file" detection.
+      rm -f "/usr/local/bin/$bin"
       cp -p "$SOLANA_BIN_DIR/$bin" "/usr/local/bin/$bin"
       chmod 755 "/usr/local/bin/$bin"
     fi
