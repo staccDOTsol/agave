@@ -35,6 +35,7 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-wait-for-vote-to-start-leader \
   --wait-for-supermajority 0 \
   --expected-bank-hash ${BANK_HASH} \
+  --expected-shred-version ${SHRED_VERSION} \
   --full-rpc-api \
   --allow-private-addr \
   --rpc-port 8899 \

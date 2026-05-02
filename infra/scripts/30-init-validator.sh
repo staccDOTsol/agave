@@ -144,6 +144,20 @@ if [[ -z "$BANK_HASH" ]]; then
 fi
 echo "[init] bank-0 hash:   $BANK_HASH"
 
+# Shred version is derived from the genesis hash via
+# `solana_sdk::shred_version::version_from_hash`. The validator REQUIRES
+# `--expected-shred-version` whenever `--wait-for-supermajority` is set; without it
+# the agave-validator CLI parser dumps its full required-args list and exits.
+# `agave-ledger-tool shred-version` prints the same value the runtime computes
+# internally — pin the validator to it so the supermajority gate doesn't reject the
+# local bank as a wrong-fork peer.
+SHRED_VERSION=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" shred-version 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+if [[ -z "$SHRED_VERSION" ]]; then
+  echo "[init] FATAL: $LEDGER_TOOL_BIN shred-version returned empty/unparseable" >&2
+  exit 1
+fi
+echo "[init] shred version:  $SHRED_VERSION"
+
 # Write the bank hash to a systemd-readable env file. The validator unit
 # (infra/systemd/staccana-validator.service) consumes this via
 # `EnvironmentFile=-/etc/staccana/bank-hash` so `--expected-bank-hash $BANK_HASH`
@@ -153,6 +167,7 @@ mkdir -p /etc/staccana
 cat > /etc/staccana/bank-hash <<EOF
 BANK_HASH=$BANK_HASH
 GENESIS_HASH=$GENESIS_HASH
+SHRED_VERSION=$SHRED_VERSION
 EOF
 chmod 644 /etc/staccana/bank-hash
 echo "[init] wrote /etc/staccana/bank-hash"
