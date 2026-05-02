@@ -32,6 +32,11 @@ Environment="STACCANA_VAL2_GOSSIP=84.32.220.76:8001"
 # side effect of making gossip prioritize this peer for vote propagation.
 Environment="STACCANA_VAL2_IDENTITY=PLACEHOLDER_REPLACE_WITH_VAL2_IDENTITY_PUBKEY"
 
+# /etc/staccana/bank-hash provides BANK_HASH, GENESIS_HASH, SHRED_VERSION (written
+# by step 30 via `agave-ledger-tool verify --print-bank-hash` and `shred-version`).
+# The leading `-` makes systemd tolerate the file being missing on first run.
+EnvironmentFile=-/etc/staccana/bank-hash
+
 ExecStart=/usr/local/bin/agave-validator \
   --identity /etc/staccana/keys/identity.json \
   --vote-account /etc/staccana/keys/vote.json \
@@ -44,6 +49,7 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-os-network-limits-test \
   --no-port-check \
   --no-wait-for-vote-to-start-leader \
+  --expected-shred-version ${SHRED_VERSION} \
   --gossip-host ${STACCANA_THIS_PUBLIC_IP} \
   --entrypoint ${STACCANA_VAL2_GOSSIP} \
   --full-rpc-api \

@@ -25,6 +25,10 @@ Environment="STACCANA_THIS_PUBLIC_IP=84.32.220.76"
 # val-bootstrap (cunning-raptor) Cherryservers box.
 Environment="STACCANA_VAL1_GOSSIP=84.32.220.211:8001"
 
+# /etc/staccana/bank-hash provides SHRED_VERSION (rsync'd from box 1 by step 35).
+# The leading `-` lets systemd tolerate the file being missing on first run.
+EnvironmentFile=-/etc/staccana/bank-hash
+
 ExecStart=/usr/local/bin/agave-validator \
   --identity /etc/staccana/keys-2/identity.json \
   --vote-account /etc/staccana/keys-2/vote.json \
@@ -37,6 +41,7 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-os-network-limits-test \
   --no-port-check \
   --no-wait-for-vote-to-start-leader \
+  --expected-shred-version ${SHRED_VERSION} \
   --gossip-host ${STACCANA_THIS_PUBLIC_IP} \
   --entrypoint ${STACCANA_VAL1_GOSSIP} \
   --full-rpc-api \

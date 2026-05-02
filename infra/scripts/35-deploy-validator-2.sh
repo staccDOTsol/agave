@@ -53,6 +53,15 @@ rsync -avz --delete -e "$VAL2_RSYNC_RSH" \
   "$KEYS_2_DIR/" \
   "$VAL2_USER@$VAL2_HOST:$KEYS_2_DIR/"
 
+echo "[deploy] pushing /etc/staccana/bank-hash (BANK_HASH, SHRED_VERSION env file)"
+if [[ -f /etc/staccana/bank-hash ]]; then
+  rsync -avz -e "$VAL2_RSYNC_RSH" \
+    /etc/staccana/bank-hash \
+    "$VAL2_USER@$VAL2_HOST:/etc/staccana/bank-hash"
+else
+  echo "[deploy] WARNING: /etc/staccana/bank-hash missing on val1 — re-run step 30" >&2
+fi
+
 echo "[deploy] pushing validator-2 systemd unit"
 rsync -avz -e "$VAL2_RSYNC_RSH" \
   "$STACCANA_DIR/infra/systemd/staccana-validator-2.service" \
