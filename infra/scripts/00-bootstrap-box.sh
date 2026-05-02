@@ -27,15 +27,18 @@ if ! command -v solana >/dev/null; then
   echo 'export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"' >> /root/.bashrc
 fi
 
-# 2b. Symlink Solana binaries into /usr/local/bin so systemd units (which don't source
-# ~/.bashrc) can find them. Idempotent; -sf overwrites existing links.
+# 2b. Copy Solana binaries into /usr/local/bin so systemd units (which run as the
+# unprivileged `staccana` user) can find AND execute them. We *copy* rather than symlink
+# because /root/ is mode 700; symlinks into it work for root but the staccana user can't
+# traverse the path. Costs ~500MB of disk; trivial vs the 1.7TB+ NVMe.
 SOLANA_BIN_DIR="/root/.local/share/solana/install/active_release/bin"
 if [[ -d "$SOLANA_BIN_DIR" ]]; then
   for bin in agave-validator agave-validator-genesis agave-ledger-tool \
              solana solana-keygen solana-genesis solana-ledger-tool \
              solana-test-validator; do
     if [[ -x "$SOLANA_BIN_DIR/$bin" ]]; then
-      ln -sf "$SOLANA_BIN_DIR/$bin" "/usr/local/bin/$bin"
+      cp -p "$SOLANA_BIN_DIR/$bin" "/usr/local/bin/$bin"
+      chmod 755 "/usr/local/bin/$bin"
     fi
   done
 fi
