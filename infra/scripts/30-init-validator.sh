@@ -137,9 +137,21 @@ echo "[init] genesis hash: $GENESIS_HASH"
 # threshold check rejects every vote with FailedThreshold(_, _, 0, total_stake)).
 # This is the same recipe jito-solana's `bootstrap` script and agave's
 # `multinode-demo/bootstrap-validator.sh` use.
-BANK_HASH=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" bank-hash 2>/dev/null | tail -1)
+# `bank-hash` replays the ledger and prints the hash of the working bank. agave
+# 2.x writes useful info on BOTH stdout and stderr; capture both so the parse can
+# pick up the hash regardless. Format is typically `<base58>` alone on stdout, but
+# some agave builds emit `Bank hash: <base58>` on stderr instead — handle both.
+echo "[init] computing bank-0 hash via $LEDGER_TOOL_BIN bank-hash..."
+BANK_HASH_RAW=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" bank-hash --halt-at-slot 0 2>&1 || true)
+echo "[init] (raw bank-hash output below, for debugging):"
+echo "$BANK_HASH_RAW" | sed 's/^/[init]   /'
+# Try several extraction patterns — stdout-only, "Bank hash: <hash>", "bank-hash <hash>".
+BANK_HASH=$(printf '%s\n' "$BANK_HASH_RAW" \
+  | grep -oE '[1-9A-HJ-NP-Za-km-z]{32,44}' \
+  | tail -1)
 if [[ -z "$BANK_HASH" ]]; then
-  echo "[init] FATAL: $LEDGER_TOOL_BIN bank-hash returned empty; ledger may be malformed" >&2
+  echo "[init] FATAL: could not extract a base58 bank hash from $LEDGER_TOOL_BIN output above" >&2
+  echo "[init]        try: $LEDGER_TOOL_BIN -l $LEDGER_DIR bank-hash --help" >&2
   exit 1
 fi
 echo "[init] bank-0 hash:   $BANK_HASH"
@@ -151,9 +163,14 @@ echo "[init] bank-0 hash:   $BANK_HASH"
 # `agave-ledger-tool shred-version` prints the same value the runtime computes
 # internally — pin the validator to it so the supermajority gate doesn't reject the
 # local bank as a wrong-fork peer.
-SHRED_VERSION=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" shred-version 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+echo "[init] computing shred version via $LEDGER_TOOL_BIN shred-version..."
+SHRED_VERSION_RAW=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" shred-version 2>&1 || true)
+echo "[init] (raw shred-version output below, for debugging):"
+echo "$SHRED_VERSION_RAW" | sed 's/^/[init]   /'
+SHRED_VERSION=$(printf '%s\n' "$SHRED_VERSION_RAW" | grep -oE '[0-9]+' | tail -1)
 if [[ -z "$SHRED_VERSION" ]]; then
-  echo "[init] FATAL: $LEDGER_TOOL_BIN shred-version returned empty/unparseable" >&2
+  echo "[init] FATAL: could not extract a shred version integer from output above" >&2
+  echo "[init]        try: $LEDGER_TOOL_BIN -l $LEDGER_DIR shred-version --help" >&2
   exit 1
 fi
 echo "[init] shred version:  $SHRED_VERSION"
