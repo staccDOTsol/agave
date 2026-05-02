@@ -17,10 +17,20 @@ RestartSec=10s
 Environment="RUST_LOG=solana=info,solana_metrics=warn"
 Environment="SOLANA_METRICS_CONFIG=host=https://metrics.example,db=staccana,u=writer,p=changeme"
 
+# --gossip-host: this validator's PUBLIC IP, advertised over gossip. Required
+# when --entrypoint is set so the validator can start without first contacting
+# the entrypoint to ask "what's my public IP?" — that lookup fails when the
+# entrypoint isn't reachable yet, which is the bootstrap chicken-and-egg.
+Environment="STACCANA_THIS_PUBLIC_IP=84.32.220.211"
 # Address of validator-2's gossip endpoint, used as our entrypoint so the two
 # validators discover each other. Default 84.32.220.76:8001 = the hip-jawfish
 # Cherryservers box. Override via env var if you put validator-2 elsewhere.
 Environment="STACCANA_VAL2_GOSSIP=84.32.220.76:8001"
+# --known-validator pins the peer's identity pubkey. Without it, the validator
+# would only fetch a snapshot from validators it has been told are trusted —
+# we don't fetch snapshots in genesis-bootstrap mode, but the flag also has the
+# side effect of making gossip prioritize this peer for vote propagation.
+Environment="STACCANA_VAL2_IDENTITY=PLACEHOLDER_REPLACE_WITH_VAL2_IDENTITY_PUBKEY"
 
 ExecStart=/usr/local/bin/agave-validator \
   --identity /etc/staccana/keys/identity.json \
@@ -33,6 +43,7 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-poh-speed-test \
   --no-os-network-limits-test \
   --no-wait-for-vote-to-start-leader \
+  --gossip-host ${STACCANA_THIS_PUBLIC_IP} \
   --entrypoint ${STACCANA_VAL2_GOSSIP} \
   --full-rpc-api \
   --allow-private-addr \

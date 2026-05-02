@@ -16,9 +16,13 @@ RestartSec=10s
 Environment="RUST_LOG=solana=info,solana_metrics=warn"
 Environment="SOLANA_METRICS_CONFIG=host=https://metrics.example,db=staccana,u=writer,p=changeme"
 
+# --gossip-host: validator-2's PUBLIC IP. Required when --entrypoint is set so
+# the validator can start before the entrypoint is reachable (bootstrap chicken-
+# and-egg). Without this, the validator exits with "Unable to determine the
+# validator's public IP address" and systemd restart-loops.
+Environment="STACCANA_THIS_PUBLIC_IP=84.32.220.76"
 # Address of validator-1's gossip endpoint. Default 84.32.220.211:8001 = the
-# val-bootstrap (cunning-raptor) Cherryservers box. Override via env var if you
-# put validator-1 elsewhere or this unit ends up on a different box than validator-2.
+# val-bootstrap (cunning-raptor) Cherryservers box.
 Environment="STACCANA_VAL1_GOSSIP=84.32.220.211:8001"
 
 ExecStart=/usr/local/bin/agave-validator \
@@ -32,6 +36,7 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-poh-speed-test \
   --no-os-network-limits-test \
   --no-wait-for-vote-to-start-leader \
+  --gossip-host ${STACCANA_THIS_PUBLIC_IP} \
   --entrypoint ${STACCANA_VAL1_GOSSIP} \
   --full-rpc-api \
   --allow-private-addr \
