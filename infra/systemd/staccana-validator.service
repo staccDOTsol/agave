@@ -51,6 +51,8 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-wait-for-vote-to-start-leader \
   --expected-shred-version ${SHRED_VERSION} \
   --gossip-host ${STACCANA_THIS_PUBLIC_IP} \
+  --public-tpu-address ${STACCANA_THIS_PUBLIC_IP}:8005 \
+  --public-tpu-forwards-address ${STACCANA_THIS_PUBLIC_IP}:8006 \
   --entrypoint ${STACCANA_VAL2_GOSSIP} \
   --full-rpc-api \
   --allow-private-addr \
