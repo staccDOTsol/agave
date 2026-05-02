@@ -27,11 +27,26 @@ ExecStart=/usr/local/bin/agave-validator \
   --limit-ledger-size 200000000 \
   --no-poh-speed-test \
   --no-os-network-limits-test \
+  --no-wait-for-vote-to-start-leader \
+  --full-rpc-api \
+  --allow-private-addr \
   --rpc-port 8899 \
   --rpc-bind-address 127.0.0.1 \
   --gossip-port 8001 \
   --dynamic-port-range 8002-8020 \
   --log /var/log/staccana/validator.log
+
+# --no-wait-for-vote-to-start-leader: bypasses the cold-start interlock that prevents
+#   a fresh validator from producing its first leader slot until it has landed a vote.
+#   In a multi-validator cluster this prevents fork divergence; in a single-validator
+#   bootstrap it deadlocks at slot 0 ("Haven't landed a vote, so skipping my leader
+#   slot" forever). Required for solo bootstrap of mainnet-sigma launch night and for
+#   the val-bootstrap devnet shake-out. Once val-eu / val-apac join, this can stay on
+#   for the bootstrap node — the flag is safe in the steady state.
+# --full-rpc-api: enables the full set of RPC methods (getBlock with rewards, getStakes,
+#   etc) that the explorer + bridge UIs need.
+# --allow-private-addr: permits gossip with peers on RFC1918 private addresses, which
+#   is what we'll use when val-eu / val-apac join over wireguard or a private VPC.
 
 [Install]
 WantedBy=multi-user.target
