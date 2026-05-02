@@ -27,6 +27,19 @@ if ! command -v solana >/dev/null; then
   echo 'export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"' >> /root/.bashrc
 fi
 
+# 2b. Symlink Solana binaries into /usr/local/bin so systemd units (which don't source
+# ~/.bashrc) can find them. Idempotent; -sf overwrites existing links.
+SOLANA_BIN_DIR="/root/.local/share/solana/install/active_release/bin"
+if [[ -d "$SOLANA_BIN_DIR" ]]; then
+  for bin in agave-validator agave-validator-genesis agave-ledger-tool \
+             solana solana-keygen solana-genesis solana-ledger-tool \
+             solana-test-validator; do
+    if [[ -x "$SOLANA_BIN_DIR/$bin" ]]; then
+      ln -sf "$SOLANA_BIN_DIR/$bin" "/usr/local/bin/$bin"
+    fi
+  done
+fi
+
 # 3. Rust toolchain (only if building from source on this box)
 if ! command -v cargo >/dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable

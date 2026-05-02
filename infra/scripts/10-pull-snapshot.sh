@@ -26,7 +26,6 @@ agave-validator \
   --entrypoint entrypoint.mainnet-beta.solana.com:8001 \
   --entrypoint entrypoint2.mainnet-beta.solana.com:8001 \
   --entrypoint entrypoint3.mainnet-beta.solana.com:8001 \
-  --no-snapshot-fetch-error \
   --maximum-local-snapshot-age 9999 \
   --snapshot-fetch-only
 
