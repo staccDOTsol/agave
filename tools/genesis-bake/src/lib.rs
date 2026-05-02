@@ -93,9 +93,10 @@ pub use pdas::{
 };
 
 /// Default lamport allocation for each of the bootstrap-validator-related accounts
-/// (identity, vote, stake, faucet). Matches the value `infra/scripts/30-init-validator.sh`
-/// passed to vanilla `solana-genesis` (`--bootstrap-validator-lamports 1000000000`).
-pub const BOOTSTRAP_LAMPORTS: u64 = 1_000_000_000;
+/// (identity, vote, stake, faucet). Bumped from 1 SOL → 1000 SOL so the validator
+/// identities have enough lamports to pay the rent for deploying our 5 programs
+/// (~8 SOL total across all .so binaries; bridge alone needs ~2.3 SOL).
+pub const BOOTSTRAP_LAMPORTS: u64 = 1_000_000_000_000;
 
 /// All inputs required to bake the genesis. Assembled by [`load_inputs_from_paths`] (or
 /// constructed by hand in tests).
