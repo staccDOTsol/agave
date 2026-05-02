@@ -35,6 +35,7 @@ ExecStart=/usr/local/bin/agave-validator \
   --limit-ledger-size 200000000 \
   --no-poh-speed-test \
   --no-os-network-limits-test \
+  --no-port-check \
   --no-wait-for-vote-to-start-leader \
   --gossip-host ${STACCANA_THIS_PUBLIC_IP} \
   --entrypoint ${STACCANA_VAL1_GOSSIP} \
