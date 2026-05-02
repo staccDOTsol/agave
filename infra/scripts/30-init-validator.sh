@@ -20,8 +20,9 @@ COMPOSED="${COMPOSED:-$GENESIS_DIR/composed-genesis.json}"
 mkdir -p "$KEY_DIR" "$LEDGER_DIR"
 chmod 700 "$KEY_DIR"
 
-# 1. Generate the three core keypairs. Idempotent — never overwrites existing keys.
-for k in identity vote stake; do
+# 1. Generate the four core keypairs. Idempotent — never overwrites existing keys.
+# faucet is required by solana-genesis 2.0.25 even when we don't actually use one.
+for k in identity vote stake faucet; do
   if [[ ! -f "$KEY_DIR/$k.json" ]]; then
     solana-keygen new --no-passphrase --silent --outfile "$KEY_DIR/$k.json"
     echo "[init] generated $k keypair: $(solana-keygen pubkey $KEY_DIR/$k.json)"
@@ -31,10 +32,12 @@ done
 IDENTITY=$(solana-keygen pubkey "$KEY_DIR/identity.json")
 VOTE=$(solana-keygen pubkey "$KEY_DIR/vote.json")
 STAKE=$(solana-keygen pubkey "$KEY_DIR/stake.json")
+FAUCET=$(solana-keygen pubkey "$KEY_DIR/faucet.json")
 
 echo "[init] identity=$IDENTITY"
 echo "[init] vote    =$VOTE"
 echo "[init] stake   =$STAKE"
+echo "[init] faucet  =$FAUCET (placeholder — staccana doesn't run a faucet)"
 
 # 2. Pull staccana-specific params from composed-genesis.json (fee governor, inflation,
 # treasury lamports, claimable_root). These were produced by step 20-build-genesis.sh.
@@ -61,6 +64,8 @@ solana-genesis \
   --target-signatures-per-slot 0 \
   --inflation none \
   --cluster-type development \
+  --faucet-pubkey "$KEY_DIR/faucet.json" \
+  --faucet-lamports 0 \
   --ledger "$LEDGER_DIR"
 
 GENESIS_HASH=$(solana-ledger-tool -l "$LEDGER_DIR" genesis-hash 2>/dev/null | tail -1)
