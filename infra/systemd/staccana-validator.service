@@ -53,7 +53,6 @@ ExecStart=/usr/local/bin/agave-validator \
   --expected-shred-version ${SHRED_VERSION} \
   --bind-address ${STACCANA_THIS_PUBLIC_IP} \
   --gossip-host ${STACCANA_THIS_PUBLIC_IP} \
-  --entrypoint ${STACCANA_VAL2_GOSSIP} \
   --full-rpc-api \
   --allow-private-addr \
   --rpc-port 8899 \
