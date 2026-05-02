@@ -15,7 +15,12 @@
 #
 # Output:
 #   - $LEDGER_DIR/genesis.bin             validator-bootable genesis
+#   - $LEDGER_DIR/genesis.tar.bz2         tar+bzip2 of genesis.bin + rocksdb (snapshot bootstrap)
+#   - $LEDGER_DIR/rocksdb/                blockstore pre-seeded with slot 0 ticks
 #   - $GENESIS_DIR/post-boot-state.json   metadata stash for steps 40-50
+#
+# NOTE: genesis-bake destroys any existing $LEDGER_DIR contents (Blockstore::destroy
+# is idempotent), so re-runs are safe. Don't pre-wipe.
 #
 # IMPORTANT: the .so artifacts must exist before this script runs. Build them via
 # step 25 (or wherever `cargo build-sbf` / `anchor build` lives in the deploy
@@ -32,6 +37,11 @@ GENESIS_DIR="${GENESIS_DIR:-/var/lib/staccana/genesis}"
 COMPOSED="${COMPOSED:-$GENESIS_DIR/composed-genesis.json}"
 STACCANA_DIR="${STACCANA_DIR:-/opt/staccana}"
 SO_DIR="${SO_DIR:-$STACCANA_DIR/target/deploy}"
+# CLUSTER_TYPE controls the cluster_type field baked into genesis. For tonight's
+# devnet shake-out: development. For the real mainnet-sigma launch (2026-05-16):
+# mainnet-beta. Override via env var if needed. Valid values:
+#   development | devnet | testnet | mainnet-beta
+CLUSTER_TYPE="${CLUSTER_TYPE:-development}"
 
 mkdir -p "$KEY_DIR" "$LEDGER_DIR"
 chmod 700 "$KEY_DIR"
@@ -95,8 +105,9 @@ cargo run --release \
   --vote-keypair        "$KEY_DIR/vote.json" \
   --stake-keypair       "$KEY_DIR/stake.json" \
   --faucet-keypair      "$KEY_DIR/faucet.json" \
+  --cluster-type        "$CLUSTER_TYPE" \
   "${SO_FLAGS[@]}" \
-  --output-genesis      "$LEDGER_DIR/genesis.bin"
+  --output-ledger-dir   "$LEDGER_DIR"
 
 GENESIS_HASH=$(solana-ledger-tool -l "$LEDGER_DIR" genesis-hash 2>/dev/null | tail -1)
 echo "[init] staccana ledger initialized at $LEDGER_DIR"

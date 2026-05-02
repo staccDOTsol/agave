@@ -78,6 +78,7 @@ pub mod programs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use solana_cluster_type::ClusterType;
 use solana_genesis_config::GenesisConfig;
 use solana_keypair::{read_keypair_file, Keypair};
 use solana_pubkey::Pubkey;
@@ -103,12 +104,20 @@ pub const BOOTSTRAP_LAMPORTS: u64 = 1_000_000_000;
 /// supplied; in dev / staging it's useful to skip programs whose binary hasn't been
 /// built yet — the chain still boots, those programs just need a post-boot
 /// `solana program deploy` to materialize.
+///
+/// `cluster_type` controls which `ClusterType` enum variant is baked into the
+/// `GenesisConfig`. The runtime branches on this for things like default warmup
+/// behavior and feature-gate auto-activation; for the mainnet-sigma launch this
+/// will be `MainnetBeta`, but for the devnet shake-out tonight we want
+/// `Development` so the validator doesn't try to apply mainnet-only invariants
+/// to a single-node throwaway chain. Default is `Development`.
 pub struct BakeInputs {
     pub composed: ComposedGenesis,
     pub identity: Keypair,
     pub vote: Keypair,
     pub stake: Keypair,
     pub faucet: Keypair,
+    pub cluster_type: ClusterType,
     pub lazy_claim_so: Option<PathBuf>,
     pub bridge_so: Option<PathBuf>,
     pub secret_pump_so: Option<PathBuf>,
@@ -164,6 +173,7 @@ pub fn load_inputs_from_paths(
     vote: impl AsRef<Path>,
     stake: impl AsRef<Path>,
     faucet: impl AsRef<Path>,
+    cluster_type: ClusterType,
     lazy_claim_so: Option<PathBuf>,
     bridge_so: Option<PathBuf>,
     secret_pump_so: Option<PathBuf>,
@@ -176,6 +186,7 @@ pub fn load_inputs_from_paths(
         vote: load_keypair(vote)?,
         stake: load_keypair(stake)?,
         faucet: load_keypair(faucet)?,
+        cluster_type,
         lazy_claim_so,
         bridge_so,
         secret_pump_so,

@@ -11,11 +11,13 @@
 //! ready for `GenesisConfig::write` (or `bincode::serialize_into`) — see [`crate::emit`].
 
 use anyhow::{Context, Result};
-use solana_cluster_type::ClusterType;
 use solana_fee_calculator::FeeRateGovernor;
 use solana_genesis_config::GenesisConfig;
 use solana_inflation::Inflation;
 use solana_pubkey::Pubkey;
+// `ClusterType` is referenced by tests below; the production code path consumes it
+// via `inputs.cluster_type` (typed at the BakeInputs boundary in `lib.rs`), so no
+// module-level import is needed for the non-test build.
 
 use staccana_genesis::FeeRateGovernor as ComposedFeeGovernor;
 
@@ -90,7 +92,7 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
     let mut config = GenesisConfig {
         fee_rate_governor,
         inflation,
-        cluster_type: ClusterType::MainnetBeta,
+        cluster_type: inputs.cluster_type,
         ..GenesisConfig::default()
     };
 
@@ -232,6 +234,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_cluster_type::ClusterType;
     use solana_keypair::Keypair;
     use solana_signer::Signer;
     use staccana_genesis_emit::{ActiveFeatureGate, ComposedGenesis, LazyClaimGenesisAccount};
@@ -268,12 +271,38 @@ mod tests {
             vote: Keypair::new(),
             stake: Keypair::new(),
             faucet: Keypair::new(),
+            // Tests pin to MainnetBeta to preserve the existing assertions and so
+            // the production-target invariants (capitalization math, etc) are the
+            // ones being exercised. The CLI default is Development, but the
+            // assemble_genesis_config function itself is cluster-type-agnostic.
+            cluster_type: ClusterType::MainnetBeta,
             lazy_claim_so: None,
             bridge_so: None,
             secret_pump_so: None,
             validator_subsidy_so: None,
             megadrop_so: None,
         }
+    }
+
+    #[test]
+    fn assemble_propagates_cluster_type_from_inputs() {
+        // Regression check on the cluster_type wiring: changing
+        // `BakeInputs.cluster_type` must change `GenesisConfig.cluster_type`
+        // byte-for-byte. The previous version of this crate ignored the field and
+        // hardcoded MainnetBeta, which gave the devnet shake-out a genesis labeled
+        // "MainnetBeta" — confusing and incorrect.
+        let mut inputs = synthetic_inputs();
+        inputs.cluster_type = ClusterType::Development;
+        let (config, _) = assemble_genesis_config(&inputs).expect("assemble");
+        assert_eq!(config.cluster_type, ClusterType::Development);
+
+        inputs.cluster_type = ClusterType::Devnet;
+        let (config, _) = assemble_genesis_config(&inputs).expect("assemble");
+        assert_eq!(config.cluster_type, ClusterType::Devnet);
+
+        inputs.cluster_type = ClusterType::MainnetBeta;
+        let (config, _) = assemble_genesis_config(&inputs).expect("assemble");
+        assert_eq!(config.cluster_type, ClusterType::MainnetBeta);
     }
 
     #[test]

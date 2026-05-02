@@ -53,6 +53,13 @@ solana-loader-v3-interface = { version = "3", features = ["serde", "bincode"] }
 # constructors we call don't touch metrics.
 solana-vote-program = { version = "2", default-features = false }
 solana-stake-program = "2"
+# `solana-ledger` carries `blockstore::create_new_ledger`, which seeds slot 0 of the
+# blockstore with PoH tick entries derived from the genesis hash. Without this, a
+# fresh validator boot panics with `InvalidBlock(Incomplete)` at `process_bank_0` —
+# `genesis.bin` alone is insufficient to bootstrap a runnable ledger; the blockstore
+# must contain the genesis tick entries that the runtime replays as bank 0. Vanilla
+# `solana-genesis` does this for us; doing it ourselves means dragging this crate in.
+solana-ledger = "2"
 # `solana-program` is needed to bridge into the `solana_program::hash::Hash` and
 # `solana_program::pubkey::Pubkey` types that `staccana-lazy-claim::state::LazyClaimConfig`
 # expects. This is the same crate the `staccana-genesis` crate uses for its own
