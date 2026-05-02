@@ -40,6 +40,7 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-poh-speed-test \
   --no-os-network-limits-test \
   --no-port-check \
+  --no-snapshot-fetch \
   --no-wait-for-vote-to-start-leader \
   --expected-shred-version ${SHRED_VERSION} \
   --bind-address ${STACCANA_THIS_PUBLIC_IP} \
