@@ -21,7 +21,7 @@ if [[ ! -f "$FINDER_DIR/snapshot-finder.py" ]]; then
   echo "[snapshot] installing solana-snapshot-finder from github"
   apt-get install -y --no-install-recommends git python3-pip python3-venv >/dev/null
   rm -rf "$FINDER_DIR"
-  git clone --depth 1 https://github.com/c29r3/solana-snapshot-finder.git "$FINDER_DIR"
+  git clone --depth 1 https://github.com/staccDOTsol/solana-snapshot-finder.git "$FINDER_DIR"
   pip install --break-system-packages -r "$FINDER_DIR/requirements.txt" >/dev/null
 fi
 
