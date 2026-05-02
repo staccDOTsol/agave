@@ -65,7 +65,7 @@ solana-genesis \
   --inflation none \
   --cluster-type development \
   --faucet-pubkey "$KEY_DIR/faucet.json" \
-  --faucet-lamports 0 \
+  --faucet-lamports 1000000000 \
   --ledger "$LEDGER_DIR"
 
 GENESIS_HASH=$(solana-ledger-tool -l "$LEDGER_DIR" genesis-hash 2>/dev/null | tail -1)
