@@ -48,10 +48,17 @@ ExecStart=/usr/local/bin/agave-validator \
   --full-rpc-api \
   --allow-private-addr \
   --rpc-port 8899 \
-  --rpc-bind-address 0.0.0.0 \
+  --rpc-bind-address 127.0.0.1 \
   --gossip-port 8001 \
   --dynamic-port-range 8002-8020 \
   --log /var/log/staccana/validator.log
+
+# --rpc-bind-address 127.0.0.1: bind RPC to localhost only. If we bind to
+# 0.0.0.0, agave runs an ip_echo_server reachability check on the public IP
+# for ports 8899/8900 — which fails on Cherryservers (port-policy blocks
+# 8899/8900 inter-host even though there's no UFW rule), and the validator
+# exits and restart-loops. Localhost binding skips the public-reachability
+# check, RPC stays up for explorer / UIs hitting it from the same box.
 
 # Multi-validator bootstrap (vs the failed solo-bootstrap attempt with --wait-for-
 # supermajority): with two staked validators in the genesis bank, both can clear the
