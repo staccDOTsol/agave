@@ -33,7 +33,7 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-poh-speed-test \
   --no-os-network-limits-test \
   --no-wait-for-vote-to-start-leader \
-  --wait-for-supermajority 0 \
+  --wait-for-supermajority 1 \
   --expected-bank-hash ${BANK_HASH} \
   --expected-shred-version ${SHRED_VERSION} \
   --full-rpc-api \
