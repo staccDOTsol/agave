@@ -137,12 +137,12 @@ echo "[init] genesis hash: $GENESIS_HASH"
 # threshold check rejects every vote with FailedThreshold(_, _, 0, total_stake)).
 # This is the same recipe jito-solana's `bootstrap` script and agave's
 # `multinode-demo/bootstrap-validator.sh` use.
-# `bank-hash` replays the ledger and prints the hash of the working bank. agave
-# 2.x writes useful info on BOTH stdout and stderr; capture both so the parse can
-# pick up the hash regardless. Format is typically `<base58>` alone on stdout, but
-# some agave builds emit `Bank hash: <base58>` on stderr instead — handle both.
-echo "[init] computing bank-0 hash via $LEDGER_TOOL_BIN bank-hash..."
-BANK_HASH_RAW=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" bank-hash --halt-at-slot 0 2>&1 || true)
+# `bank-hash` was deprecated in agave 2.0.x in favor of `verify --print-bank-hash`.
+# `verify --halt-at-slot 0 --print-bank-hash` replays just bank 0 and prints the
+# resulting bank hash on stderr (most ledger-tool subcommands log to stderr; only
+# the actual program output goes to stdout). Capture both streams.
+echo "[init] computing bank-0 hash via $LEDGER_TOOL_BIN verify --print-bank-hash..."
+BANK_HASH_RAW=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" verify --halt-at-slot 0 --print-bank-hash 2>&1 || true)
 echo "[init] (raw bank-hash output below, for debugging):"
 echo "$BANK_HASH_RAW" | sed 's/^/[init]   /'
 # Try several extraction patterns — stdout-only, "Bank hash: <hash>", "bank-hash <hash>".
