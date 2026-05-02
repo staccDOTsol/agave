@@ -138,20 +138,38 @@ echo "[init] genesis hash: $GENESIS_HASH"
 # This is the same recipe jito-solana's `bootstrap` script and agave's
 # `multinode-demo/bootstrap-validator.sh` use.
 # `bank-hash` was deprecated in agave 2.0.x in favor of `verify --print-bank-hash`.
-# `verify --halt-at-slot 0 --print-bank-hash` replays just bank 0 and prints the
-# resulting bank hash on stderr (most ledger-tool subcommands log to stderr; only
-# the actual program output goes to stdout). Capture both streams.
+# Two complications on agave 2.0.25 reading a blockstore created by our 2.3.x
+# `solana-ledger` dep:
+#   1. The tool's blockstore opener strict-checks for the `program_costs` column
+#      family which 2.3.x dropped — without `--force-update-to-open`, the tool
+#      exits before even getting to the verify pass. The flag lets it migrate the
+#      blockstore on the fly so it matches what 2.0.25 expects.
+#   2. env_logger writes log lines to stderr; the actual `bank.hash()` output goes
+#      to stdout via `println!`. The previous version of this script merged the
+#      streams with `2>&1` and then `grep`'d any base58-looking string — which
+#      matched the genesis hash printed in a log line, NOT the bank hash. We now
+#      capture them separately and only extract a base58 hash that lives on a
+#      line by itself (program output, no log prefix).
 echo "[init] computing bank-0 hash via $LEDGER_TOOL_BIN verify --print-bank-hash..."
-BANK_HASH_RAW=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" verify --halt-at-slot 0 --print-bank-hash 2>&1 || true)
-echo "[init] (raw bank-hash output below, for debugging):"
-echo "$BANK_HASH_RAW" | sed 's/^/[init]   /'
-# Try several extraction patterns — stdout-only, "Bank hash: <hash>", "bank-hash <hash>".
-BANK_HASH=$(printf '%s\n' "$BANK_HASH_RAW" \
-  | grep -oE '[1-9A-HJ-NP-Za-km-z]{32,44}' \
+BANK_HASH_STDOUT=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" verify \
+  --halt-at-slot 0 \
+  --print-bank-hash \
+  --force-update-to-open \
+  2>/tmp/bank-hash.stderr || true)
+echo "[init] (verify stdout):"
+printf '%s\n' "$BANK_HASH_STDOUT" | sed 's/^/[init]   /'
+echo "[init] (verify stderr, last 8 lines):"
+tail -8 /tmp/bank-hash.stderr 2>/dev/null | sed 's/^/[init]   /'
+# A bank hash on its own line — excludes hashes that show up as "...: <hash>" in
+# log prefixes, since those have a leading space/colon that breaks the anchor.
+BANK_HASH=$(printf '%s\n' "$BANK_HASH_STDOUT" \
+  | grep -E '^[1-9A-HJ-NP-Za-km-z]{32,44}$' \
   | tail -1)
 if [[ -z "$BANK_HASH" ]]; then
-  echo "[init] FATAL: could not extract a base58 bank hash from $LEDGER_TOOL_BIN output above" >&2
-  echo "[init]        try: $LEDGER_TOOL_BIN -l $LEDGER_DIR bank-hash --help" >&2
+  echo "[init] FATAL: could not extract a base58 bank hash from verify stdout" >&2
+  echo "[init]        check stderr above; common causes:" >&2
+  echo "[init]          - agave version mismatch (try $LEDGER_TOOL_BIN --version)" >&2
+  echo "[init]          - rocksdb permission issues (chown -R staccana:staccana)" >&2
   exit 1
 fi
 echo "[init] bank-0 hash:   $BANK_HASH"
@@ -163,14 +181,28 @@ echo "[init] bank-0 hash:   $BANK_HASH"
 # `agave-ledger-tool shred-version` prints the same value the runtime computes
 # internally — pin the validator to it so the supermajority gate doesn't reject the
 # local bank as a wrong-fork peer.
+# Same treatment as bank-hash: --force-update-to-open to handle the column-family
+# version skew, and stdout/stderr split so we don't grep timestamp microseconds
+# from log lines (a real shred version is u16, range 0..=65535).
 echo "[init] computing shred version via $LEDGER_TOOL_BIN shred-version..."
-SHRED_VERSION_RAW=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" shred-version 2>&1 || true)
-echo "[init] (raw shred-version output below, for debugging):"
-echo "$SHRED_VERSION_RAW" | sed 's/^/[init]   /'
-SHRED_VERSION=$(printf '%s\n' "$SHRED_VERSION_RAW" | grep -oE '[0-9]+' | tail -1)
+SHRED_VERSION_STDOUT=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" shred-version \
+  --force-update-to-open \
+  2>/tmp/shred-version.stderr || true)
+echo "[init] (shred-version stdout):"
+printf '%s\n' "$SHRED_VERSION_STDOUT" | sed 's/^/[init]   /'
+echo "[init] (shred-version stderr, last 5 lines):"
+tail -5 /tmp/shred-version.stderr 2>/dev/null | sed 's/^/[init]   /'
+# A bare integer in the u16 range, on its own line. agave-ledger-tool prints
+# `shred version: NNNNN` on stdout — extract the number after the colon.
+SHRED_VERSION=$(printf '%s\n' "$SHRED_VERSION_STDOUT" \
+  | grep -oE '\b[0-9]{1,5}\b' \
+  | awk '$1 >= 0 && $1 <= 65535' \
+  | tail -1)
 if [[ -z "$SHRED_VERSION" ]]; then
-  echo "[init] FATAL: could not extract a shred version integer from output above" >&2
-  echo "[init]        try: $LEDGER_TOOL_BIN -l $LEDGER_DIR shred-version --help" >&2
+  echo "[init] FATAL: could not extract a u16 shred version from stdout above" >&2
+  echo "[init]        check stderr above; if the subcommand also doesn't exist on" >&2
+  echo "[init]        this agave version, fall back to deriving it from the genesis" >&2
+  echo "[init]        hash via solana_sdk::shred_version::version_from_hash" >&2
   exit 1
 fi
 echo "[init] shred version:  $SHRED_VERSION"
