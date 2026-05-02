@@ -24,7 +24,7 @@ use crate::source::SnapshotSource;
 pub struct Args {
     /// Path to the snapshot input. For `--source mock`, a JSON fixture (see
     /// `crate::mock` docs). For `--source solana`, a `.tar.zst` snapshot
-    /// archive (currently unimplemented — see `crate::solana` docs).
+    /// archive — see `crate::solana` for the resource cost on mainnet.
     #[arg(long)]
     pub snapshot: PathBuf,
 
@@ -65,7 +65,7 @@ impl From<Format> for OutputFormat {
 pub enum SourceKind {
     /// JSON fixture (see [`crate::mock`]).
     Mock,
-    /// Real `.tar.zst` Solana snapshot (see [`crate::solana`] — stub).
+    /// Real `.tar.zst` Solana snapshot (see [`crate::solana`]).
     Solana,
 }
 
@@ -215,17 +215,20 @@ mod tests {
     }
 
     #[test]
-    fn solana_source_returns_unimplemented_error() {
+    fn solana_source_errors_clearly_when_archive_missing() {
+        // We don't have a real snapshot fixture to test against in unit tests,
+        // but we can confirm the source surfaces a clear error for a missing
+        // archive — which is the most common operator misconfiguration.
         let out_file = out_tempfile(".bincode");
         let args = Args {
-            snapshot: PathBuf::from("/tmp/some-snapshot.tar.zst"),
+            snapshot: PathBuf::from("/nonexistent/snapshot-fork-test/snapshot.tar.zst"),
             output: out_file.path().to_path_buf(),
             format: Format::Bincode,
             source: SourceKind::Solana,
         };
         let err = run(args).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("not yet implemented"), "got: {msg}");
+        assert!(msg.contains("not found"), "got: {msg}");
     }
 
     #[test]

@@ -7,11 +7,13 @@ members = [
     "programs/bridge",
     "programs/secret-pump",
     "programs/validator-subsidy",
+    "programs/megadrop",
     "tools/snapshot-fork",
     "tools/genesis-emit",
     "tools/claim-cli",
     "tools/bridge-cli",
     "tools/federation-attestor",
+    "tools/megadrop-snapshot",
     "integration-tests",
     "e2e-tests",
 ]

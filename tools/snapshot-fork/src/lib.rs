@@ -8,8 +8,9 @@
 //!   the [`AccountRecord`](source::AccountRecord) DTO that implements
 //!   [`staccana_genesis::Account`].
 //! * [`mock`] — JSON-fixture source used for tests and the dev loop.
-//! * [`solana`] — stub for the real `solana-runtime` / `solana-accounts-db`
-//!   integration. See its module docs for the wiring plan.
+//! * [`solana`] — real `.tar.zst` snapshot reader, backed by
+//!   `solana-accounts-db`. See its module docs for the resource cost on a
+//!   mainnet-scale snapshot (30-60 min, 30-40 GB RAM).
 //! * [`output`] — JSON / bincode encoding of `GenesisOutput`.
 //! * [`cli`] — argument parsing + the `run` entrypoint shared by `main.rs`
 //!   and integration tests.

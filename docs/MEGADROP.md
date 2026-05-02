@@ -70,9 +70,15 @@ Effects:
 
 ### Snapshot inputs
 
-- `based_stacc_0` collection mint authority (or list of mint pubkeys) on Solana mainnet
-- `proofv3` collection mint authority / list
-- Snapshot slot `S_megadrop` (typically same slot as the lazy-claim genesis snapshot, so the two cohorts are observed simultaneously)
+- **`based_stacc_0`** — Metaplex NFT collection.
+  Verified collection key: `Ej1jbbw7QKgC9XMmWPxKFipMLJY5oVNd3rdbE1TzjNdz`
+  Snapshot semantics: walk all NFTs whose `metadata.collection.key` matches this and the verified flag is true; group by `owner`. Per-holder count = number of NFTs.
+
+- **`proofv3`** — Token-22 SPL fungible mint.
+  Mint address: `CLWeikxiw8pC9JEtZt14fqDzYfXF7uVwLuvnJPkrE7av`
+  Snapshot semantics: walk all Token-22 token accounts where `mint == proofv3`; group by `owner`. Per-holder amount = sum of `balance` across that holder's token accounts (a holder may have multiple ATAs).
+
+- Snapshot slot `S_megadrop` — by default the same slot `S` as the lazy-claim genesis snapshot, so the two cohorts are observed simultaneously and there's no temporal arbitrage.
 
 ### Tooling
 
@@ -83,18 +89,42 @@ Outputs:
 - `megadrop-merkle-root.hex` — the 32-byte root to embed in `MegadropConfig`
 - `megadrop-proofs.json` — per-holder inclusion proof (for the frontend / CLI)
 
-## Allocation parameters
+## Allocation parameters (locked)
 
 ```
-TOTAL_MEGADROP_SOL          = 5_000_000        # 5M SOL ≈ 1% of expected ~500M treasury
+TOTAL_MEGADROP_SOL            = 30_000_000      # 30M SOL — Option A; ~6-8% of expected treasury
 COLLECTION_BASED_STACC_WEIGHT = 60              # of 100
 COLLECTION_PROOFV3_WEIGHT     = 40              # of 100
-ALLOCATION_MODEL              = "sqrt"          # uniform | linear | sqrt — TBD, sqrt is the lean
-NUM_TRANCHES                  = 10
-TRANCHE_INTERVAL_DAYS         = 30              # one per calendar month, approximated as 30 days for the on-chain slot check
+ALLOCATION_MODEL              = "linear"        # pro-rata to holdings; whale-favorable
+NUM_TRANCHES                  = 10              # one tranche per calendar month
+TRANCHE_AMOUNT_SOL            = 3_000_000       # = TOTAL / NUM_TRANCHES; per-month pool size
+GENESIS_MONTH                 = 202605          # first tranche unlocks May 2026 (mainnet-sigma)
 ```
 
-A `sqrt(nft_count)` model means a 100-NFT whale gets `~10x` what a 1-NFT holder gets, not `100x`. Best middle-ground between sybil resistance and reward-of-conviction.
+Per-holder weight under `linear`:
+
+```
+weight(h) = WEIGHT_BASED_STACC_0 * nfts_held_in_based_stacc_0(h)
+          + WEIGHT_PROOFV3       * proofv3_balance(h)
+```
+
+Per-holder allocation: `(weight(h) / sum_of_all_weights) * TOTAL_MEGADROP_SOL`. This is a one-shot computation done by the snapshot tool at slot `S_megadrop`; the result is committed in the Merkle root and never recomputed.
+
+Budget fits cleanly into the validator-subsidy reservation: 30M megadrop + 80% productive position leaves ~10-15% of treasury for ops, insurance, AMM seeding, grants. Comfortable.
+
+## Vesting timeline
+
+```
+Tranche 1: May 2026 (mainnet-sigma launch month) → 3M SOL claimable across all holders
+Tranche 2: Jun 2026 → +3M SOL
+Tranche 3: Jul 2026 → +3M SOL
+...
+Tranche 10: Feb 2027 → final +3M SOL
+```
+
+Each tranche unlocks `TRANCHE_AMOUNT_SOL / total_eligible_holders × per_holder_weight_share` for each holder. Holders pull when `current_month >= GENESIS_MONTH + (i - 1)`. Multiple back-tranches in a single tx if dormant. Unclaimed tranches stay unclaimed indefinitely (no expiry).
+
+> **Megadrop scaffold subagent**: started before this option was locked. Its initial defaults will say 300M / sqrt; the program itself is deploy-time configurable so the actual values come from `init_megadrop` args. Will swap defaults in the agent's deliverable when it returns.
 
 ## Genesis impact
 
