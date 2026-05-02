@@ -122,6 +122,24 @@ struct Cli {
     #[arg(long)]
     megadrop_so: Option<PathBuf>,
 
+    /// Additional bootstrap validator keypair triplets. Each occurrence takes a
+    /// comma-separated `identity.json,vote.json,stake.json` triplet. May be passed
+    /// multiple times to add multiple validators. Each one will be materialized
+    /// in genesis with a vote+stake account fully delegated and active from slot
+    /// 0 — same shape as the primary `--identity-keypair / --vote-keypair /
+    /// --stake-keypair` triplet.
+    ///
+    /// **Why**: agave 2.0.x's tower-BFT threshold check has a single-validator
+    /// bootstrap deadlock — solo validators can never land their first vote
+    /// because the threshold check rejects every attempt against the bank's
+    /// (empty) on-chain vote-account state. With ≥2 validators in genesis, both
+    /// can clear the "tower not deep enough" escape and converge once their vote
+    /// txs reach each other via gossip.
+    ///
+    /// Example: `--additional-validator /etc/staccana/keys-2/identity.json,/etc/staccana/keys-2/vote.json,/etc/staccana/keys-2/stake.json`
+    #[arg(long, value_delimiter = '\0')]
+    additional_validator: Vec<String>,
+
     /// Output **directory** for the bootable ledger. Will contain `genesis.bin`,
     /// `genesis.tar.bz2`, and a `rocksdb/` blockstore. Existing contents at this
     /// path are destroyed and replaced (`Blockstore::destroy` is idempotent and
@@ -169,6 +187,25 @@ fn main() -> Result<()> {
 
     let cluster_type: ClusterType = cli.cluster_type.into();
 
+    // Parse `id.json,vote.json,stake.json` triplets, one per --additional-validator
+    // occurrence. Each triplet becomes a fully-staked second bootstrap validator
+    // in genesis, which is what breaks agave 2.0.x's tower-BFT solo deadlock.
+    let mut additional_validators: Vec<(PathBuf, PathBuf, PathBuf)> = Vec::new();
+    for raw in &cli.additional_validator {
+        let parts: Vec<&str> = raw.split(',').collect();
+        if parts.len() != 3 {
+            return Err(anyhow!(
+                "--additional-validator expects exactly 3 comma-separated keypair paths \
+                 (identity.json,vote.json,stake.json); got: {raw}"
+            ));
+        }
+        additional_validators.push((
+            PathBuf::from(parts[0].trim()),
+            PathBuf::from(parts[1].trim()),
+            PathBuf::from(parts[2].trim()),
+        ));
+    }
+
     let inputs = load_inputs_from_paths(
         &cli.composed_genesis,
         &cli.identity_keypair,
@@ -176,6 +213,7 @@ fn main() -> Result<()> {
         &cli.stake_keypair,
         &cli.faucet_keypair,
         cluster_type,
+        additional_validators,
         cli.lazy_claim_so,
         cli.bridge_so,
         cli.secret_pump_so,

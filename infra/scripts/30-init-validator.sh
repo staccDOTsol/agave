@@ -46,9 +46,9 @@ CLUSTER_TYPE="${CLUSTER_TYPE:-development}"
 mkdir -p "$KEY_DIR" "$LEDGER_DIR"
 chmod 700 "$KEY_DIR"
 
-# 1. Generate the four core keypairs. Idempotent — never overwrites existing keys.
-# faucet is generated even though staccana doesn't run a faucet on mainnet — kept so
-# tooling that expects a faucet pubkey doesn't crash in dev / staging.
+# 1. Generate the four core keypairs for validator-1 (this box). Idempotent — never
+# overwrites existing keys. faucet is generated even though staccana doesn't run a
+# faucet on mainnet — kept so tooling that expects a faucet pubkey doesn't crash.
 for k in identity vote stake faucet; do
   if [[ ! -f "$KEY_DIR/$k.json" ]]; then
     solana-keygen new --no-passphrase --silent --outfile "$KEY_DIR/$k.json"
@@ -61,10 +61,38 @@ VOTE=$(solana-keygen pubkey "$KEY_DIR/vote.json")
 STAKE=$(solana-keygen pubkey "$KEY_DIR/stake.json")
 FAUCET=$(solana-keygen pubkey "$KEY_DIR/faucet.json")
 
-echo "[init] identity=$IDENTITY"
-echo "[init] vote    =$VOTE"
-echo "[init] stake   =$STAKE"
-echo "[init] faucet  =$FAUCET (placeholder — staccana doesn't run a faucet on mainnet)"
+echo "[init] [validator-1] identity=$IDENTITY"
+echo "[init] [validator-1] vote    =$VOTE"
+echo "[init] [validator-1] stake   =$STAKE"
+echo "[init] [validator-1] faucet  =$FAUCET (placeholder — staccana doesn't run a faucet on mainnet)"
+
+# 1b. Generate keypairs for additional bootstrap validators. We always materialize
+# at least one extra (validator-2) to break agave 2.0.x's tower-BFT solo deadlock —
+# a single staked validator can never land its first vote because the threshold
+# check rejects every attempt against the bank's (empty) on-chain vote-account
+# state. With ≥2 validators in genesis, both can clear the "tower not deep enough"
+# escape independently and converge once their votes reach each other via gossip.
+#
+# `EXTRA_VALIDATORS` controls how many extra to generate (default 1 → 2 total).
+# Each extra gets its own identity/vote/stake triplet under
+# /etc/staccana/keys-N/ for N=2,3,...
+EXTRA_VALIDATORS="${EXTRA_VALIDATORS:-1}"
+declare -a EXTRA_VALIDATOR_FLAGS=()
+for n in $(seq 2 $((1 + EXTRA_VALIDATORS))); do
+  extra_dir="${KEY_DIR%/keys}/keys-$n"
+  mkdir -p "$extra_dir"
+  chmod 700 "$extra_dir"
+  for k in identity vote stake; do
+    if [[ ! -f "$extra_dir/$k.json" ]]; then
+      solana-keygen new --no-passphrase --silent --outfile "$extra_dir/$k.json"
+      echo "[init] generated extra-$n $k keypair: $(solana-keygen pubkey $extra_dir/$k.json)"
+    fi
+  done
+  echo "[init] [validator-$n] identity=$(solana-keygen pubkey $extra_dir/identity.json)"
+  echo "[init] [validator-$n] vote    =$(solana-keygen pubkey $extra_dir/vote.json)"
+  echo "[init] [validator-$n] stake   =$(solana-keygen pubkey $extra_dir/stake.json)"
+  EXTRA_VALIDATOR_FLAGS+=(--additional-validator "$extra_dir/identity.json,$extra_dir/vote.json,$extra_dir/stake.json")
+done
 
 # 2. Sanity-check the composed genesis (produced by step 20).
 if [[ ! -f "$COMPOSED" ]]; then
@@ -106,6 +134,7 @@ cargo run --release \
   --stake-keypair       "$KEY_DIR/stake.json" \
   --faucet-keypair      "$KEY_DIR/faucet.json" \
   --cluster-type        "$CLUSTER_TYPE" \
+  "${EXTRA_VALIDATOR_FLAGS[@]}" \
   "${SO_FLAGS[@]}" \
   --output-ledger-dir   "$LEDGER_DIR"
 

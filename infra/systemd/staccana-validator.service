@@ -17,10 +17,10 @@ RestartSec=10s
 Environment="RUST_LOG=solana=info,solana_metrics=warn"
 Environment="SOLANA_METRICS_CONFIG=host=https://metrics.example,db=staccana,u=writer,p=changeme"
 
-# BANK_HASH (and GENESIS_HASH) are populated by step 30. The leading `-` makes
-# systemd tolerate the file being missing on first run (validator will then refuse
-# to start, which is the correct behavior — you must run step 30 first).
-EnvironmentFile=-/etc/staccana/bank-hash
+# Address of validator-2's gossip endpoint, used as our entrypoint so the two
+# validators discover each other. Default 84.32.220.76:8001 = the hip-jawfish
+# Cherryservers box. Override via env var if you put validator-2 elsewhere.
+Environment="STACCANA_VAL2_GOSSIP=84.32.220.76:8001"
 
 ExecStart=/usr/local/bin/agave-validator \
   --identity /etc/staccana/keys/identity.json \
@@ -33,30 +33,27 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-poh-speed-test \
   --no-os-network-limits-test \
   --no-wait-for-vote-to-start-leader \
-  --hard-fork 0 \
-  --wait-for-supermajority 0 \
-  --expected-bank-hash ${BANK_HASH} \
-  --expected-shred-version ${SHRED_VERSION} \
+  --entrypoint ${STACCANA_VAL2_GOSSIP} \
   --full-rpc-api \
   --allow-private-addr \
   --rpc-port 8899 \
-  --rpc-bind-address 127.0.0.1 \
+  --rpc-bind-address 0.0.0.0 \
   --gossip-port 8001 \
   --dynamic-port-range 8002-8020 \
   --log /var/log/staccana/validator.log
 
-# --no-wait-for-vote-to-start-leader: bypasses the cold-start interlock that prevents
-#   a fresh validator from producing its first leader slot until it has landed a vote.
-# --wait-for-supermajority 0 + --expected-bank-hash $BANK_HASH: the OTHER half of the
-#   single-validator bootstrap recipe (this is what jito-solana's `bootstrap` script
-#   and agave's `multinode-demo/bootstrap-validator.sh` use). At slot 0 the validator
-#   waits for supermajority of stake to be visible on gossip; for a single-node
-#   cluster with 100% stake that's instantly true, AND the wait-for-supermajority
-#   path bypasses the tower-BFT threshold check that otherwise rejects every vote
-#   (FailedThreshold(_, _, 0, total_stake) — "0 stake voted on the threshold-required
-#   ancestor"). Without this combo, slot advances but no votes ever land and no slot
-#   ever roots. The bank hash comes from $BANK_HASH (sourced from
-#   /etc/staccana/bank-hash, written by step 30 via `agave-ledger-tool bank-hash`).
+# Multi-validator bootstrap (vs the failed solo-bootstrap attempt with --wait-for-
+# supermajority): with two staked validators in the genesis bank, both can clear the
+# tower-BFT "tower not deep enough" escape on their first vote independently. Once
+# their vote txs reach each other via gossip (--entrypoint $STACCANA_VAL2_GOSSIP),
+# voted_stakes[N] becomes non-zero for future threshold checks and the chain rolls.
+# --no-wait-for-vote-to-start-leader: bypass the cold-start interlock so we can
+#   produce blocks before the first vote lands (the vote will land via gossip from
+#   the peer once it does the same).
+# --entrypoint <ADDR>: where to discover other validators. Both boxes point at each
+#   other; gossip handles the bidirectional discovery from there.
+# --rpc-bind-address 0.0.0.0: let the explorer / bridge UIs hit RPC over the public
+#   interface (was 127.0.0.1 before; the firewall / nginx layer fronts it).
 # --full-rpc-api: enables the full set of RPC methods (getBlock with rewards,
 #   getStakes, etc) that the explorer + bridge UIs need.
 # --allow-private-addr: permits gossip with peers on RFC1918 private addresses, which

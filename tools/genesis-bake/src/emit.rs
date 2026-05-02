@@ -143,6 +143,16 @@ pub fn write_genesis_bin_at_path(
 pub fn log_bake_summary(summary: &BakeSummary, genesis_hash: &Hash, cluster_type: ClusterType) {
     eprintln!("[bake] genesis hash:           {}", genesis_hash);
     eprintln!("[bake] cluster type:           {:?}", cluster_type);
+    if !summary.additional_bootstrap_pubkeys.is_empty() {
+        eprintln!("[bake] bootstrap validators:   {} (1 primary + {} additional)",
+            summary.additional_bootstrap_pubkeys.len() + 1,
+            summary.additional_bootstrap_pubkeys.len());
+        for (i, pks) in summary.additional_bootstrap_pubkeys.iter().enumerate() {
+            eprintln!("[bake]   extra-{}.identity:    {}", i + 2, pks.identity);
+            eprintln!("[bake]   extra-{}.vote:        {}", i + 2, pks.vote);
+            eprintln!("[bake]   extra-{}.stake:       {}", i + 2, pks.stake);
+        }
+    }
     eprintln!("[bake] bootstrap identity:     {}", summary.bootstrap_pubkeys.identity);
     eprintln!("[bake] bootstrap vote:         {}", summary.bootstrap_pubkeys.vote);
     eprintln!("[bake] bootstrap stake:        {}", summary.bootstrap_pubkeys.stake);
@@ -217,6 +227,7 @@ mod tests {
             stake: Keypair::new(),
             faucet: Keypair::new(),
             cluster_type: ClusterType::Development,
+            additional_validators: Vec::new(),
             lazy_claim_so: None,
             bridge_so: None,
             secret_pump_so: None,

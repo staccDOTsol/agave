@@ -36,6 +36,10 @@ use crate::BakeInputs;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BakeSummary {
     pub bootstrap_pubkeys: BootstrapPubkeys,
+    /// Additional bootstrap validators baked into genesis beyond the primary one.
+    /// Each one has the same vote+stake+identity shape as the primary; they exist
+    /// to break agave 2.0.x's solo-validator tower-BFT deadlock.
+    pub additional_bootstrap_pubkeys: Vec<BootstrapPubkeys>,
     pub treasury_pda: Pubkey,
     pub treasury_lamports: u64,
     pub lazy_claim_config_pda: Pubkey,
@@ -113,6 +117,38 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
     let (k, a) = faucet_account(faucet_pk);
     config.add_account(k, a);
 
+    // ---- Additional bootstrap validators ----
+    //
+    // For each extra `(identity, vote, stake)` triplet, materialize the same three-account
+    // shape we just did for the primary. This is what unblocks agave 2.0.x's tower-BFT
+    // single-validator deadlock — with ≥2 staked validators in the genesis bank, each
+    // one's first-vote bootstrap escape can fire independently (each has 0 prior votes,
+    // so `vote_state.nth_recent_lockout(threshold_depth)` returns None → PassedThreshold)
+    // and once their vote txs land via gossip, voted_stakes[N] becomes non-zero for
+    // future threshold checks. solo bootstrap deadlocks because the lone validator can
+    // never satisfy the threshold against its own (0-vote) vote-account state on chain.
+    let mut additional_bootstrap_pubkeys: Vec<BootstrapPubkeys> =
+        Vec::with_capacity(inputs.additional_validators.len());
+    for extra in &inputs.additional_validators {
+        let id_pk = extra.identity_pubkey();
+        let vote_pk = extra.vote_pubkey();
+        let stake_pk = extra.stake_pubkey();
+        let (k, a) = bootstrap_identity_account(id_pk);
+        config.add_account(k, a);
+        let (k, vote_acct) = bootstrap_vote_account(vote_pk, id_pk);
+        config.add_account(k, vote_acct.clone());
+        let (k, a) = bootstrap_stake_account(stake_pk, vote_pk, &vote_acct);
+        config.add_account(k, a);
+        additional_bootstrap_pubkeys.push(BootstrapPubkeys {
+            identity: id_pk,
+            vote: vote_pk,
+            stake: stake_pk,
+            // Reuse the primary faucet pubkey for the summary — extra validators don't
+            // get their own faucet (only one faucet keypair makes sense per cluster).
+            faucet: faucet_pk,
+        });
+    }
+
     // ---- Stake program genesis accounts (config + epoch rewards sysvar) ----
     //
     // `solana_runtime::genesis_utils::create_genesis_config_with_leader_ex_no_features`
@@ -189,6 +225,7 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
             stake: stake_pk,
             faucet: faucet_pk,
         },
+        additional_bootstrap_pubkeys,
         treasury_pda,
         treasury_lamports,
         lazy_claim_config_pda: lc_config_pda,
@@ -276,11 +313,73 @@ mod tests {
             // ones being exercised. The CLI default is Development, but the
             // assemble_genesis_config function itself is cluster-type-agnostic.
             cluster_type: ClusterType::MainnetBeta,
+            additional_validators: Vec::new(),
             lazy_claim_so: None,
             bridge_so: None,
             secret_pump_so: None,
             validator_subsidy_so: None,
             megadrop_so: None,
+        }
+    }
+
+    #[test]
+    fn assemble_with_one_extra_validator_adds_three_accounts() {
+        // Each additional validator triplet must yield exactly 3 new accounts
+        // (identity + vote + stake), wired the same way as the primary.
+        let mut inputs = synthetic_inputs();
+        let baseline_total = assemble_genesis_config(&inputs).expect("bake1").1.total_accounts;
+
+        inputs.additional_validators.push(crate::AdditionalBootstrapValidator {
+            identity: Keypair::new(),
+            vote: Keypair::new(),
+            stake: Keypair::new(),
+        });
+        let (_, summary) = assemble_genesis_config(&inputs).expect("bake2");
+        assert_eq!(summary.total_accounts, baseline_total + 3);
+        assert_eq!(summary.additional_bootstrap_pubkeys.len(), 1);
+        // Vote pubkey of the extra validator must be different from the primary's.
+        assert_ne!(
+            summary.additional_bootstrap_pubkeys[0].vote,
+            summary.bootstrap_pubkeys.vote
+        );
+    }
+
+    #[test]
+    fn assemble_extra_validator_stake_account_decodes_with_active_delegation() {
+        // The whole point of adding extra validators is to break the solo tower-BFT
+        // deadlock. For that to work, each extra validator's stake account MUST be
+        // a fully-active StakeStateV2::Stake variant (not Initialized) at slot 0,
+        // delegated to its own vote pubkey. Pin that explicitly.
+        use solana_sdk_ids::stake as stake_program;
+        use solana_stake_interface::state::StakeStateV2;
+        let mut inputs = synthetic_inputs();
+        let extra = crate::AdditionalBootstrapValidator {
+            identity: Keypair::new(),
+            vote: Keypair::new(),
+            stake: Keypair::new(),
+        };
+        let extra_vote_pk = extra.vote_pubkey();
+        let extra_stake_pk = extra.stake_pubkey();
+        inputs.additional_validators.push(extra);
+
+        let (config, _) = assemble_genesis_config(&inputs).expect("assemble");
+        let stake_acct = config
+            .accounts
+            .get(&extra_stake_pk)
+            .expect("extra validator's stake account must be in the genesis accounts map");
+        assert_eq!(stake_acct.owner, stake_program::id());
+        let decoded: StakeStateV2 = bincode::deserialize(&stake_acct.data)
+            .expect("extra validator stake must decode as StakeStateV2");
+        match decoded {
+            StakeStateV2::Stake(_meta, stake_inner, _flags) => {
+                let voter_bytes: [u8; 32] = stake_inner.delegation.voter_pubkey.to_bytes();
+                assert_eq!(voter_bytes, extra_vote_pk.to_bytes(),
+                    "extra validator stake must delegate to its OWN vote pubkey, not the primary's");
+                assert_eq!(stake_inner.delegation.activation_epoch, u64::MAX,
+                    "must use the bootstrap activation marker");
+                assert!(stake_inner.delegation.stake > 0);
+            }
+            other => panic!("expected StakeStateV2::Stake, got {other:?}"),
         }
     }
 

@@ -118,11 +118,49 @@ pub struct BakeInputs {
     pub stake: Keypair,
     pub faucet: Keypair,
     pub cluster_type: ClusterType,
+    /// Additional bootstrap validators beyond the primary one. Each entry is
+    /// `(identity, vote, stake)`. Genesis will materialize identity (system-owned,
+    /// 1 SOL), vote (vote-program-owned, 1 SOL, node_pubkey=identity), and stake
+    /// (stake-program-owned, 1 SOL, delegated to vote, activation_epoch=u64::MAX —
+    /// the bootstrap-stake marker) for each one — same byte layout as the primary
+    /// validator.
+    ///
+    /// **Why this exists**: agave 2.0.x's tower-BFT threshold check has a
+    /// single-validator bootstrap deadlock — the very first vote can't satisfy the
+    /// supermajority condition because no prior vote has landed, and no prior
+    /// vote can land because the threshold rejects every attempt. With ≥2
+    /// validators in genesis, each one's first vote can pass through the "tower
+    /// not deep enough" escape independently, and once they observe each other's
+    /// votes via gossip, the threshold check converges. solana-test-validator
+    /// sidesteps this with internal-only bank manipulation; vanilla
+    /// `agave-validator` doesn't have an equivalent flag.
+    pub additional_validators: Vec<AdditionalBootstrapValidator>,
     pub lazy_claim_so: Option<PathBuf>,
     pub bridge_so: Option<PathBuf>,
     pub secret_pump_so: Option<PathBuf>,
     pub validator_subsidy_so: Option<PathBuf>,
     pub megadrop_so: Option<PathBuf>,
+}
+
+/// Keypair triplet for a non-primary bootstrap validator. The primary validator's
+/// triplet lives at the top level of [`BakeInputs`]; secondary ones go in
+/// [`BakeInputs::additional_validators`].
+pub struct AdditionalBootstrapValidator {
+    pub identity: Keypair,
+    pub vote: Keypair,
+    pub stake: Keypair,
+}
+
+impl AdditionalBootstrapValidator {
+    pub fn identity_pubkey(&self) -> Pubkey {
+        self.identity.pubkey()
+    }
+    pub fn vote_pubkey(&self) -> Pubkey {
+        self.vote.pubkey()
+    }
+    pub fn stake_pubkey(&self) -> Pubkey {
+        self.stake.pubkey()
+    }
 }
 
 impl BakeInputs {
@@ -174,12 +212,23 @@ pub fn load_inputs_from_paths(
     stake: impl AsRef<Path>,
     faucet: impl AsRef<Path>,
     cluster_type: ClusterType,
+    additional_validator_keypair_triplets: Vec<(PathBuf, PathBuf, PathBuf)>,
     lazy_claim_so: Option<PathBuf>,
     bridge_so: Option<PathBuf>,
     secret_pump_so: Option<PathBuf>,
     validator_subsidy_so: Option<PathBuf>,
     megadrop_so: Option<PathBuf>,
 ) -> Result<BakeInputs> {
+    let additional_validators = additional_validator_keypair_triplets
+        .into_iter()
+        .map(|(id_path, vote_path, stake_path)| {
+            Ok::<_, anyhow::Error>(AdditionalBootstrapValidator {
+                identity: load_keypair(id_path)?,
+                vote: load_keypair(vote_path)?,
+                stake: load_keypair(stake_path)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(BakeInputs {
         composed: load_composed_genesis(composed)?,
         identity: load_keypair(identity)?,
@@ -187,6 +236,7 @@ pub fn load_inputs_from_paths(
         stake: load_keypair(stake)?,
         faucet: load_keypair(faucet)?,
         cluster_type,
+        additional_validators,
         lazy_claim_so,
         bridge_so,
         secret_pump_so,
