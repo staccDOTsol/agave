@@ -25,20 +25,14 @@ mkdir -p "$DEPLOY_DIR"
 echo "[build] === lazy-claim (native cargo build-sbf) ==="
 (cd "$STACCANA_DIR" && cargo build-sbf --manifest-path "programs/lazy-claim/Cargo.toml" --sbf-out-dir "$DEPLOY_DIR")
 
-# Anchor programs. Each `anchor build` writes to programs/<name>/target/deploy/.
-# Copy the resulting .so into the consolidated $DEPLOY_DIR.
+# All other programs are Anchor-based but have `crate-type = ["cdylib", "lib"]`
+# so `cargo build-sbf` handles them too — we don't need `anchor build` (which
+# would need an Anchor.toml workspace file we never created). Skipping anchor
+# also means no IDL gets generated, which is fine for now (front-end uses
+# manually maintained encoders in frontend/lib/anchor.ts).
 for prog in bridge secret-pump validator-subsidy megadrop; do
-  echo "[build] === $prog (anchor build) ==="
-  (cd "$STACCANA_DIR/programs/$prog" && anchor build)
-  # Anchor preserves the snake_case from Cargo.toml's package name
-  underscored="staccana_${prog//-/_}"
-  src="$STACCANA_DIR/programs/$prog/target/deploy/${underscored}.so"
-  if [[ -f "$src" ]]; then
-    cp -f "$src" "$DEPLOY_DIR/${underscored}.so"
-    echo "[build]   → $DEPLOY_DIR/${underscored}.so"
-  else
-    echo "[build] WARN: $src not found after anchor build for $prog" >&2
-  fi
+  echo "[build] === $prog (cargo build-sbf) ==="
+  (cd "$STACCANA_DIR" && cargo build-sbf --manifest-path "programs/$prog/Cargo.toml" --sbf-out-dir "$DEPLOY_DIR")
 done
 
 echo "[build] consolidated artifacts in $DEPLOY_DIR:"
