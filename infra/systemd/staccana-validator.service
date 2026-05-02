@@ -17,6 +17,11 @@ RestartSec=10s
 Environment="RUST_LOG=solana=info,solana_metrics=warn"
 Environment="SOLANA_METRICS_CONFIG=host=https://metrics.example,db=staccana,u=writer,p=changeme"
 
+# BANK_HASH (and GENESIS_HASH) are populated by step 30. The leading `-` makes
+# systemd tolerate the file being missing on first run (validator will then refuse
+# to start, which is the correct behavior — you must run step 30 first).
+EnvironmentFile=-/etc/staccana/bank-hash
+
 ExecStart=/usr/local/bin/agave-validator \
   --identity /etc/staccana/keys/identity.json \
   --vote-account /etc/staccana/keys/vote.json \
@@ -28,6 +33,8 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-poh-speed-test \
   --no-os-network-limits-test \
   --no-wait-for-vote-to-start-leader \
+  --wait-for-supermajority 0 \
+  --expected-bank-hash ${BANK_HASH} \
   --full-rpc-api \
   --allow-private-addr \
   --rpc-port 8899 \
@@ -38,13 +45,18 @@ ExecStart=/usr/local/bin/agave-validator \
 
 # --no-wait-for-vote-to-start-leader: bypasses the cold-start interlock that prevents
 #   a fresh validator from producing its first leader slot until it has landed a vote.
-#   In a multi-validator cluster this prevents fork divergence; in a single-validator
-#   bootstrap it deadlocks at slot 0 ("Haven't landed a vote, so skipping my leader
-#   slot" forever). Required for solo bootstrap of mainnet-sigma launch night and for
-#   the val-bootstrap devnet shake-out. Once val-eu / val-apac join, this can stay on
-#   for the bootstrap node — the flag is safe in the steady state.
-# --full-rpc-api: enables the full set of RPC methods (getBlock with rewards, getStakes,
-#   etc) that the explorer + bridge UIs need.
+# --wait-for-supermajority 0 + --expected-bank-hash $BANK_HASH: the OTHER half of the
+#   single-validator bootstrap recipe (this is what jito-solana's `bootstrap` script
+#   and agave's `multinode-demo/bootstrap-validator.sh` use). At slot 0 the validator
+#   waits for supermajority of stake to be visible on gossip; for a single-node
+#   cluster with 100% stake that's instantly true, AND the wait-for-supermajority
+#   path bypasses the tower-BFT threshold check that otherwise rejects every vote
+#   (FailedThreshold(_, _, 0, total_stake) — "0 stake voted on the threshold-required
+#   ancestor"). Without this combo, slot advances but no votes ever land and no slot
+#   ever roots. The bank hash comes from $BANK_HASH (sourced from
+#   /etc/staccana/bank-hash, written by step 30 via `agave-ledger-tool bank-hash`).
+# --full-rpc-api: enables the full set of RPC methods (getBlock with rewards,
+#   getStakes, etc) that the explorer + bridge UIs need.
 # --allow-private-addr: permits gossip with peers on RFC1918 private addresses, which
 #   is what we'll use when val-eu / val-apac join over wireguard or a private VPC.
 

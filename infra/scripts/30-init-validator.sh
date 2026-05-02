@@ -113,6 +113,43 @@ GENESIS_HASH=$(solana-ledger-tool -l "$LEDGER_DIR" genesis-hash 2>/dev/null | ta
 echo "[init] staccana ledger initialized at $LEDGER_DIR"
 echo "[init] genesis hash: $GENESIS_HASH"
 
+# Compute the bank-0 hash for `--expected-bank-hash`. Required by the systemd unit's
+# `--wait-for-supermajority 0` flag, which is what unblocks the single-validator
+# tower-BFT deadlock (the validator can't land its first vote without it — the
+# threshold check rejects every vote with FailedThreshold(_, _, 0, total_stake)).
+# This is the same recipe jito-solana's `bootstrap` script and agave's
+# `multinode-demo/bootstrap-validator.sh` use.
+#
+# `agave-ledger-tool` is the rebrand; older boxes have `solana-ledger-tool`. Try both.
+LEDGER_TOOL_BIN=""
+if command -v agave-ledger-tool >/dev/null 2>&1; then
+  LEDGER_TOOL_BIN=agave-ledger-tool
+elif command -v solana-ledger-tool >/dev/null 2>&1; then
+  LEDGER_TOOL_BIN=solana-ledger-tool
+else
+  echo "[init] FATAL: neither agave-ledger-tool nor solana-ledger-tool found in PATH" >&2
+  exit 1
+fi
+BANK_HASH=$($LEDGER_TOOL_BIN -l "$LEDGER_DIR" bank-hash 2>/dev/null | tail -1)
+if [[ -z "$BANK_HASH" ]]; then
+  echo "[init] FATAL: $LEDGER_TOOL_BIN bank-hash returned empty; ledger may be malformed" >&2
+  exit 1
+fi
+echo "[init] bank-0 hash:   $BANK_HASH"
+
+# Write the bank hash to a systemd-readable env file. The validator unit
+# (infra/systemd/staccana-validator.service) consumes this via
+# `EnvironmentFile=-/etc/staccana/bank-hash` so `--expected-bank-hash $BANK_HASH`
+# resolves at start. Re-runs of step 30 produce a new bank hash; keep the file in
+# sync.
+mkdir -p /etc/staccana
+cat > /etc/staccana/bank-hash <<EOF
+BANK_HASH=$BANK_HASH
+GENESIS_HASH=$GENESIS_HASH
+EOF
+chmod 644 /etc/staccana/bank-hash
+echo "[init] wrote /etc/staccana/bank-hash"
+
 # 5. Cross-check post-boot metadata for steps 40 / 50 to consume. With the bake
 # script most of this state is already live in the genesis (treasury pre-credited,
 # lazy-claim Config materialized at slot 0), but downstream scripts still want the
