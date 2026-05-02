@@ -7,14 +7,33 @@
 //!
 //! ## Categories
 //!
-//! 1. **Bootstrap validator + ancillary**: identity, vote, stake, faucet. All
-//!    `BOOTSTRAP_LAMPORTS` (1 SOL) each, system-program-owned for v0 simplicity. Vote &
-//!    stake accounts are NOT initialized as full `vote_state` / `stake_state` accounts
-//!    here — vanilla `solana-genesis` does that wiring; we defer it. The validator boots
-//!    with these accounts as plain SOL holdings; the operator can subsequently issue
-//!    real `create-vote-account` / `create-stake-account` ixs after first slot. This
-//!    matches the v0 behavior of `infra/scripts/30-init-validator.sh` which also did
-//!    not need a fully-initialized vote account at slot 0.
+//! 1. **Bootstrap validator + ancillary**: identity & faucet are simple system-owned
+//!    `BOOTSTRAP_LAMPORTS` (1 SOL) holdings. The **vote** and **stake** accounts are
+//!    fully-initialized at slot 0 — same byte-layout that
+//!    `solana_runtime::genesis_utils::create_genesis_config_with_leader` produces:
+//!
+//!    - Vote account: owned by the vote program, data is a serialized
+//!      `VoteStateVersions::Current(VoteState)` with `node_pubkey = identity`,
+//!      `authorized_voter / authorized_withdrawer = vote_pubkey`, `commission = 0`.
+//!      Built via `solana_vote_program::vote_state::create_account` — the canonical
+//!      constructor the runtime trusts.
+//!
+//!    - Stake account: owned by the stake program, data is a serialized
+//!      `StakeStateV2::Stake(Meta, Stake, StakeFlags)` with the stake delegated to
+//!      the vote pubkey at `activation_epoch = Epoch::MAX` (the bootstrap-stake
+//!      marker — same convention as `solana_runtime::genesis_utils`'s
+//!      `stake_state::create_account` call, which passes `Epoch::MAX` to mark the
+//!      stake as fully active from genesis with no warmup/cooldown). Built via
+//!      `solana_stake_program::stake_state::create_account` — the canonical
+//!      constructor. The lamport balance must exceed the rent-exempt reserve for
+//!      `StakeStateV2::size_of()` (≈2.28M lamports) so the delegated stake is
+//!      positive; with `BOOTSTRAP_LAMPORTS = 1 SOL` the delegation comes out to
+//!      ≈997M lamports, plenty for the runtime to pick up at slot 0.
+//!
+//!    This is what unblocks `Bank::new_with_paths` from panicking with
+//!    `genesis processing failed because no staked nodes exist` — the runtime
+//!    requires at least one vote+stake pair at slot 0 to bootstrap the leader
+//!    schedule.
 //!
 //! 2. **Treasury PDA**: derived at `["treasury"] / VALIDATOR_SUBSIDY_PROGRAM_ID`.
 //!    Pre-credited with `composed.treasury_pda_lamports`. Owner is the validator-
@@ -32,6 +51,8 @@ use solana_account::AccountSharedData;
 use solana_pubkey::Pubkey;
 use solana_rent::Rent;
 use solana_sdk_ids::system_program;
+use solana_stake_program::stake_state as stake_state_helpers;
+use solana_vote_program::vote_state as vote_state_helpers;
 
 use staccana_lazy_claim::state::LazyClaimConfig as OnChainLazyClaimConfig;
 
@@ -49,24 +70,63 @@ pub fn bootstrap_identity_account(identity: Pubkey) -> (Pubkey, AccountSharedDat
     )
 }
 
-/// Build the bootstrap vote account.
+/// Build the bootstrap vote account, fully initialized at slot 0.
 ///
-/// See module-level doc: this is a simple system-owned holding for v0; the actual
-/// vote-state PDA materializes via a post-boot `create-vote-account` ix.
-pub fn bootstrap_vote_account(vote: Pubkey) -> (Pubkey, AccountSharedData) {
-    (
-        vote,
-        AccountSharedData::new(BOOTSTRAP_LAMPORTS, 0, &system_program::id()),
-    )
+/// Wraps `solana_vote_program::vote_state::create_account` — the canonical constructor
+/// `solana_runtime::genesis_utils` uses. The resulting account is owned by the vote
+/// program, holds a serialized `VoteStateVersions::Current(VoteState { node_pubkey =
+/// identity, authorized_voter = vote, authorized_withdrawer = vote, commission = 0,
+/// .. })`, and carries `BOOTSTRAP_LAMPORTS` lamports.
+///
+/// The runtime's bank-bootstrap logic reads this account at slot 0 to learn that the
+/// bootstrap node has voting authority — without it, the `[stake, vote]` join in
+/// `Stakes::activate_epoch` produces an empty `staked_nodes` map and
+/// `Bank::new_with_paths` panics.
+pub fn bootstrap_vote_account(vote: Pubkey, identity: Pubkey) -> (Pubkey, AccountSharedData) {
+    // `commission = 0` matches the genesis_utils convention; for a single-validator
+    // bootstrap there's nothing to commission against. `lamports` is just the account
+    // balance — the vote-state constructor doesn't read it, but the account needs to
+    // be rent-exempt; 1 SOL is comfortably above the ≈2.28M floor for the 200-byte
+    // VoteState payload.
+    let account = vote_state_helpers::create_account(&vote, &identity, 0, BOOTSTRAP_LAMPORTS);
+    (vote, account)
 }
 
-/// Build the bootstrap stake account. Same shape as the vote account at v0 (see
-/// module doc).
-pub fn bootstrap_stake_account(stake: Pubkey) -> (Pubkey, AccountSharedData) {
-    (
-        stake,
-        AccountSharedData::new(BOOTSTRAP_LAMPORTS, 0, &system_program::id()),
-    )
+/// Build the bootstrap stake account, fully initialized at slot 0 with the stake
+/// delegated to the bootstrap vote account.
+///
+/// Wraps `solana_stake_program::stake_state::create_account` — the canonical
+/// constructor `solana_runtime::genesis_utils` uses. The resulting account:
+///
+/// - Owner: stake program.
+/// - Data: serialized `StakeStateV2::Stake(Meta, Stake, StakeFlags::empty())` with
+///   `Stake.delegation.voter_pubkey = vote_pubkey`, `activation_epoch = Epoch::MAX`
+///   (the bootstrap-stake marker — same convention as
+///   `solana_runtime::genesis_utils`; see field doc on
+///   `solana_stake_interface::state::Delegation::activation_epoch`),
+///   `deactivation_epoch = u64::MAX`, and `delegation.stake = lamports -
+///   rent_exempt_reserve`.
+/// - Lamports: `BOOTSTRAP_LAMPORTS` (1 SOL); the rent-exempt reserve for
+///   `StakeStateV2::size_of()` is ≈2.28M lamports, leaving ≈997M lamports of actual
+///   delegation. This is what populates `Stakes::staked_nodes` so the runtime can
+///   build a leader schedule at slot 0.
+///
+/// The vote_account argument is the AccountSharedData from
+/// [`bootstrap_vote_account`] — `stake_state::create_account` reads the embedded
+/// `VoteState` to wire the delegation correctly. Order matters: the vote account must
+/// be constructed first.
+pub fn bootstrap_stake_account(
+    stake: Pubkey,
+    vote: Pubkey,
+    vote_account: &AccountSharedData,
+) -> (Pubkey, AccountSharedData) {
+    // `Rent::default()` matches what the genesis config will use (we don't override
+    // rent in `assemble_genesis_config`); the constructor uses it to compute the
+    // rent-exempt reserve embedded in the `Meta`.
+    let rent = Rent::default();
+    let account =
+        stake_state_helpers::create_account(&stake, &vote, vote_account, &rent, BOOTSTRAP_LAMPORTS);
+    (stake, account)
 }
 
 /// Build the faucet holding.
@@ -148,6 +208,9 @@ fn bridge_pubkey_to_program(pk: Pubkey) -> solana_program::pubkey::Pubkey {
 mod tests {
     use super::*;
     use solana_account::ReadableAccount;
+    use solana_sdk_ids::{stake as stake_program, vote as vote_program};
+    use solana_stake_interface::state::{Delegation, StakeStateV2};
+    use solana_vote_interface::state::VoteStateV3;
 
     fn pk(byte: u8) -> Pubkey {
         Pubkey::new_from_array([byte; 32])
@@ -164,19 +227,110 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_vote_account_matches_identity_shape() {
-        let (key, acct) = bootstrap_vote_account(pk(2));
-        assert_eq!(key, pk(2));
+    fn bootstrap_vote_account_is_owned_by_vote_program_with_serialized_state() {
+        let identity = pk(1);
+        let vote = pk(2);
+        let (key, acct) = bootstrap_vote_account(vote, identity);
+        assert_eq!(key, vote);
         assert_eq!(acct.lamports(), BOOTSTRAP_LAMPORTS);
-        assert_eq!(*acct.owner(), system_program::id());
+        // Must be vote-program-owned so the runtime's bank-bootstrap recognizes it as
+        // a vote account.
+        assert_eq!(*acct.owner(), vote_program::id());
+        // Data is exactly VoteStateV3::size_of() bytes; the constructor sizes the
+        // account to fit a serialized VoteStateVersions::Current(VoteStateV3).
+        assert_eq!(acct.data().len(), VoteStateV3::size_of());
     }
 
     #[test]
-    fn bootstrap_stake_account_matches_identity_shape() {
-        let (key, acct) = bootstrap_stake_account(pk(3));
-        assert_eq!(key, pk(3));
-        assert_eq!(acct.lamports(), BOOTSTRAP_LAMPORTS);
-        assert_eq!(*acct.owner(), system_program::id());
+    fn bootstrap_vote_account_data_decodes_to_voteinit_with_node_pubkey() {
+        // Round-trip the baked data through VoteState::deserialize (which internally
+        // bincode-decodes into VoteStateVersions and converts to current) and confirm:
+        //   - node_pubkey == identity
+        //   - authorized_withdrawer == vote
+        //   - authorized_voter for epoch 0 == vote
+        //   - commission == 0
+        // — the four invariants the runtime's stake_state ↔ vote_state wiring
+        // depends on at slot 0.
+        let identity = pk(11);
+        let vote = pk(22);
+        let (_key, acct) = bootstrap_vote_account(vote, identity);
+        let state = VoteStateV3::deserialize(acct.data())
+            .expect("VoteStateV3::deserialize must accept baked data");
+        assert_eq!(state.node_pubkey, identity);
+        // authorized_withdrawer is a single Pubkey on VoteStateV3.
+        assert_eq!(state.authorized_withdrawer, vote);
+        // authorized_voters is a small ring buffer keyed by epoch 0.
+        let voter_for_epoch_0 = state
+            .authorized_voters()
+            .get_authorized_voter(0)
+            .expect("epoch 0 authorized voter must be set");
+        assert_eq!(voter_for_epoch_0, vote);
+        assert_eq!(state.commission, 0);
+    }
+
+    #[test]
+    fn bootstrap_stake_account_is_owned_by_stake_program_with_serialized_delegated_state() {
+        let identity = pk(1);
+        let vote = pk(2);
+        let stake = pk(3);
+        let (_, vote_acct) = bootstrap_vote_account(vote, identity);
+        let (key, stake_acct) = bootstrap_stake_account(stake, vote, &vote_acct);
+        assert_eq!(key, stake);
+        assert_eq!(stake_acct.lamports(), BOOTSTRAP_LAMPORTS);
+        assert_eq!(*stake_acct.owner(), stake_program::id());
+        // Data is exactly StakeStateV2::size_of() bytes.
+        assert_eq!(stake_acct.data().len(), StakeStateV2::size_of());
+    }
+
+    #[test]
+    fn bootstrap_stake_account_decodes_to_stake_variant_with_positive_delegation() {
+        // The runtime's `Stakes::activate_epoch` requires `StakeStateV2::Stake` (NOT
+        // `Initialized` or `Uninitialized`) with `delegation.stake > 0` and
+        // `voter_pubkey == bootstrap vote account`. This is the test that proves
+        // genesis would no longer panic on "no staked nodes exist".
+        let identity = pk(1);
+        let vote = pk(2);
+        let stake = pk(3);
+        let (_, vote_acct) = bootstrap_vote_account(vote, identity);
+        let (_, stake_acct) = bootstrap_stake_account(stake, vote, &vote_acct);
+
+        let decoded: StakeStateV2 = bincode::deserialize(stake_acct.data())
+            .expect("StakeStateV2 must bincode-deserialize");
+        match decoded {
+            StakeStateV2::Stake(meta, stake_inner, _flags) => {
+                let delegation: Delegation = stake_inner.delegation;
+                // `solana-stake-interface = 2.0.2` is on `solana-pubkey = 3.0.0`
+                // which re-exports `solana_address::Address as Pubkey`; our crate
+                // is on `solana-pubkey = 2.x`. Both 32-byte arrays — bridge via bytes
+                // so the type skew doesn't make the equality fail at the type level.
+                let delegated_voter_bytes: [u8; 32] = delegation.voter_pubkey.to_bytes();
+                assert_eq!(
+                    delegated_voter_bytes,
+                    vote.to_bytes(),
+                    "delegation must point at the bootstrap vote pubkey"
+                );
+                // For bootstrap stakes, `activation_epoch = Epoch::MAX` is the
+                // canonical marker that the stake is fully active from genesis with
+                // no warmup/cooldown — see the field doc on `Delegation` in
+                // `solana-stake-interface`. `solana_runtime::genesis_utils` follows
+                // the same convention via `stake_state::create_account`'s
+                // `Epoch::MAX` argument.
+                assert_eq!(
+                    delegation.activation_epoch,
+                    u64::MAX,
+                    "bootstrap stake must use Epoch::MAX as the activation epoch"
+                );
+                assert!(delegation.stake > 0, "delegated stake must be positive (got {})", delegation.stake);
+                // Sanity: stake = lamports - rent_exempt_reserve. With 1 SOL deposit
+                // and a ≈2.28M reserve for a 200-byte StakeStateV2, we expect ≈997M
+                // lamports of delegation.
+                let rent = Rent::default();
+                let expected_reserve = rent.minimum_balance(StakeStateV2::size_of());
+                assert_eq!(meta.rent_exempt_reserve, expected_reserve);
+                assert_eq!(delegation.stake, BOOTSTRAP_LAMPORTS - expected_reserve);
+            }
+            other => panic!("expected StakeStateV2::Stake variant, got {other:?}"),
+        }
     }
 
     #[test]

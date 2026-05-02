@@ -102,12 +102,25 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
 
     let (k, a) = bootstrap_identity_account(identity_pk);
     config.add_account(k, a);
-    let (k, a) = bootstrap_vote_account(vote_pk);
-    config.add_account(k, a);
-    let (k, a) = bootstrap_stake_account(stake_pk);
+    // Vote first — the stake account constructor reads the vote account's serialized
+    // VoteState to wire the delegation. Order matters here.
+    let (k, vote_acct) = bootstrap_vote_account(vote_pk, identity_pk);
+    config.add_account(k, vote_acct.clone());
+    let (k, a) = bootstrap_stake_account(stake_pk, vote_pk, &vote_acct);
     config.add_account(k, a);
     let (k, a) = faucet_account(faucet_pk);
     config.add_account(k, a);
+
+    // ---- Stake program genesis accounts (config + epoch rewards sysvar) ----
+    //
+    // `solana_runtime::genesis_utils::create_genesis_config_with_leader_ex_no_features`
+    // calls this same helper at the end of its bootstrap. It installs:
+    //   - the stake config program account, and
+    //   - the epoch_rewards sysvar account.
+    // Both are runtime prerequisites — without them, the bank-bootstrap path that
+    // resolves the stake delegation can't load the stake program's config (used for
+    // warmup/cooldown rate calculation), causing slot-0 init to fail.
+    solana_stake_program::add_genesis_accounts(&mut config);
 
     // ---- Treasury PDA ----
     let treasury_lamports = inputs.composed.treasury_pda_lamports;
@@ -293,9 +306,12 @@ mod tests {
         assert_eq!(summary.native_programs_installed.len(), 1);
         // Four CTE gates flipped on.
         assert_eq!(summary.feature_gates_activated.len(), 4);
-        // Account total: 4 bootstrap + treasury + lazy-claim config + 4 features = 10.
-        assert_eq!(summary.total_accounts, 10);
-        // Total lamports: 4*1SOL + treasury + LC rent + 4*feature rent.
+        // Account total: 4 bootstrap + treasury + lazy-claim config + 4 features +
+        // 2 from `solana_stake_program::add_genesis_accounts` (stake config program +
+        // epoch rewards sysvar) = 12.
+        assert_eq!(summary.total_accounts, 12);
+        // Total lamports: 4*1SOL + treasury + LC rent + 4*feature rent + stake
+        // genesis accounts. Treasury alone dwarfs everything else.
         assert!(summary.total_lamports >= 485_192_075_139_020_370);
     }
 
@@ -437,16 +453,17 @@ mod tests {
 
     #[test]
     fn assemble_total_accounts_matches_independent_count() {
-        // 4 bootstrap + treasury + lazy-claim config + 4 features = 10 (no programs).
+        // 4 bootstrap + treasury + lazy-claim config + 4 features +
+        // 2 stake-program genesis accounts (config + epoch rewards) = 12 (no programs).
         let inputs = synthetic_inputs();
         let (_, summary) = assemble_genesis_config(&inputs).expect("assemble");
-        assert_eq!(summary.total_accounts, 10);
+        assert_eq!(summary.total_accounts, 12);
     }
 
     #[test]
     fn assemble_with_two_programs_yields_total_accounts_eq_baseline_plus_four() {
         // Each program installation adds 2 accounts (Program + ProgramData), so
-        // 2 programs ⇒ +4 accounts vs the no-programs baseline of 10.
+        // 2 programs ⇒ +4 accounts vs the no-programs baseline of 12.
         let dir = tempfile::tempdir().expect("tempdir");
         let lc = dir.path().join("lc.so");
         std::fs::write(&lc, vec![1u8; 16]).unwrap();
@@ -457,7 +474,89 @@ mod tests {
         inputs.lazy_claim_so = Some(lc);
         inputs.bridge_so = Some(br);
         let (_, summary) = assemble_genesis_config(&inputs).expect("assemble");
-        assert_eq!(summary.total_accounts, 10 + 4);
+        assert_eq!(summary.total_accounts, 12 + 4);
         assert_eq!(summary.programs_installed.len(), 2);
+    }
+
+    #[test]
+    fn assemble_produces_vote_account_at_vote_pubkey_with_correct_owner() {
+        // The end-to-end check that the runtime would not panic on
+        // "no staked nodes exist": the assembled GenesisConfig must contain a vote
+        // account at the vote pubkey, owned by the vote program, with non-empty data.
+        use solana_sdk_ids::vote as vote_program;
+        let inputs = synthetic_inputs();
+        let (config, summary) = assemble_genesis_config(&inputs).expect("assemble");
+        let vote_acct = config
+            .accounts
+            .get(&summary.bootstrap_pubkeys.vote)
+            .expect("vote account must exist at the vote pubkey");
+        assert_eq!(vote_acct.owner, vote_program::id());
+        assert!(!vote_acct.data.is_empty(), "vote account must carry serialized state");
+    }
+
+    #[test]
+    fn assemble_produces_stake_account_with_active_delegation_to_vote_pubkey() {
+        // The other half of the runtime invariant: a `StakeStateV2::Stake` variant
+        // at the stake pubkey, with `delegation.voter_pubkey == vote_pubkey` and
+        // `delegation.stake > 0`. This is what the runtime's
+        // `Stakes::activate_epoch` reads to populate `staked_nodes` at slot 0 — the
+        // missing piece that caused the original `Bank::new_with_paths` panic.
+        use solana_sdk_ids::stake as stake_program;
+        use solana_stake_interface::state::StakeStateV2;
+        let inputs = synthetic_inputs();
+        let (config, summary) = assemble_genesis_config(&inputs).expect("assemble");
+        let stake_acct = config
+            .accounts
+            .get(&summary.bootstrap_pubkeys.stake)
+            .expect("stake account must exist at the stake pubkey");
+        assert_eq!(stake_acct.owner, stake_program::id());
+
+        let decoded: StakeStateV2 = bincode::deserialize(&stake_acct.data)
+            .expect("stake account must bincode-decode to StakeStateV2");
+        match decoded {
+            StakeStateV2::Stake(_meta, stake_inner, _flags) => {
+                // `solana-stake-interface = 2.0.2` is on `solana-pubkey = 3.0.0`
+                // (re-exports `solana_address::Address as Pubkey`); our crate is on
+                // `solana-pubkey = 2.x`. Bridge via `to_bytes()` so the equality
+                // compares the underlying 32-byte arrays rather than the
+                // typed-but-distinct wrappers.
+                let delegated_voter_bytes: [u8; 32] = stake_inner.delegation.voter_pubkey.to_bytes();
+                assert_eq!(
+                    delegated_voter_bytes,
+                    summary.bootstrap_pubkeys.vote.to_bytes(),
+                    "delegation must point at the bootstrap vote pubkey"
+                );
+                assert!(
+                    stake_inner.delegation.stake > 0,
+                    "delegation stake must be positive (got {})",
+                    stake_inner.delegation.stake
+                );
+                // Bootstrap stakes use Epoch::MAX as the activation marker —
+                // matches what `solana_runtime::genesis_utils` produces via
+                // `stake_state::create_account`. See the field doc on
+                // `Delegation::activation_epoch` for why.
+                assert_eq!(stake_inner.delegation.activation_epoch, u64::MAX);
+            }
+            other => panic!(
+                "expected StakeStateV2::Stake (the variant the runtime requires at slot 0), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn assemble_installs_stake_config_and_epoch_rewards_sysvar() {
+        // `solana_stake_program::add_genesis_accounts` injects the stake config
+        // program account and the epoch_rewards sysvar — both are runtime
+        // prerequisites that the previous version of this crate was missing. We
+        // verify the +2 accounts show up by comparing the no-programs total against
+        // what we'd get with only the bootstrap+treasury+LC+features (i.e., 10).
+        let inputs = synthetic_inputs();
+        let (config, summary) = assemble_genesis_config(&inputs).expect("assemble");
+
+        // Total must include the 2 stake-program genesis accounts. We don't pin the
+        // exact pubkeys because they're sysvar/program IDs the stake-program crate
+        // owns; instead we confirm the count math holds.
+        assert_eq!(summary.total_accounts, 12);
+        assert_eq!(config.accounts.len(), 12);
     }
 }
