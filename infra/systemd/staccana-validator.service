@@ -1,5 +1,5 @@
 [Unit]
-Description=Staccana validator
+Description=Staccana validator (bootstrap / val-1 — runs without --entrypoint)
 After=network-online.target
 Wants=network-online.target
 
@@ -17,43 +17,24 @@ RestartSec=10s
 Environment="RUST_LOG=solana=info,solana_metrics=warn"
 Environment="SOLANA_METRICS_CONFIG=host=https://metrics.example,db=staccana,u=writer,p=changeme"
 
-# --gossip-host: this validator's PUBLIC IP, advertised over gossip. Required
-# when --entrypoint is set so the validator can start without first contacting
-# the entrypoint to ask "what's my public IP?" — that lookup fails when the
-# entrypoint isn't reachable yet, which is the bootstrap chicken-and-egg.
-Environment="STACCANA_THIS_PUBLIC_IP=84.32.220.211"
-# Address of validator-2's gossip endpoint, used as our entrypoint so the two
-# validators discover each other. Default 84.32.220.76:8001 = the hip-jawfish
-# Cherryservers box. Override via env var if you put validator-2 elsewhere.
-Environment="STACCANA_VAL2_GOSSIP=84.32.220.76:8001"
-# --known-validator pins the peer's identity pubkey. Without it, the validator
-# would only fetch a snapshot from validators it has been told are trusted —
-# we don't fetch snapshots in genesis-bootstrap mode, but the flag also has the
-# side effect of making gossip prioritize this peer for vote propagation.
-Environment="STACCANA_VAL2_IDENTITY=PLACEHOLDER_REPLACE_WITH_VAL2_IDENTITY_PUBKEY"
-
-# /etc/staccana/bank-hash provides BANK_HASH, GENESIS_HASH, SHRED_VERSION (written
-# by step 30 via `agave-ledger-tool verify --print-bank-hash` and `shred-version`).
-# The leading `-` makes systemd tolerate the file being missing on first run.
-EnvironmentFile=-/etc/staccana/bank-hash
-
+# Bootstrap validator pattern from agave's multinode-demo/bootstrap-validator.sh:
+# NO --entrypoint, NO --bind-address, NO --gossip-host. The bootstrap validator
+# runs alone, exposes ip_echo_server on its gossip port, and accepts incoming
+# gossip from joining validators (val-2). Skipping --entrypoint causes agave
+# to skip its own port-reachability check (no entrypoint to ask) — that's why
+# we can drop --no-port-check / --no-snapshot-fetch / --no-genesis-fetch from
+# the bootstrap unit.
 ExecStart=/usr/local/bin/agave-validator \
   --identity /etc/staccana/keys/identity.json \
   --vote-account /etc/staccana/keys/vote.json \
   --ledger /var/lib/staccana/ledger \
   --accounts /var/lib/staccana/accounts \
-  --snapshot-interval-slots 100 \
-  --maximum-local-snapshot-age 500 \
+  --snapshot-interval-slots 200 \
+  --no-incremental-snapshots \
   --limit-ledger-size 200000000 \
   --no-poh-speed-test \
   --no-os-network-limits-test \
-  --no-port-check \
-  --no-snapshot-fetch \
-  --no-genesis-fetch \
   --no-wait-for-vote-to-start-leader \
-  --expected-shred-version ${SHRED_VERSION} \
-  --bind-address ${STACCANA_THIS_PUBLIC_IP} \
-  --gossip-host ${STACCANA_THIS_PUBLIC_IP} \
   --full-rpc-api \
   --allow-private-addr \
   --rpc-port 8899 \
@@ -61,30 +42,6 @@ ExecStart=/usr/local/bin/agave-validator \
   --gossip-port 8001 \
   --dynamic-port-range 8002-8020 \
   --log /var/log/staccana/validator.log
-
-# --rpc-bind-address 127.0.0.1: bind RPC to localhost only. If we bind to
-# 0.0.0.0, agave runs an ip_echo_server reachability check on the public IP
-# for ports 8899/8900 — which fails on Cherryservers (port-policy blocks
-# 8899/8900 inter-host even though there's no UFW rule), and the validator
-# exits and restart-loops. Localhost binding skips the public-reachability
-# check, RPC stays up for explorer / UIs hitting it from the same box.
-
-# Multi-validator bootstrap (vs the failed solo-bootstrap attempt with --wait-for-
-# supermajority): with two staked validators in the genesis bank, both can clear the
-# tower-BFT "tower not deep enough" escape on their first vote independently. Once
-# their vote txs reach each other via gossip (--entrypoint $STACCANA_VAL2_GOSSIP),
-# voted_stakes[N] becomes non-zero for future threshold checks and the chain rolls.
-# --no-wait-for-vote-to-start-leader: bypass the cold-start interlock so we can
-#   produce blocks before the first vote lands (the vote will land via gossip from
-#   the peer once it does the same).
-# --entrypoint <ADDR>: where to discover other validators. Both boxes point at each
-#   other; gossip handles the bidirectional discovery from there.
-# --rpc-bind-address 0.0.0.0: let the explorer / bridge UIs hit RPC over the public
-#   interface (was 127.0.0.1 before; the firewall / nginx layer fronts it).
-# --full-rpc-api: enables the full set of RPC methods (getBlock with rewards,
-#   getStakes, etc) that the explorer + bridge UIs need.
-# --allow-private-addr: permits gossip with peers on RFC1918 private addresses, which
-#   is what we'll use when val-eu / val-apac join over wireguard or a private VPC.
 
 [Install]
 WantedBy=multi-user.target
