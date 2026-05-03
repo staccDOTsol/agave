@@ -95,11 +95,62 @@ export default function PumpPage(): JSX.Element {
         }
       }
       setRows(decoded);
-      // Kick off metadata fetches lazily — none if no URI is known. For now
-      // the on-chain BondingCurve doesn't carry the URI, so this is a no-op
-      // until the MetadataPointer wiring lands. (Curves created via the
-      // updated /pump/create flow can write their metadata into the token
-      // mint's MetadataPointer extension; not implemented in this pass.)
+
+      // Bulk-enrich metadata from each Token-22 mint's TokenMetadata extension.
+      // Use getTokenMetadata for each mint; parallelize with Promise.all so all
+      // 100 cards get metadata in one round-trip wave (~1s on staccana RPC).
+      // For curves whose mint has no extension yet (older launches), metadata
+      // stays null and the card renders the placeholder identity.
+      try {
+        const { getTokenMetadata } = await import("@solana/spl-token");
+        const enrichedEntries = await Promise.all(
+          decoded.map(async (row) => {
+            try {
+              const onchain = await getTokenMetadata(
+                connection,
+                row.curve.mint,
+                "confirmed",
+                TOKEN_2022_PROGRAM_ID,
+              );
+              if (!onchain) return [row.pubkey, null] as const;
+              const merged: PumpTokenMetadata = {
+                name: onchain.name || undefined,
+                symbol: onchain.symbol || undefined,
+              };
+              for (const [k, v] of onchain.additionalMetadata ?? []) {
+                if (k === "description") merged.description = v;
+                if (k === "twitter") merged.twitter = v;
+                if (k === "telegram") merged.telegram = v;
+                if (k === "website") merged.website = v;
+                if (k === "image") merged.image = v;
+              }
+              // Best-effort fetch of off-chain JSON for image (don't block list
+              // render if it fails — the card has a fallback gradient avatar).
+              if (onchain.uri && /^https?:\/\//.test(onchain.uri) && !merged.image) {
+                try {
+                  const r = await fetch(onchain.uri, { cache: "force-cache" });
+                  if (r.ok) {
+                    const j = (await r.json()) as Partial<PumpTokenMetadata>;
+                    if (j.image) merged.image = j.image;
+                    if (j.description && !merged.description) merged.description = j.description;
+                  }
+                } catch {
+                  /* ignore — gradient avatar */
+                }
+              }
+              return [row.pubkey, merged] as const;
+            } catch {
+              return [row.pubkey, null] as const;
+            }
+          }),
+        );
+        const byPubkey = new Map(enrichedEntries);
+        setRows((prev) =>
+          prev.map((r) => ({ ...r, metadata: byPubkey.get(r.pubkey) ?? r.metadata })),
+        );
+      } catch (err) {
+        console.warn("[launch] metadata bulk-enrich failed", err);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
