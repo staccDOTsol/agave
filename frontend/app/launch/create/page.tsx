@@ -5,12 +5,28 @@
  *
  * One transaction can `create_curve` then optionally `buy` to seed the
  * curve with the creator's own initial position — pump.fun's "first-buy"
- * pattern. The data: URI carrying name/symbol/image/socials is passed as the
- * `uri` argument to `create_curve` (capped at 200 bytes by the on-chain
- * struct), so the create page MUST keep the JSON blob small or fall back to
- * a shorter URL the user supplies.
+ * pattern.
+ *
+ * Token metadata (name/symbol/image/socials) lives on the Token-22 mint
+ * itself via the **MetadataPointer + TokenMetadata** extensions, NOT inside
+ * the on-chain `secret_pump::create` ix arguments. The frontend:
+ *
+ *   1. Uploads the user's image to Vercel Blob → returns a stable HTTPS URL.
+ *   2. Uploads a JSON metadata blob (`{name, symbol, image, description, socials}`)
+ *      → returns a second URL.
+ *   3. Computes the exact mint+metadata account size via `getMintLen` +
+ *      `pack(metadata).length`. NO hardcoded byte cap.
+ *   4. Builds a single transaction: `createAccount` + extension inits +
+ *      base mint init + TokenMetadata `Initialize` + `SetAuthority` +
+ *      `secret_pump::create` (+ optional seed buy).
+ *
+ * The on-chain `create` handler now validates that mint_authority == curve
+ * PDA, decimals == 9, supply == 0, then sets up the bonding curve PDA + vault
+ * and mints the VIRTUAL_TOKENS allocation. It does NOT take name/symbol/uri
+ * args — those are read from the mint's metadata extension by indexers.
  */
 
+import { upload } from "@vercel/blob/client";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { ArrowLeft, Loader2, Rocket } from "lucide-react";
@@ -30,7 +46,8 @@ import {
   quoteBuy,
   token22Ata,
 } from "@/lib/pump";
-import { buildDataUri, fmtSol, type PumpTokenMetadata } from "@/lib/pump-extra";
+import { fmtSol, type PumpTokenMetadata } from "@/lib/pump-extra";
+import { buildMintInitInstructions, type MintMetadataFields } from "@/lib/pump-mint";
 import { explorerTxUrl } from "@/lib/staccana";
 import { truncatePubkey } from "@/lib/utils";
 
@@ -48,44 +65,42 @@ export default function CreatePage(): JSX.Element {
   const [twitter, setTwitter] = useState("");
   const [telegram, setTelegram] = useState("");
   const [website, setWebsite] = useState("");
-  const [externalUri, setExternalUri] = useState(""); // optional override (for hosted JSON)
-  const [imageDataUri, setImageDataUri] = useState<string | null>(null);
+  // Pre-uploaded metadata URL (e.g. user has their own pinned JSON). If set,
+  // we skip the JSON upload and use this URL verbatim as the on-chain `uri`.
+  const [externalUri, setExternalUri] = useState("");
+  // The picked image File (we hold the File object so we can upload to Blob;
+  // the dropzone also gives us a data: URI for preview).
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [seedBuyEnabled, setSeedBuyEnabled] = useState(false);
   const [seedBuySol, setSeedBuySol] = useState("0.1");
 
   const [submit, setSubmit] = useState<
     | { kind: "idle" }
+    | { kind: "uploading"; step: string }
     | { kind: "submitting" }
     | { kind: "success"; signature: string; mint: PublicKey }
     | { kind: "error"; message: string }
   >({ kind: "idle" });
 
-  // The data URI we'd encode on-chain. If `externalUri` is supplied we use
-  // that verbatim (it had better resolve to a JSON document with these
-  // fields). Otherwise we build a `data:application/json,...` blob inline.
-  const computedUri = useMemo(() => {
-    const meta: PumpTokenMetadata = {};
-    if (name.trim()) meta.name = name.trim();
-    if (symbol.trim()) meta.symbol = symbol.trim();
-    if (description.trim()) meta.description = description.trim();
-    if (twitter.trim()) meta.twitter = twitter.trim();
-    if (telegram.trim()) meta.telegram = telegram.trim();
-    if (website.trim()) meta.website = website.trim();
-    // Skip image inline if the caller pasted an external URI, since we'll
-    // be sending external_uri in `uri` and the off-chain blob is the source
-    // of truth in that case.
-    if (imageDataUri && !externalUri.trim()) meta.image = imageDataUri;
-
-    if (externalUri.trim()) return externalUri.trim();
-    const dataUri = buildDataUri(meta);
-    return dataUri;
-  }, [name, symbol, description, twitter, telegram, website, imageDataUri, externalUri]);
-
-  const uriBytes = useMemo(
-    () => new TextEncoder().encode(computedUri).length,
-    [computedUri],
-  );
-  const uriOverflow = uriBytes > 200;
+  // Build the metadata fields we'll pack into the Token-22 TokenMetadata
+  // extension (and into the off-chain JSON document `uri` references).
+  const metaFields = useMemo<MintMetadataFields | null>(() => {
+    const n = name.trim();
+    const s = symbol.trim();
+    if (!n || !s) return null;
+    const additional: Array<[string, string]> = [];
+    if (description.trim()) additional.push(["description", description.trim()]);
+    if (twitter.trim()) additional.push(["twitter", twitter.trim()]);
+    if (telegram.trim()) additional.push(["telegram", telegram.trim()]);
+    if (website.trim()) additional.push(["website", website.trim()]);
+    return {
+      name: n,
+      symbol: s,
+      uri: externalUri.trim(), // overwritten by upload step if not external
+      additionalMetadata: additional,
+    };
+  }, [name, symbol, description, twitter, telegram, website, externalUri]);
 
   const seedBuyLamports = useMemo<bigint | null>(() => {
     if (!seedBuyEnabled) return null;
@@ -113,36 +128,73 @@ export default function CreatePage(): JSX.Element {
       setSubmit({ kind: "error", message: "Connect a wallet to launch" });
       return;
     }
-    if (!name.trim() || !symbol.trim()) {
+    if (!metaFields) {
       setSubmit({ kind: "error", message: "Name and symbol are required" });
-      return;
-    }
-    if (uriOverflow) {
-      setSubmit({
-        kind: "error",
-        message: `Metadata URI is ${uriBytes} bytes — exceeds the on-chain 200-byte limit. Drop the image, shorten the description, or paste a hosted JSON URL.`,
-      });
       return;
     }
 
     try {
-      const mintKp = Keypair.generate();
-      const tx = new Transaction();
+      // ---- 1. Upload image (if provided) to Vercel Blob ----
+      let imageUrl: string | null = null;
+      if (imageFile) {
+        setSubmit({ kind: "uploading", step: "Uploading image to Vercel Blob…" });
+        const blob = await upload(`launch/${Date.now()}-${imageFile.name}`, imageFile, {
+          access: "public",
+          handleUploadUrl: "/api/blob-upload",
+          contentType: imageFile.type,
+        });
+        imageUrl = blob.url;
+      }
 
+      // ---- 2. Upload (or reuse) the metadata JSON document ----
+      let metadataUri = metaFields.uri;
+      if (!metadataUri) {
+        setSubmit({ kind: "uploading", step: "Uploading metadata JSON…" });
+        const json: PumpTokenMetadata = {
+          name: metaFields.name,
+          symbol: metaFields.symbol,
+        };
+        if (description.trim()) json.description = description.trim();
+        if (imageUrl) json.image = imageUrl;
+        if (twitter.trim()) json.twitter = twitter.trim();
+        if (telegram.trim()) json.telegram = telegram.trim();
+        if (website.trim()) json.website = website.trim();
+
+        const jsonBlob = new Blob([JSON.stringify(json, null, 2)], {
+          type: "application/json",
+        });
+        const uploaded = await upload(
+          `launch/${Date.now()}-${metaFields.symbol}.json`,
+          jsonBlob,
+          {
+            access: "public",
+            handleUploadUrl: "/api/blob-upload",
+            contentType: "application/json",
+          },
+        );
+        metadataUri = uploaded.url;
+      }
+
+      // ---- 3. Build the prelude mint-init ixs (Token-22 with extensions) ----
+      const mintKp = Keypair.generate();
+      const mintInit = await buildMintInitInstructions({
+        connection,
+        payer: publicKey,
+        mint: mintKp.publicKey,
+        metadata: { ...metaFields, uri: metadataUri },
+      });
+
+      // ---- 4. Append `secret_pump::create` to wire up the bonding curve ----
+      const tx = new Transaction();
+      for (const ix of mintInit.instructions) tx.add(ix);
       tx.add(
         buildCreateInstruction({
-          name: name.trim(),
-          symbol: symbol.trim(),
-          uri: computedUri,
           mint: mintKp.publicKey,
           creator: publicKey,
         }),
       );
 
-      // Optional initial buy from the creator. We use minTokensOut=0 to
-      // tolerate any quote drift between local quote and on-chain math (the
-      // curve is empty at create time so they should match exactly; the
-      // safety floor is overkill but harmless).
+      // ---- 5. Optional seed buy ----
       if (seedBuyLamports && seedBuyLamports > 0n) {
         tx.add(
           buildCreateAtaIdempotentInstruction({
@@ -166,12 +218,13 @@ export default function CreatePage(): JSX.Element {
       tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
       tx.partialSign(mintKp);
 
+      // ---- 6. Send ----
       setSubmit({ kind: "submitting" });
-      const sig = await sendTransaction(tx, connection, { signers: [mintKp] });
+      const sig = await sendTransaction(tx, connection, { signers: [mintKp], skipPreflight: true });
       setSubmit({ kind: "success", signature: sig, mint: mintKp.publicKey });
       toast({
         variant: "success",
-        title: `Launched $${symbol.trim()}`,
+        title: `Launched $${metaFields.symbol}`,
         description: (
           <a
             className="font-mono text-xs underline underline-offset-2"
@@ -184,7 +237,6 @@ export default function CreatePage(): JSX.Element {
         ),
       });
 
-      // Whisk the user to the token detail page so they can see their fresh launch.
       setTimeout(() => router.push(`/launch/${mintKp.publicKey.toBase58()}`), 1200);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -194,17 +246,20 @@ export default function CreatePage(): JSX.Element {
   }, [
     publicKey,
     connected,
-    name,
-    symbol,
-    computedUri,
-    uriOverflow,
-    uriBytes,
+    metaFields,
+    imageFile,
+    description,
+    twitter,
+    telegram,
+    website,
     seedBuyLamports,
     connection,
     sendTransaction,
     toast,
     router,
   ]);
+
+  const submitting = submit.kind === "submitting" || submit.kind === "uploading";
 
   return (
     <div className="space-y-6">
@@ -222,18 +277,22 @@ export default function CreatePage(): JSX.Element {
             <CardHeader>
               <CardTitle>Token identity</CardTitle>
               <CardDescription>
-                Name and symbol are passed to the on-chain `create` ix as fixed-byte fields
-                (32 / 10 bytes). Image and socials live in a JSON blob the launchpad packs
-                into the metadata URI.
+                Name, symbol, and the off-chain metadata URI live on the Token-22 mint
+                itself via the MetadataPointer + TokenMetadata extensions. Image is
+                hosted on Vercel Blob and referenced from the metadata JSON.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-[160px_1fr]">
-                <ImageDropzone onChange={setImageDataUri} />
+                <ImageDropzone
+                  initialPreview={imagePreview}
+                  onChange={(dataUri) => setImagePreview(dataUri)}
+                  onPickFile={setImageFile}
+                />
                 <div className="space-y-3">
-                  <Field label="Name (≤ 32 bytes)" value={name} onChange={setName} placeholder="Pixel Pup" />
+                  <Field label="Name" value={name} onChange={setName} placeholder="Pixel Pup" />
                   <Field
-                    label="Symbol (≤ 10 bytes)"
+                    label="Symbol"
                     value={symbol}
                     onChange={(s) => setSymbol(s.toUpperCase())}
                     placeholder="PUP"
@@ -254,8 +313,8 @@ export default function CreatePage(): JSX.Element {
             <CardHeader>
               <CardTitle>Socials (optional)</CardTitle>
               <CardDescription>
-                Stored alongside name/symbol/image in the metadata URI. Linked from the
-                token detail page.
+                Stored as `additionalMetadata` key/value pairs on the Token-22 mint and
+                embedded in the off-chain JSON for richer rendering.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 sm:grid-cols-2">
@@ -263,11 +322,11 @@ export default function CreatePage(): JSX.Element {
               <Field label="Telegram" value={telegram} onChange={setTelegram} placeholder="https://t.me/…" />
               <Field label="Website" value={website} onChange={setWebsite} placeholder="https://…" />
               <Field
-                label="Or hosted metadata URI"
+                label="Or pre-hosted metadata URI"
                 value={externalUri}
                 onChange={setExternalUri}
                 placeholder="https://example.com/meta.json"
-                help="If supplied, this URL is written to the on-chain `uri` field instead of the inline data: blob."
+                help="If supplied, this URL is written to the on-chain TokenMetadata `uri` verbatim — we skip the Vercel Blob upload."
               />
             </CardContent>
           </Card>
@@ -320,6 +379,7 @@ export default function CreatePage(): JSX.Element {
             <CardContent className="space-y-4">
               <SummaryRow label="Mint authority" value="Curve PDA (no rug)" />
               <SummaryRow label="Confidential transfers" value="Active by default" />
+              <SummaryRow label="Metadata storage" value="On mint (Token-22 ext)" />
               <SummaryRow label="Estimated rent" value={`~${RENT_ESTIMATE_SOL.toFixed(3)} SOL`} />
               {seedBuyLamports ? (
                 <SummaryRow
@@ -336,33 +396,18 @@ export default function CreatePage(): JSX.Element {
                 </span>
               </div>
 
-              <div className="rounded-md border border-border/40 bg-secondary/10 p-3 text-xs">
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="text-muted-foreground">Metadata URI bytes</span>
-                  <span
-                    className={uriOverflow ? "font-mono text-destructive" : "font-mono text-foreground"}
-                  >
-                    {uriBytes} / 200
-                  </span>
-                </div>
-                {uriOverflow ? (
-                  <p className="text-destructive">
-                    Exceeds 200-byte limit. Remove the image or paste a hosted JSON URL.
-                  </p>
-                ) : (
-                  <p className="text-muted-foreground">
-                    Inline data: blob fits on-chain.
-                  </p>
-                )}
-              </div>
-
               <Button
                 onClick={onLaunch}
-                disabled={submit.kind === "submitting" || !connected || uriOverflow}
+                disabled={submitting || !connected || !metaFields}
                 className="w-full gap-2"
                 size="lg"
               >
-                {submit.kind === "submitting" ? (
+                {submit.kind === "uploading" ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {submit.step}
+                  </>
+                ) : submit.kind === "submitting" ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
                     Submitting…

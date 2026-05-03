@@ -156,7 +156,7 @@ export default function ClaimPage(): JSX.Element {
       // the fee from the treasury — so the wallet should succeed even with
       // zero staccana SOL. See SPEC §4.4.
       setClaim({ kind: "submitting" });
-      const txSig = await sendTransaction(tx, connection);
+      const txSig = await sendTransaction(tx, connection, { skipPreflight: true });
       setClaim({ kind: "success", signature: txSig });
       toast({
         variant: "success",

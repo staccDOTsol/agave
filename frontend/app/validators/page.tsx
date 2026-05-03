@@ -297,7 +297,7 @@ export default function ValidatorsPage(): JSX.Element {
         );
       }
 
-      const sig = await sendTransaction(versionedTx, connection);
+      const sig = await sendTransaction(versionedTx, connection, { skipPreflight: true });
       setSubmit({ kind: "success", signature: sig });
       toast({
         variant: "success",

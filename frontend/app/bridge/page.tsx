@@ -298,7 +298,7 @@ export default function BridgePage(): JSX.Element {
       tx.recentBlockhash = blockhash;
 
       setSubmit({ kind: "submitting" });
-      const sig = await sendTransaction(tx, connection);
+      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
       setSubmit({ kind: "success", signature: sig });
       toast({
         variant: "success",

@@ -726,7 +726,7 @@ function TradePanel({
       tx.feePayer = publicKey;
       tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
       setSubmitting(true);
-      const sig = await sendTransaction(tx, connection);
+      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
       setSubmitting(false);
       toast({
         variant: "success",

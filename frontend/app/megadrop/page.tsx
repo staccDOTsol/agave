@@ -307,7 +307,7 @@ export default function MegadropPage(): JSX.Element {
       tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
 
       setSubmit({ kind: "submitting" });
-      const sig = await sendTransaction(tx, connection);
+      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
       setSubmit({ kind: "success", signature: sig });
       toast({
         variant: "success",
