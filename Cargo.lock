@@ -9863,11 +9863,14 @@ name = "staccana-federation-attestor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bs58",
  "clap",
  "serde",
  "serde_json",
  "solana-client",
+ "solana-program",
  "solana-sdk",
+ "solana-transaction-status-client-types",
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
@@ -9992,6 +9995,21 @@ dependencies = [
  "solana-client",
  "solana-program",
  "solana-sdk",
+]
+
+[[package]]
+name = "staccana-megadrop-merkle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "solana-program",
+ "solana-sdk",
+ "staccana-genesis",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -18,6 +18,7 @@ members = [
     "tools/bridge-vault-init",
     "tools/megadrop-init",
     "tools/federation-attestor",
+    "tools/megadrop-merkle",
     "tools/megadrop-snapshot",
     "integration-tests",
     "e2e-tests",

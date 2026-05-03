@@ -25,15 +25,33 @@
 //!
 //! See each module's doc comment for what shipping that piece will require.
 
+pub mod bridge_msg;
+pub mod bridge_observer;
 pub mod config;
+pub mod daemon;
 pub mod observer;
 pub mod publish;
 pub mod sign;
+pub mod state_store;
 
+pub use bridge_msg::{
+    build_mint_message, build_release_message, sign_mint, sign_release, verify_mint,
+    verify_release, MINT_DOMAIN, MINT_MSG_LEN, RELEASE_DOMAIN, RELEASE_MSG_LEN,
+};
+pub use bridge_observer::{
+    extract_burn_events, extract_deposit_events, BridgeRpcClient, BurnEvent as BridgeBurnEvent,
+    DepositEvent as BridgeDepositEvent, SolanaRpcClient, BURN_EVENT_DISCRIMINATOR,
+    DEPOSIT_EVENT_DISCRIMINATOR,
+};
 pub use config::{AttestorConfig, ConfigError};
+pub use daemon::{
+    tick as daemon_tick, DaemonCtx, SignedMintAttestation, SignedReleaseAttestation, Sink,
+    StderrSink,
+};
 pub use observer::{BurnEvent, DepositEvent, Observer, ObserverError};
 pub use publish::{build_update_ratio_ix, publish_attestation, PublishError, UpdateRatioArgs};
 pub use sign::{
     build_attestation_message, sign_attestation, verify_attestation, AttestationInputs,
     SignedAttestation, ATTESTATION_DOMAIN, ATTESTATION_LEN,
 };
+pub use state_store::AttestorState;
