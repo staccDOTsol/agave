@@ -766,6 +766,42 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
         );
       }
 
+      // Also ensure the VAULT's PDA-owned ATA exists. Without this the
+      // deposit ix's TransferChecked CPI rejects with `IncorrectProgramId`
+      // because the destination account doesn't exist yet (System-owned
+      // 0-lamport account ≠ Token-22-owned). This was the actual deposit-
+      // failure mode after the prior `Token Program` vs `Token 2022 Program`
+      // fix. CreateIdempotent with `owner=vault_config_pda` materializes
+      // the ATA at the canonical address; the bridge-vault `deposit`
+      // handler validates `vault_token_account.key() == cfg.vault_token_account`
+      // separately, so a freshly-created ATA at the right address is fine.
+      //
+      // VaultConfig PDA seed: ["vault", asset_id_le] against the mainnet
+      // bridge-vault program. We derive it here instead of adding it to
+      // `DerivedDepositAccounts` because the value is deterministic from
+      // (asset, BRIDGE_VAULT_PROGRAM_ID) — no on-chain read needed.
+      if (
+        !meta.isNativeSol &&
+        accounts.vaultTokenAccount &&
+        accounts.underlyingMint
+      ) {
+        const assetIdLe = new Uint8Array(4);
+        new DataView(assetIdLe.buffer).setUint32(0, asset, true);
+        const [vaultConfigPdaMainnet] = PublicKey.findProgramAddressSync(
+          [Buffer.from("vault"), Buffer.from(assetIdLe)],
+          BRIDGE_VAULT_PROGRAM_ID,
+        );
+        tx.add(
+          createAssociatedTokenAccountIdempotentInstruction(
+            mainnetPubkey, // payer
+            accounts.vaultTokenAccount, // ATA address
+            vaultConfigPdaMainnet, // owner = VaultConfig PDA
+            accounts.underlyingMint, // mint
+            accounts.tokenProgram ?? undefined, // Token-22 for $Staccana
+          ),
+        );
+      }
+
       const ix = buildVaultDepositInstruction({
         asset,
         amount: baseAmount,
