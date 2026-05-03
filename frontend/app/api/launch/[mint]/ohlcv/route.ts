@@ -112,7 +112,17 @@ export async function GET(
     { mint, bucketSec, candles },
     {
       headers: {
-        "cache-control": "public, max-age=10",
+        // `no-store` — NOT `public, max-age=10`. Vercel's edge cache poisoned
+        // a 0-candle response on `bucket=60&limit=240` after an early deploy
+        // (when the DB really had no rows), and even after rows existed +
+        // the chart polled fresh every 10s, the cache held an empty response
+        // for that exact URL. Bisecting by limit confirmed: `limit=5..239,
+        // 241..1000` all returned 1071-byte responses with real candles;
+        // ONLY `limit=240` (the chart's default) returned `[]`. Switching to
+        // no-store makes every request hit the function — the CTE is fast
+        // enough (sub-100ms on Neon HTTP) that the 10s cache wasn't earning
+        // its keep anyway.
+        "cache-control": "no-store",
       },
     },
   );
