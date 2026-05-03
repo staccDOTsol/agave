@@ -102,7 +102,6 @@ export default function PumpPage(): JSX.Element {
       // For curves whose mint has no extension yet (older launches), metadata
       // stays null and the card renders the placeholder identity.
       try {
-        const { getTokenMetadata } = await import("@solana/spl-token");
         const enrichedEntries = await Promise.all(
           decoded.map(async (row) => {
             try {

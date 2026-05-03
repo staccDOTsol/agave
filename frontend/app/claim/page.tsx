@@ -86,7 +86,18 @@ export default function ClaimPage(): JSX.Element {
         if (!r.ok) {
           throw new Error(`/api/claim returned ${r.status}`);
         }
-        const proof = (await r.json()) as InclusionProof;
+        const raw = (await r.json()) as Omit<InclusionProof, "lamports"> & { lamports: number | string | bigint };
+        // Edge fn JSON serializes lamports as a number (since u64 fits in
+        // JS Number for these values). Coerce back to bigint so downstream
+        // bigint arithmetic in formatSol / buildClaimTransaction doesn't
+        // throw "Cannot mix BigInt and other types".
+        const proof: InclusionProof = {
+          ...raw,
+          lamports:
+            typeof raw.lamports === "bigint"
+              ? raw.lamports
+              : BigInt(raw.lamports),
+        };
         setEligibility({ kind: "eligible", proof });
       })
       .catch((err: unknown) => {
