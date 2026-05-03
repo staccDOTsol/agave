@@ -66,6 +66,12 @@ solana-ledger = "2"
 # `MerkleRoot(Hash)` so we get a consistent type universe across the workspace.
 solana-program = { workspace = true }
 
+# Token-22 mint baking — we need access to the on-chain Mint state encoder
+# + the ConfidentialTransferMint extension TLV layout so we can produce a
+# binary-identical mint account at slot 0.
+spl-token-2022 = { version = "8", default-features = false, features = ["no-entrypoint"] }
+spl-pod = "0.5"
+
 # Auxiliary.
 clap = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }

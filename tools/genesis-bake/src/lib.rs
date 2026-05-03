@@ -72,6 +72,7 @@ pub mod accounts;
 pub mod config;
 pub mod emit;
 pub mod features;
+pub mod mints;
 pub mod pdas;
 pub mod programs;
 

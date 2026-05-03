@@ -88,6 +88,45 @@ pub const SPL_ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
 pub const SPL_MEMO_PROGRAM_ID: Pubkey =
     pubkey_from_b58_const(b"MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
+// --- Bridge asset mints ---
+//
+// These three Token-22 mints are baked into genesis at fixed addresses by
+// `crate::mints::canonical_mint_slots`. Each one's `mint_authority` is the
+// bridge program's per-asset PDA at `["asset", asset_id_le_bytes]` against
+// `BRIDGE_PROGRAM_ID` — that's the seed the on-chain `mint`/`burn` ixs
+// `invoke_signed` with. After the rebake, the bridge can mint_to / burn
+// against these mints from slot 0 with no separate post-boot mint creation.
+
+/// wSOL mint = canonical mainnet wSOL address. Bake at this exact pubkey so
+/// Token-22's `sync_native` semantics work — that ix is hardcoded against
+/// this constant inside spl-token-2022.
+pub const WSOL_MINT_ID: Pubkey =
+    pubkey_from_b58_const(b"So11111111111111111111111111111111111111112");
+
+/// stSOL mint. Vanity-padded placeholder; no pre-existing on-chain meaning.
+/// Stable across rebakes.
+pub const STSOL_MINT_ID: Pubkey =
+    pubkey_from_b58_const(b"stsoL1111111111111111111111111111111111111");
+
+/// ssUSDC mint. Vanity-padded placeholder; no pre-existing on-chain meaning.
+/// Stable across rebakes.
+pub const SSUSDC_MINT_ID: Pubkey =
+    pubkey_from_b58_const(b"ssUsDc11111111111111111111111111111111111");
+
+/// Bridge per-asset PDA seed. Mirrors `programs/bridge/src/instructions/mint.rs`'s
+/// `["asset", asset_id_le_bytes]` mint-authority derivation.
+pub const BRIDGE_ASSET_SEED: &[u8] = b"asset";
+
+/// Compute the bridge mint-authority PDA for a given `asset_id`. This is what
+/// the on-chain bridge's `mint` and `burn` ixs `invoke_signed` against; baking
+/// the mints with `mint_authority = bridge_asset_pda(asset_id)` is what wires
+/// the bridge program to be the sole entity that can move supply on these
+/// three asset mints.
+pub fn bridge_asset_pda(asset_id: u32) -> (Pubkey, u8) {
+    let id_le = asset_id.to_le_bytes();
+    Pubkey::find_program_address(&[BRIDGE_ASSET_SEED, &id_le], &BRIDGE_PROGRAM_ID)
+}
+
 /// Seed used for the treasury PDA derivation (single-element seed).
 ///
 /// The validator-subsidy program's CPIs that debit the treasury sign with this seed; if

@@ -207,6 +207,20 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
     config.add_native_instruction_processor(native_name.clone(), native_id);
     let native_programs_installed = vec![(native_name, native_id)];
 
+    // ---- Bridge asset Token-22 mints (wsol/stsol/ssusdc) ----
+    //
+    // Pre-baked at deterministic addresses with mint_authority = bridge per-asset
+    // PDA. Once the chain boots, `bridge::mint` and `bridge::burn` invoke_signed
+    // against those PDAs to move supply — no separate post-boot mint creation
+    // step is needed. wSOL specifically bakes at canonical
+    // `So11111111111111111111111111111111111111112` so Token-22's `sync_native`
+    // wrap/unwrap semantics work.
+    for slot in crate::mints::canonical_mint_slots().iter() {
+        let (pk, acct) = crate::mints::build_mint_account(slot)
+            .with_context(|| format!("building bridge mint {} ({})", slot.name, slot.pubkey))?;
+        config.add_account(pk, acct);
+    }
+
     // ---- Feature gates ----
     let feature_accounts =
         build_all_feature_accounts(&inputs.composed.active_feature_gates)
@@ -445,7 +459,7 @@ mod tests {
         // Account total: 4 bootstrap + treasury + lazy-claim config + 9 features +
         // 2 from `solana_stake_program::add_genesis_accounts` (stake config program +
         // epoch rewards sysvar) = 17.
-        assert_eq!(summary.total_accounts, 18);
+        assert_eq!(summary.total_accounts, 21);
         // Total lamports: 4*1SOL + treasury + LC rent + 4*feature rent + stake
         // genesis accounts. Treasury alone dwarfs everything else.
         assert!(summary.total_lamports >= 485_192_075_139_020_370);
@@ -593,7 +607,7 @@ mod tests {
         // 2 stake-program genesis accounts (config + epoch rewards) = 12 (no programs).
         let inputs = synthetic_inputs();
         let (_, summary) = assemble_genesis_config(&inputs).expect("assemble");
-        assert_eq!(summary.total_accounts, 13);
+        assert_eq!(summary.total_accounts, 16);
     }
 
     #[test]
@@ -610,7 +624,7 @@ mod tests {
         inputs.lazy_claim_so = Some(lc);
         inputs.bridge_so = Some(br);
         let (_, summary) = assemble_genesis_config(&inputs).expect("assemble");
-        assert_eq!(summary.total_accounts, 18 + 4);
+        assert_eq!(summary.total_accounts, 21 + 4);
         assert_eq!(summary.programs_installed.len(), 2);
     }
 
@@ -692,7 +706,7 @@ mod tests {
         // Total must include the 2 stake-program genesis accounts. We don't pin the
         // exact pubkeys because they're sysvar/program IDs the stake-program crate
         // owns; instead we confirm the count math holds.
-        assert_eq!(summary.total_accounts, 13);
+        assert_eq!(summary.total_accounts, 16);
         assert_eq!(config.accounts.len(), 12);
     }
 }
