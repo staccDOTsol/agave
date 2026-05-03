@@ -24,10 +24,7 @@ import {
   WalletProvider,
 } from "@solana/wallet-adapter-react";
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
-import {
-  PhantomWalletAdapter,
-  SolflareWalletAdapter,
-} from "@solana/wallet-adapter-wallets";
+import { SolflareWalletAdapter } from "@solana/wallet-adapter-wallets";
 import { useMemo, type ReactNode } from "react";
 
 import { RPC_URL } from "./staccana";
@@ -40,12 +37,17 @@ interface WalletContextProvidersProps {
  * Top-level wallet provider stack. Drop this around the app tree (in
  * app/layout.tsx) and any descendant component can use the wallet-adapter
  * hooks (`useWallet`, `useConnection`, etc.).
+ *
+ * Wallet adapter list: only adapters for wallets that DON'T self-register via
+ * the Wallet Standard. Phantom (and Backpack, Glow, etc.) ship with their own
+ * Standard registration in the injected provider — including
+ * `PhantomWalletAdapter` here causes a "Phantom was registered as a Standard
+ * Wallet. The Wallet Adapter for Phantom can be removed from your app." dev
+ * warning AND a duplicate entry in the modal. Solflare doesn't auto-register
+ * yet, so we keep its adapter explicit.
  */
 export function WalletContextProviders({ children }: WalletContextProvidersProps): JSX.Element {
-  const wallets = useMemo(
-    () => [new PhantomWalletAdapter(), new SolflareWalletAdapter()],
-    [],
-  );
+  const wallets = useMemo(() => [new SolflareWalletAdapter()], []);
 
   return (
     <ConnectionProvider endpoint={RPC_URL} config={{ commitment: "confirmed" }}>
