@@ -41,6 +41,9 @@ ExecStart=/usr/local/bin/agave-validator \
   --no-wait-for-vote-to-start-leader \
   --gossip-host ${STACCANA_THIS_PUBLIC_IP} \
   --full-rpc-api \
+  --enable-rpc-transaction-history \
+  --enable-extended-tx-metadata-storage \
+  --rpc-pubsub-enable-block-subscription \
   --allow-private-addr \
   --rpc-port 8899 \
   --rpc-bind-address 127.0.0.1 \
