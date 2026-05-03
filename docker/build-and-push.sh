@@ -18,13 +18,28 @@
 #   PLATFORM           buildx platforms (default: linux/amd64; add ,linux/arm64
 #                      for multi-arch — needs qemu emulation set up)
 #   PUSH               1 = docker push, 0 = local build only (default: 1)
+#   DOCKERFILE         Dockerfile to use (default: ./Dockerfile). Use
+#                      ../docker/Dockerfile.multiarch for the multi-stage
+#                      source-build that auto-matches glibc on the runtime
+#                      and avoids the GLIBC_2.38-not-found class of bugs.
+#                      That path requires AGAVE_SRC pointing at an agave
+#                      checkout to be copied into the build context as
+#                      ./agave-src/.
+#   AGAVE_SRC          Path to agave source tree (only when using the
+#                      multiarch Dockerfile). Default: /usr/src/agave.
 
 set -euo pipefail
 
 DOCKER_USERNAME="${DOCKER_USERNAME:-jrsdunn}"
 IMAGE_REPO="${IMAGE_REPO:-jrsdunn/solana-classic-validator}"
 VERSION_TAG="${VERSION_TAG:-v2.0.0-devnet-$(date -u +%Y%m%d)}"
-PLATFORM="${PLATFORM:-linux/amd64}"
+# Accept either `PLATFORM` (singular, original name) or `PLATFORMS` (plural,
+# the more natural name for a comma-separated list — and the env var name
+# `docker buildx` itself uses). Plural wins if both are set so a CI job that
+# exports PLATFORMS=... gets the expected behavior even if a stale PLATFORM
+# is left in the env from a prior step. Default still amd64-only so a bare
+# invocation doesn't kick off the slower multi-arch build.
+PLATFORM="${PLATFORMS:-${PLATFORM:-linux/amd64}}"
 PUSH="${PUSH:-1}"
 
 LEDGER_SRC="${LEDGER_SRC:-/var/lib/staccana/ledger}"
@@ -32,20 +47,45 @@ PROGRAM_IDS="${PROGRAM_IDS:-/etc/staccana/program-ids.json}"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 
 DOCKER_DIR="$(cd "$(dirname "$0")" && pwd)"
+DOCKERFILE="${DOCKERFILE:-$DOCKER_DIR/Dockerfile}"
+AGAVE_SRC="${AGAVE_SRC:-/usr/src/agave}"
 CTX_DIR="$(mktemp -d -t staccana-docker-ctx-XXXXXX)"
 trap 'rm -rf "$CTX_DIR"' EXIT
 
-echo "[docker] assembling build context at $CTX_DIR"
-mkdir -p "$CTX_DIR/bin" "$CTX_DIR/ledger"
+# Detect if we're using the multiarch (in-image build) Dockerfile — it expects
+# ./agave-src/ in the build context instead of pre-built bin/* binaries.
+USE_MULTIARCH=0
+if [[ "$(basename "$DOCKERFILE")" == "Dockerfile.multiarch" ]]; then
+  USE_MULTIARCH=1
+fi
 
-# 1. agave-validator binaries
-for b in agave-validator agave-ledger-tool solana solana-keygen; do
-  if [[ ! -x "$BIN_DIR/$b" ]]; then
-    echo "[docker] FATAL: $BIN_DIR/$b not found or not executable" >&2
+echo "[docker] assembling build context at $CTX_DIR"
+echo "[docker] using Dockerfile: $DOCKERFILE (multiarch=$USE_MULTIARCH)"
+mkdir -p "$CTX_DIR/ledger"
+
+if [[ "$USE_MULTIARCH" == "1" ]]; then
+  # 1. agave source tree (in-image build means we ship source, not binaries)
+  if [[ ! -d "$AGAVE_SRC" ]]; then
+    echo "[docker] FATAL: AGAVE_SRC=$AGAVE_SRC is not a directory" >&2
     exit 1
   fi
-  cp -p "$BIN_DIR/$b" "$CTX_DIR/bin/$b"
-done
+  # Copy with --reflink=auto where supported; fall back to a plain cp.
+  cp -a "$AGAVE_SRC" "$CTX_DIR/agave-src" 2>/dev/null || \
+    cp -r "$AGAVE_SRC" "$CTX_DIR/agave-src"
+  # Drop target/ if present — saves dozens of GB in the build context.
+  rm -rf "$CTX_DIR/agave-src/target" 2>/dev/null || true
+else
+  mkdir -p "$CTX_DIR/bin"
+  # 1. agave-validator binaries (pre-built on this host — runtime base image
+  #    must provide glibc >= this host's glibc; see docker/Dockerfile header)
+  for b in agave-validator agave-ledger-tool solana solana-keygen; do
+    if [[ ! -x "$BIN_DIR/$b" ]]; then
+      echo "[docker] FATAL: $BIN_DIR/$b not found or not executable" >&2
+      exit 1
+    fi
+    cp -p "$BIN_DIR/$b" "$CTX_DIR/bin/$b"
+  done
+fi
 
 # 2. Ledger seed (genesis.bin + rocksdb)
 if [[ ! -f "$LEDGER_SRC/genesis.bin" ]]; then
@@ -65,7 +105,7 @@ else
 fi
 
 # 4. Dockerfile + run script
-cp "$DOCKER_DIR/Dockerfile" "$CTX_DIR/Dockerfile"
+cp "$DOCKERFILE" "$CTX_DIR/Dockerfile"
 cp "$DOCKER_DIR/staccana-run.sh" "$CTX_DIR/staccana-run.sh"
 
 CTX_SIZE=$(du -sh "$CTX_DIR" | cut -f1)
