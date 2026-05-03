@@ -20,10 +20,10 @@ export const NODE_DOMAIN = 0x01;
 // --- Program IDs and Well-known Accounts (all as PublicKey, always standard form) ---
 
 /** Lazy-claim program ID. */
-export const LAZY_CLAIM_PROGRAM_ID = new PublicKey("ERadtJ7EHLJtMLqj3ar4Y6QriMptMnYEhDEVTJ3DaERj");
+export const LAZY_CLAIM_PROGRAM_ID = new PublicKey("68fnSf8CZjxLM2xHmswktgz3a77KLQT2nbhjWbpKWsYU");
 
 /** Bridge program ID. */
-export const BRIDGE_PROGRAM_ID = new PublicKey("DkjhevtY54Sr5CPRvFE8Rr6CEaQni28BojKY2pBygzDc");
+export const BRIDGE_PROGRAM_ID = new PublicKey("Bridge1111111111111111111111111111111111111");
 
 /**
  * Mainnet (or devnet — for tonight's bring-up) bridge-vault program ID.
@@ -38,10 +38,10 @@ export const BRIDGE_VAULT_PROGRAM_ID = new PublicKey(
 );
 
 /** Secret-pump program ID. */
-export const SECRET_PUMP_PROGRAM_ID = new PublicKey("7LVzPiRVdcgZUpwwgUxx1wJrNKqYWts6WRKPqgbb94We");
+export const SECRET_PUMP_PROGRAM_ID = new PublicKey("SPump11111111111111111111111111111111111111");
 
 /** Megadrop program ID. */
-export const MEGADROP_PROGRAM_ID = new PublicKey("4jNZDaMwuHXdS6hDt6P5vsLbagNQ5MY4LL1ushBcLwvM");
+export const MEGADROP_PROGRAM_ID = new PublicKey("Megadrop11111111111111111111111111111111111");
 
 /**
  * Validator-subsidy program ID.
@@ -50,7 +50,7 @@ export const MEGADROP_PROGRAM_ID = new PublicKey("4jNZDaMwuHXdS6hDt6P5vsLbagNQ5M
  * registered validators based on `uptime_bps × delegated_stake × votes_cast`
  * weight per epoch. See `programs/validator-subsidy/`.
  */
-export const VALIDATOR_SUBSIDY_PROGRAM_ID = new PublicKey("6enmxbp7Vjb2JBRh5FBjpwSD1LnxzECBhgzEBgW3wAiY");
+export const VALIDATOR_SUBSIDY_PROGRAM_ID = new PublicKey("Subsidy111111111111111111111111111111111111");
 
 /**
  * Placeholder treasury pubkey for secret-pump curve fees. Mirrors
