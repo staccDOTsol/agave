@@ -19,7 +19,26 @@ const nextConfig = {
   experimental: {
     // The Solana wallet-adapter UI ships its own CSS bundle that we import in app/layout.tsx.
     // No special transpilation needed.
+    //
+    // `@staccoverflow/zk-proofs-wasm` ships a `.wasm` binary that Next.js's
+    // default file-tracing for serverless functions does NOT include in the
+    // function bundle — at runtime `/var/task/.next/server/chunks/...wasm`
+    // is absent and proof generation throws ENOENT, which kills both the
+    // direct ConfidentialTransfer path AND the transit-account hack
+    // fallback (both go through `/api/confidential/proof`).
+    // Tell the file-tracer to include every .wasm under the package so the
+    // serverless function gets the binary copied at build time.
+    outputFileTracingIncludes: {
+      "app/api/confidential/proof/route": [
+        "./node_modules/@staccoverflow/zk-proofs-wasm/**/*.wasm",
+        "../node_modules/@staccoverflow/zk-proofs-wasm/**/*.wasm",
+      ],
+    },
   },
+  // Mark the wasm package as a server-external dep so its loader uses
+  // `require()` against `node_modules/` (with the .wasm sibling files
+  // copied in by the tracing rule above) instead of webpack inlining.
+  serverExternalPackages: ["@staccoverflow/zk-proofs-wasm"],
   webpack: (config) => {
     // Polyfill / disable Node-only modules pulled by some wallet adapters in browser bundles.
     config.resolve.fallback = {
