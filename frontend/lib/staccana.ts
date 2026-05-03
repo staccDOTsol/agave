@@ -66,18 +66,37 @@ export const SECRET_PUMP_TREASURY = new PublicKey(
   new TextEncoder().encode("staccana_treasury_placeholder___"),
 );
 
-/** SPL Token-2022 program ID. The `pump` and `bridge` mints are Token-22. */
+/**
+ * SPL Token-2022 program ID. The `pump` and `bridge` mints are Token-22.
+ *
+ * NOTE: staccana devnet deploys Token-22 v8 at a fresh address rather than the
+ * canonical mainnet `TokenzQdB...` ID — the canonical address requires its
+ * upstream upgrade-authority keypair. For mainnet-sigma we'll either obtain
+ * the canonical keypair or document staccana's permanent address.
+ */
 export const TOKEN_2022_PROGRAM_ID = new PublicKey(
-  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+  "7bFHH22ASoMF1MGPvKPSWVfKXku8UJQUh355rmdrwAjU",
 );
 
 /**
  * SPL Associated Token Account program ID. Used to derive a wallet's ATA for
  * a given Token-2022 mint and to construct an idempotent
  * `create-ATA-if-missing` ix on the secret-pump buy path.
+ *
+ * Same canonical-address caveat as TOKEN_2022_PROGRAM_ID above.
  */
 export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
-  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+  "2osq4Xf5YxbpyR4nWqJkqpsyRYwPrVD6CjZztCHCvYd6",
+);
+
+/** SPL Token v3 (the original spl-token program). Deployed on staccana 2026-05-02. */
+export const TOKEN_PROGRAM_ID = new PublicKey(
+  "4PsxvxhPuysYQAf8FrggZKQvxQkCVG6hQCVHVJFrmFRj",
+);
+
+/** SPL Memo v3. Deployed on staccana 2026-05-02. */
+export const MEMO_PROGRAM_ID = new PublicKey(
+  "2o6EJBtsFaf4yBpgZ992zjaQPjukUFHZT7SmE2J8e9pG",
 );
 
 /** Default megadrop allocations URL. Override via NEXT_PUBLIC_MEGADROP_URL. */
