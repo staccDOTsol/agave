@@ -24,14 +24,25 @@
 
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+} from "@solana/spl-token";
 import { PublicKey, Transaction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Loader2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { TokenMetaBadge, TokenSelector, type TokenOption } from "@/components/token-selector";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
+import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  BRIDGE_VAULT_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  explorerTxUrl,
+  mainnetExplorerTxUrl,
+} from "@/lib/staccana";
 import {
   BRIDGE_ASSETS,
   BridgeAsset,
@@ -41,20 +52,22 @@ import {
   buildBurnInstruction,
   buildVaultDepositInstruction,
   decodeRatioState,
+  deriveDepositAccounts,
+  deriveMainnetAta,
   encodeMainnetDepositArgs,
+  fetchAssetConfig,
   mintAmountForValue,
   ONE_Q64,
   q64ToFloat,
   ratioStatePda,
   releaseAmountForBurn,
   vaultConfigPda,
+  type AssetConfigData,
+  type BridgeAssetMeta,
+  type DerivedDepositAccounts,
   type RatioState,
 } from "@/lib/bridge";
-import {
-  BRIDGE_VAULT_PROGRAM_ID,
-  explorerTxUrl,
-  mainnetExplorerTxUrl,
-} from "@/lib/staccana";
+import { prefetchMintMetadata } from "@/lib/helius";
 import { truncatePubkey } from "@/lib/utils";
 import { MainnetWalletContextProviders, useStaccanaWallet } from "@/lib/wallet";
 
@@ -62,6 +75,20 @@ type RatioFetchState =
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "ready"; ratio: RatioState }
+  | { kind: "missing" }
+  | { kind: "error"; message: string };
+
+type AssetConfigFetchState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; config: AssetConfigData }
+  | { kind: "missing" }
+  | { kind: "error"; message: string };
+
+type DepositAccountsFetchState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; accounts: DerivedDepositAccounts }
   | { kind: "missing" }
   | { kind: "error"; message: string };
 
@@ -78,6 +105,7 @@ type Tab = "withdraw" | "deposit";
  * from `AssetConfig` on-chain; until we wire the AssetConfig reader (a v1.1
  * polish item) we use the spec default of 10 bps from SPEC §2.3.
  */
+
 const DEFAULT_FEE_BPS = 10;
 
 export default function BridgePage(): JSX.Element {
@@ -92,8 +120,7 @@ export default function BridgePage(): JSX.Element {
   const [staccanaDestStr, setStaccanaDestStr] = useState("");
   const [ratio, setRatio] = useState<RatioFetchState>({ kind: "idle" });
   const [submit, setSubmit] = useState<SubmitState>({ kind: "idle" });
-  const [staccanaMintStr, setStaccanaMintStr] = useState("");
-  const [userAtaStr, setUserAtaStr] = useState("");
+  const [assetConfig, setAssetConfig] = useState<AssetConfigFetchState>({ kind: "idle" });
 
   const meta = useMemo(() => bridgeAssetById(asset), [asset]);
 
@@ -132,6 +159,42 @@ export default function BridgePage(): JSX.Element {
       cancelled = true;
     };
   }, [asset, connection]);
+
+  // Re-fetch the staccana-side AssetConfig PDA whenever the user picks a new
+  // asset. We cache the result in state so the burn ix builder can read
+  // `staccana_mint` directly instead of asking the user to paste it.
+  useEffect(() => {
+    let cancelled = false;
+    setAssetConfig({ kind: "loading" });
+    fetchAssetConfig(connection, asset)
+      .then((cfg) => {
+        if (cancelled) return;
+        if (!cfg) {
+          setAssetConfig({ kind: "missing" });
+          return;
+        }
+        setAssetConfig({ kind: "ready", config: cfg });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setAssetConfig({
+            kind: "error",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [asset, connection]);
+
+  // Pre-warm Helius metadata for the static asset list so the selector renders
+  // logos + symbols immediately on first paint (no flash-of-pubkey).
+  useEffect(() => {
+    if (assetConfig.kind === "ready") {
+      void prefetchMintMetadata([assetConfig.config.staccanaMint.toBase58()]);
+    }
+  }, [assetConfig]);
 
   // Prefill staccana destination with the connected wallet, since most users
   // bridge to themselves.
@@ -177,31 +240,35 @@ export default function BridgePage(): JSX.Element {
       setSubmit({ kind: "error", message: "Enter a mainnet destination pubkey" });
       return;
     }
-    if (!staccanaMintStr) {
+    if (assetConfig.kind !== "ready") {
       setSubmit({
         kind: "error",
-        message: "Enter the staccana mint pubkey for this asset (read from AssetConfig)",
+        message:
+          assetConfig.kind === "missing"
+            ? "AssetConfig PDA not found on this cluster"
+            : "AssetConfig still loading — try again in a moment",
       });
-      return;
-    }
-    if (!userAtaStr) {
-      setSubmit({ kind: "error", message: "Enter your token-account address for the asset" });
       return;
     }
     let mainnetDest: PublicKey;
-    let staccanaMint: PublicKey;
-    let userAta: PublicKey;
     try {
       mainnetDest = new PublicKey(mainnetDestStr.trim());
-      staccanaMint = new PublicKey(staccanaMintStr.trim());
-      userAta = new PublicKey(userAtaStr.trim());
     } catch (err) {
       setSubmit({
         kind: "error",
-        message: `Invalid pubkey: ${err instanceof Error ? err.message : String(err)}`,
+        message: `Invalid mainnet pubkey: ${err instanceof Error ? err.message : String(err)}`,
       });
       return;
     }
+
+    const staccanaMint = assetConfig.config.staccanaMint;
+    // ATA for the burning user on the staccana cluster against the staccana
+    // ATA program / Token-2022 fork. Both addresses are imported from
+    // ./staccana.ts so they pick up env-var overrides for non-mainnet-sigma.
+    const [userAta] = PublicKey.findProgramAddressSync(
+      [publicKey.toBuffer(), TOKEN_2022_PROGRAM_ID.toBuffer(), staccanaMint.toBuffer()],
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+    );
 
     try {
       const ix = buildBurnInstruction({
@@ -213,6 +280,18 @@ export default function BridgePage(): JSX.Element {
         userAta,
       });
       const tx = new Transaction();
+      // Idempotent create — no-op if the user's ATA already exists, but lets
+      // the burn flow tolerate freshly-minted recipients without a pre-tx.
+      tx.add(
+        createAssociatedTokenAccountIdempotentInstruction(
+          publicKey,
+          userAta,
+          publicKey,
+          staccanaMint,
+          TOKEN_2022_PROGRAM_ID,
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+        ),
+      );
       tx.add(ix);
       tx.feePayer = publicKey;
       const blockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
@@ -242,6 +321,7 @@ export default function BridgePage(): JSX.Element {
     }
   }, [
     asset,
+    assetConfig,
     baseAmount,
     connection,
     connected,
@@ -249,9 +329,7 @@ export default function BridgePage(): JSX.Element {
     meta.label,
     publicKey,
     sendTransaction,
-    staccanaMintStr,
     toast,
-    userAtaStr,
   ]);
 
   // ---- Deposit / mainnet payload preview ----
@@ -298,28 +376,34 @@ export default function BridgePage(): JSX.Element {
         <CardHeader>
           <CardTitle>Asset</CardTitle>
           <CardDescription>
-            Select the bridge asset. Ratio R is read from the on-chain RatioState PDA.
+            Select the bridge asset. Mint, ratio R, and your token accounts are all derived
+            from on-chain state — no pubkeys to paste.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            {BRIDGE_ASSETS.map((a) => (
-              <button
-                key={a.id}
-                type="button"
-                onClick={() => setAsset(a.id)}
-                className={`rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
-                  a.id === asset
-                    ? "border-primary bg-primary/20 text-foreground"
-                    : "border-border bg-secondary/40 text-muted-foreground hover:bg-secondary/70"
-                }`}
-              >
-                {a.label}
-                <span className="ml-2 text-xs text-muted-foreground">{a.underlying}</span>
-              </button>
-            ))}
-          </div>
+          <AssetTokenSelector
+            asset={asset}
+            onChange={setAsset}
+            staccanaMint={
+              assetConfig.kind === "ready" ? assetConfig.config.staccanaMint.toBase58() : null
+            }
+          />
           <RatioReadout ratio={ratio} />
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>Staccana mint:</span>
+            <TokenMetaBadge
+              mint={assetConfig.kind === "ready" ? assetConfig.config.staccanaMint.toBase58() : null}
+              fallbackLabel={
+                assetConfig.kind === "loading"
+                  ? "loading…"
+                  : assetConfig.kind === "missing"
+                    ? "register_asset has not run for this asset"
+                    : assetConfig.kind === "error"
+                      ? `error: ${assetConfig.message}`
+                      : meta.label
+              }
+            />
+          </div>
           <p className="text-xs text-muted-foreground">
             RatioState PDA:{" "}
             <span className="font-mono" title={ratioStatePda(asset).toBase58()}>
@@ -367,27 +451,6 @@ export default function BridgePage(): JSX.Element {
               placeholder="recipient on mainnet"
               mono
             />
-            <Field
-              label={`Staccana ${meta.label} mint`}
-              value={staccanaMintStr}
-              onChange={setStaccanaMintStr}
-              placeholder="from AssetConfig.staccana_mint"
-              mono
-              help={
-                <span>
-                  TODO(prod): read this from <span className="font-mono">AssetConfig</span>{" "}
-                  on-chain so the user does not have to paste it. For v1 you must supply the
-                  mint address yourself.
-                </span>
-              }
-            />
-            <Field
-              label="Your token account holding the mint balance"
-              value={userAtaStr}
-              onChange={setUserAtaStr}
-              placeholder="ATA for this mint"
-              mono
-            />
             <p className="text-sm text-muted-foreground">{previewLine}</p>
             <Button onClick={onBurn} disabled={submit.kind === "submitting"} className="w-full sm:w-auto">
               {submit.kind === "submitting" ? (
@@ -429,6 +492,9 @@ export default function BridgePage(): JSX.Element {
             previewLine={previewLine}
             depositPayloadBs58={depositPayloadBs58}
             onCopyDepositPayload={onCopyDepositPayload}
+            staccanaMintBase58={
+              assetConfig.kind === "ready" ? assetConfig.config.staccanaMint.toBase58() : null
+            }
           />
         </MainnetWalletContextProviders>
       )}
@@ -454,6 +520,8 @@ interface DepositPanelProps {
   previewLine: string;
   depositPayloadBs58: string | null;
   onCopyDepositPayload: () => void;
+  /** Staccana-side mint resolved from AssetConfig in the parent component. */
+  staccanaMintBase58: string | null;
 }
 
 function DepositPanel(props: DepositPanelProps): JSX.Element {
@@ -466,6 +534,7 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
     previewLine,
     depositPayloadBs58,
     onCopyDepositPayload,
+    staccanaMintBase58,
   } = props;
 
   const meta = useMemo(() => bridgeAssetById(asset), [asset]);
@@ -474,9 +543,7 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
   const { publicKey: staccanaPubkey } = useStaccanaWallet();
   const { toast } = useToast();
 
-  const [underlyingMintStr, setUnderlyingMintStr] = useState("");
-  const [userAtaStr, setUserAtaStr] = useState("");
-  const [vaultAtaStr, setVaultAtaStr] = useState("");
+  const [derived, setDerived] = useState<DepositAccountsFetchState>({ kind: "idle" });
   const [submit, setSubmit] = useState<SubmitState>({ kind: "idle" });
 
   // Auto-fill the staccana destination from the connected staccana wallet so
@@ -486,6 +553,46 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
       setStaccanaDestStr(staccanaPubkey.toBase58());
     }
   }, [staccanaPubkey, staccanaDestStr, setStaccanaDestStr]);
+
+  // Derive every account the deposit needs (underlying mint, vault ATA, the
+  // user's mainnet ATA + create-if-missing flag) directly from on-chain state
+  // + the connected mainnet wallet. Re-runs on asset change or wallet swap so
+  // the user never has to paste an account.
+  useEffect(() => {
+    let cancelled = false;
+    if (!mainnetConnected || !mainnetPubkey) {
+      setDerived({ kind: "idle" });
+      return;
+    }
+    setDerived({ kind: "loading" });
+    deriveDepositAccounts(mainnetConnection, asset, mainnetPubkey)
+      .then((acc) => {
+        if (cancelled) return;
+        if (!acc) {
+          setDerived({ kind: "missing" });
+          return;
+        }
+        setDerived({ kind: "ready", accounts: acc });
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setDerived({
+          kind: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [asset, mainnetConnection, mainnetConnected, mainnetPubkey]);
+
+  // Pre-warm metadata for the (mainnet) underlying mint so the badge renders
+  // with name/logo on first paint.
+  useEffect(() => {
+    if (derived.kind === "ready" && !meta.isNativeSol) {
+      void prefetchMintMetadata([derived.accounts.underlyingMint.toBase58()]);
+    }
+  }, [derived, meta.isNativeSol]);
 
   const baseAmount = useMemo<bigint | null>(
     () => parseToBaseUnits(amountStr, meta.decimals),
@@ -516,42 +623,47 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
       });
       return;
     }
-
-    let underlyingMint: PublicKey | null = null;
-    let userTokenAccount: PublicKey | null = null;
-    let vaultTokenAccount: PublicKey | null = null;
-    if (!meta.isNativeSol) {
-      if (!underlyingMintStr || !userAtaStr || !vaultAtaStr) {
-        setSubmit({
-          kind: "error",
-          message: `${meta.label} requires underlying mint, your token account, and the vault token account`,
-        });
-        return;
-      }
-      try {
-        underlyingMint = new PublicKey(underlyingMintStr.trim());
-        userTokenAccount = new PublicKey(userAtaStr.trim());
-        vaultTokenAccount = new PublicKey(vaultAtaStr.trim());
-      } catch (err) {
-        setSubmit({
-          kind: "error",
-          message: `Invalid pubkey: ${err instanceof Error ? err.message : String(err)}`,
-        });
-        return;
-      }
+    if (derived.kind !== "ready") {
+      setSubmit({
+        kind: "error",
+        message:
+          derived.kind === "missing"
+            ? "VaultConfig PDA not found on the mainnet RPC"
+            : derived.kind === "error"
+              ? `Failed to derive deposit accounts: ${derived.message}`
+              : "Resolving on-chain accounts — try again in a moment",
+      });
+      return;
     }
 
+    const accounts = derived.accounts;
+
     try {
+      const tx = new Transaction();
+      // Auto-create the user's mainnet ATA if it's missing. Idempotent — safe
+      // to include even on the rare race where the account got created
+      // between our probe and tx submission.
+      if (!meta.isNativeSol && accounts.userAtaMissing && accounts.userTokenAccount) {
+        tx.add(
+          createAssociatedTokenAccountIdempotentInstruction(
+            mainnetPubkey,
+            accounts.userTokenAccount,
+            mainnetPubkey,
+            accounts.underlyingMint,
+            accounts.tokenProgram ?? undefined,
+          ),
+        );
+      }
+
       const ix = buildVaultDepositInstruction({
         asset,
         amount: baseAmount,
         user: mainnetPubkey,
         destOnStaccana: dest,
-        underlyingMint,
-        userTokenAccount,
-        vaultTokenAccount,
+        underlyingMint: meta.isNativeSol ? null : accounts.underlyingMint,
+        userTokenAccount: meta.isNativeSol ? null : accounts.userTokenAccount,
+        vaultTokenAccount: meta.isNativeSol ? null : accounts.vaultTokenAccount,
       });
-      const tx = new Transaction();
       tx.add(ix);
       tx.feePayer = mainnetPubkey;
       const blockhash = (await mainnetConnection.getLatestBlockhash("confirmed")).blockhash;
@@ -582,6 +694,7 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
   }, [
     asset,
     baseAmount,
+    derived,
     mainnetConnected,
     mainnetConnection,
     mainnetPubkey,
@@ -590,9 +703,6 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
     sendTransaction,
     staccanaDestStr,
     toast,
-    underlyingMintStr,
-    userAtaStr,
-    vaultAtaStr,
   ]);
 
   return (
@@ -623,41 +733,11 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
           placeholder="staccana pubkey to credit"
           mono
         />
-        {!meta.isNativeSol ? (
-          <>
-            <Field
-              label={`Mainnet underlying mint for ${meta.label}`}
-              value={underlyingMintStr}
-              onChange={setUnderlyingMintStr}
-              placeholder={`e.g. pSYRUP / USDC mint on mainnet`}
-              mono
-              help={
-                <span>
-                  Required for SPL-backed assets. Read from{" "}
-                  <span className="font-mono">VaultConfig.underlying_mint</span>.
-                </span>
-              }
-            />
-            <Field
-              label="Your mainnet token account (ATA holding the asset)"
-              value={userAtaStr}
-              onChange={setUserAtaStr}
-              placeholder="your ATA on mainnet"
-              mono
-            />
-            <Field
-              label="Vault token account (PDA-owned ATA)"
-              value={vaultAtaStr}
-              onChange={setVaultAtaStr}
-              placeholder="VaultConfig.vault_token_account"
-              mono
-            />
-          </>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            wSOL deposits transfer native SOL into the vault PDA — no SPL token account required.
-          </p>
-        )}
+        <DerivedAccountsReadout
+          derived={derived}
+          meta={meta}
+          staccanaMintBase58={staccanaMintBase58}
+        />
         <p className="text-sm text-muted-foreground">{previewLine}</p>
         <p className="text-xs text-muted-foreground">
           Vault program:{" "}
@@ -811,6 +891,106 @@ function Field({
       />
       {help ? <span className="block text-xs text-muted-foreground">{help}</span> : null}
     </label>
+  );
+}
+
+/**
+ * Asset picker built on the generic <TokenSelector>: shows 3 tabs (stSOL,
+ * ssUSDC, wSOL) with name + symbol + metadata badge sourced from Helius. The
+ * selector falls back to the asset's hardcoded label if Helius hasn't
+ * resolved metadata for the staccana mint yet.
+ */
+function AssetTokenSelector({
+  asset,
+  onChange,
+  staccanaMint,
+}: {
+  asset: BridgeAsset;
+  onChange: (a: BridgeAsset) => void;
+  staccanaMint: string | null;
+}): JSX.Element {
+  const options: TokenOption[] = BRIDGE_ASSETS.map((a) => ({
+    id: a.id,
+    // Use the resolved staccana mint for the *currently selected* asset; for
+    // the others fall back to label-as-mint (TokenSelector will show the
+    // label as the fallback name when metadata fetch fails).
+    mint: a.id === asset && staccanaMint ? staccanaMint : `bridge-asset-${a.id}`,
+    label: a.label,
+    sublabel: a.underlying,
+  }));
+  return (
+    <TokenSelector
+      options={options}
+      value={asset}
+      onChange={(id) => onChange(Number(id) as BridgeAsset)}
+      autoHideSearch
+    />
+  );
+}
+
+/**
+ * Read-only summary of the four derived deposit accounts: mainnet underlying
+ * mint, user's mainnet ATA, vault token account, and vault config PDA. Each
+ * gets a metadata badge (Helius-sourced for the underlying mint where
+ * possible). Replaces the four manual paste fields the legacy form had.
+ */
+function DerivedAccountsReadout({
+  derived,
+  meta,
+  staccanaMintBase58,
+}: {
+  derived: { kind: string; accounts?: DerivedDepositAccounts; message?: string };
+  meta: BridgeAssetMeta;
+  staccanaMintBase58: string | null;
+}): JSX.Element {
+  if (derived.kind === "loading") {
+    return <p className="text-xs text-muted-foreground">Resolving accounts from on-chain VaultConfig…</p>;
+  }
+  if (derived.kind === "missing") {
+    return (
+      <p className="text-xs text-amber-400">
+        VaultConfig PDA not found on the mainnet bridge-vault — has the operator initialized this asset?
+      </p>
+    );
+  }
+  if (derived.kind === "error") {
+    return <p className="text-xs text-destructive">Resolve error: {derived.message}</p>;
+  }
+  if (derived.kind !== "ready" || !derived.accounts) return <></>;
+  const a = derived.accounts;
+  return (
+    <div className="space-y-1.5 rounded-md border border-border/40 bg-card/40 p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-muted-foreground">Mainnet underlying:</span>
+        {meta.isNativeSol ? (
+          <span className="font-mono text-foreground">native SOL (no mint)</span>
+        ) : (
+          <TokenMetaBadge mint={a.underlyingMint.toBase58()} fallbackLabel={meta.underlying} />
+        )}
+      </div>
+      {!meta.isNativeSol ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-muted-foreground">Your mainnet ATA:</span>
+          <span className="font-mono text-foreground" title={a.userTokenAccount?.toBase58() ?? ""}>
+            {truncatePubkey(a.userTokenAccount?.toBase58() ?? "null")}
+          </span>
+        </div>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-muted-foreground">Vault token account:</span>
+        <span className="font-mono text-foreground" title={a.vaultTokenAccount.toBase58()}>
+          {truncatePubkey(a.vaultTokenAccount.toBase58())}
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-muted-foreground">Staccana mint:</span>
+        {staccanaMintBase58 ? (
+          <TokenMetaBadge mint={staccanaMintBase58} fallbackLabel={meta.label} />
+        ) : (
+          <span className="text-muted-foreground">resolving…</span>
+        )}
+      </div>
+    </div>
   );
 }
 
