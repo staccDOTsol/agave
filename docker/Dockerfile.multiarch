@@ -1,0 +1,84 @@
+# Multi-arch staccana validator image (amd64 + arm64).
+#
+# Strategy: stage 1 builds agave-validator from source for the target arch
+# (TARGETARCH is amd64 or arm64 per buildx). Stage 2 is the runtime image
+# with the binary + ledger seed copied in. Compiling agave under arm64 QEMU
+# emulation on an amd64 host is slow (~30–60 min) but reproducible — no need
+# for a separate arm64 build host.
+#
+# Build with buildx:
+#   docker buildx create --name staccana-multi --driver docker-container --use
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -f docker/Dockerfile.multiarch \
+#     -t jrsdunn/solana-classic-validator:v2.0.0-multiarch-20260502 \
+#     -t jrsdunn/solana-classic-validator:latest \
+#     --push .
+#
+# Build context expects:
+#   ./agave-src/             — git checkout of agave (or staccana fork) sources
+#   ./ledger/                — genesis.bin + rocksdb seed (arch-independent)
+#   ./program-ids.json
+#   ./staccana-run.sh
+
+ARG RUST_VERSION=1.89.0
+
+# ---------- builder stage (per-arch native compile under QEMU) ----------
+FROM --platform=$TARGETPLATFORM rust:${RUST_VERSION}-slim-bookworm AS builder
+
+ARG TARGETARCH
+ARG BUILDARCH
+RUN echo "[builder] BUILDARCH=$BUILDARCH TARGETARCH=$TARGETARCH"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential pkg-config libssl-dev libudev-dev clang cmake \
+        protobuf-compiler git curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY agave-src/ ./
+
+# Build only the validator binary (skips ledger-tool + others to save time).
+RUN cargo build --release --bin agave-validator && \
+    cp /build/target/release/agave-validator /usr/local/bin/agave-validator && \
+    cargo build --release --bin agave-ledger-tool && \
+    cp /build/target/release/agave-ledger-tool /usr/local/bin/agave-ledger-tool && \
+    cargo build --release --bin solana && \
+    cp /build/target/release/solana /usr/local/bin/solana && \
+    cargo build --release --bin solana-keygen && \
+    cp /build/target/release/solana-keygen /usr/local/bin/solana-keygen && \
+    rm -rf /build/target
+
+# ---------- runtime stage ----------
+FROM --platform=$TARGETPLATFORM ubuntu:24.04
+
+EXPOSE 8899/tcp 8900/tcp 8001/tcp 8001/udp \
+       8000/udp 8002/udp 8003/udp 8004/udp 8005/udp 8006/udp 8007/udp 8008/udp 8009/udp \
+       8010-8020/udp
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        bzip2 libssl3 ca-certificates curl jq tini && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd -r -m -d /var/lib/staccana -s /bin/bash staccana && \
+    mkdir -p /var/lib/staccana/ledger /var/lib/staccana/accounts \
+             /var/log/staccana /etc/staccana/keys /var/staccana/seed-ledger && \
+    chown -R staccana:staccana /var/lib/staccana /var/log/staccana \
+                                /etc/staccana /var/staccana
+
+# Pull the freshly-compiled binaries from the builder stage (per-arch).
+COPY --from=builder /usr/local/bin/agave-validator   /usr/local/bin/agave-validator
+COPY --from=builder /usr/local/bin/agave-ledger-tool /usr/local/bin/agave-ledger-tool
+COPY --from=builder /usr/local/bin/solana            /usr/local/bin/solana
+COPY --from=builder /usr/local/bin/solana-keygen     /usr/local/bin/solana-keygen
+
+# Arch-independent payload.
+COPY --chown=staccana:staccana ledger/   /var/staccana/seed-ledger/
+COPY --chown=staccana:staccana program-ids.json /var/staccana/program-ids.json
+COPY --chmod=0755 staccana-run.sh /usr/local/bin/staccana-run.sh
+
+USER staccana
+WORKDIR /var/lib/staccana
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/staccana-run.sh"]
+CMD []

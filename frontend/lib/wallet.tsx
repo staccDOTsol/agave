@@ -47,7 +47,7 @@ interface WalletContextProvidersProps {
  * yet, so we keep its adapter explicit.
  */
 export function WalletContextProviders({ children }: WalletContextProvidersProps): JSX.Element {
-  const wallets = useMemo(() => [new SolflareWalletAdapter()], []);
+  const wallets = useMemo(() => [], []);
 
   return (
     <ConnectionProvider endpoint={RPC_URL} config={{ commitment: "confirmed" }}>

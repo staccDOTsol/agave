@@ -25,22 +25,38 @@
 
 import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import { WalletContextProviders } from "@/lib/wallet";
 import { useEffect, useState } from "react";
 
 import { truncatePubkey } from "@/lib/utils";
 
+// Wrap WalletMultiButton with WalletContextProviders to guarantee WalletProvider is an ancestor
 export function WalletButton(): JSX.Element {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
-  if (!mounted) return <div className="h-10 w-44 rounded-md bg-secondary/40" aria-hidden />;
-  return <WalletMultiButton />;
+  if (!mounted)
+    return <div className="h-10 w-44 rounded-md bg-secondary/40" aria-hidden />;
+  return (
+    <WalletContextProviders>
+      <WalletMultiButton />
+    </WalletContextProviders>
+  );
 }
 
 /**
  * Inline display of the connected pubkey. Renders nothing if no wallet is
  * connected — useful in places where the connect button is shown elsewhere.
+ * Wrapped with WalletContextProviders to guarantee context.
  */
 export function ConnectedPubkey(): JSX.Element | null {
+  return (
+    <WalletContextProviders>
+      <_ConnectedPubkey />
+    </WalletContextProviders>
+  );
+}
+
+function _ConnectedPubkey(): JSX.Element | null {
   const { publicKey } = useWallet();
   if (!publicKey) return null;
   const base58 = publicKey.toBase58();
