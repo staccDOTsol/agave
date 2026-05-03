@@ -39,14 +39,35 @@ use solana_sdk::signature::{read_keypair_file, Signer};
 use solana_sdk::system_program;
 use solana_sdk::transaction::Transaction;
 
-/// Anchor instruction discriminator: first 8 bytes of sha256("global:init_megadrop").
-fn init_megadrop_discriminator() -> [u8; 8] {
+/// Anchor instruction discriminator: first 8 bytes of sha256("global:<name>").
+fn anchor_discriminator(name: &str) -> [u8; 8] {
     let mut h = Sha256::new();
-    h.update(b"global:init_megadrop");
+    h.update(format!("global:{}", name).as_bytes());
     let out = h.finalize();
     let mut d = [0u8; 8];
     d.copy_from_slice(&out[..8]);
     d
+}
+
+fn init_megadrop_discriminator() -> [u8; 8] {
+    anchor_discriminator("init_megadrop")
+}
+
+fn update_megadrop_discriminator() -> [u8; 8] {
+    anchor_discriminator("update_megadrop")
+}
+
+/// Borsh layout for `update_megadrop`'s args. Each field is `Option<...>`
+/// — Borsh encodes Option as `[tag:u8, value]` where tag=0 means None and
+/// tag=1 means Some(value). We always emit the full 4-tuple so the wire
+/// payload is deterministic regardless of which fields the operator wants
+/// to patch.
+#[derive(BorshSerialize)]
+struct UpdateMegadropArgs {
+    claimable_root: Option<[u8; 32]>,
+    genesis_month: Option<u32>,
+    total_allocation_lamports: Option<u64>,
+    treasury_authority: Option<[u8; 32]>,
 }
 
 /// Borsh-equivalent layout of `InitMegadropArgs` per
@@ -99,6 +120,23 @@ struct Cli {
     /// Hex-encoded 32-byte Merkle root from `tools/megadrop-snapshot`.
     #[arg(long, conflicts_with = "placeholder_root")]
     root: Option<String>,
+
+    /// Path to `allocations.json` (the file emitted by `tools/megadrop-merkle`,
+    /// or in production: `frontend/public/megadrop/allocations.json`). When
+    /// provided, the tool computes the Merkle root locally via the same
+    /// `staccana_megadrop_merkle::build_tree` the page uses, instead of
+    /// requiring the operator to pass `--root` from a precomputed
+    /// `merkle-root.hex`. Conflicts with `--root` and `--placeholder-root`.
+    #[arg(long, conflicts_with_all = ["placeholder_root", "root"])]
+    allocations_json: Option<PathBuf>,
+
+    /// Send `update_megadrop` instead of `init_megadrop`. Used to patch the
+    /// claimable_root post-deploy when the PDA was originally seeded with
+    /// `--placeholder-root` and a real snapshot has since landed. The PDA
+    /// must already exist (init must have run before) — the program rejects
+    /// update_megadrop on an uninitialized PDA via the seed-check.
+    #[arg(long)]
+    update: bool,
 }
 
 fn main() -> Result<()> {
@@ -113,10 +151,72 @@ fn main() -> Result<()> {
     let claimable_root: [u8; 32] = if cli.placeholder_root {
         eprintln!("[init] WARNING: using all-zero placeholder Merkle root. Re-init with the real root before mainnet.");
         [0u8; 32]
+    } else if let Some(path) = cli.allocations_json.as_ref() {
+        // Read allocations.json. The on-disk shape encodes `owner` as a
+        // base58 STRING (it's emitted by `tools/megadrop-merkle::output::write_outputs`
+        // via solana_sdk::pubkey::Pubkey's Display impl + serde's default
+        // string serializer), but solana_sdk::pubkey::Pubkey's Deserialize
+        // impl expects a 32-byte array. Use a local wrapper struct that
+        // parses the string and converts to HolderAllocation.
+        //
+        // Extra top-level fields like `nft_count`/`token_balance` (the snapshot
+        // tool puts them both at the top AND nested for audit reporting) are
+        // ignored by serde via the default `#[serde(default)]` behavior.
+        #[derive(serde::Deserialize)]
+        struct WireContrib {
+            #[serde(default)]
+            nft_count: u64,
+            #[serde(default)]
+            token_balance: u64,
+        }
+        #[derive(serde::Deserialize)]
+        struct WireRow {
+            owner: String,
+            lamports: u64,
+            #[serde(default)]
+            contributions: Option<WireContrib>,
+            // Top-level fallback when `contributions` is absent.
+            #[serde(default)]
+            nft_count: u64,
+            #[serde(default)]
+            token_balance: u64,
+        }
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading allocations.json {}", path.display()))?;
+        let wire: Vec<WireRow> = serde_json::from_slice(&bytes)
+            .context("parsing allocations.json")?;
+        if wire.is_empty() {
+            return Err(anyhow!("allocations.json is empty"));
+        }
+        let mut allocations: Vec<staccana_megadrop_merkle::HolderAllocation> =
+            Vec::with_capacity(wire.len());
+        for row in &wire {
+            let owner = Pubkey::from_str(&row.owner)
+                .with_context(|| format!("invalid base58 pubkey {}", row.owner))?;
+            let contrib = row.contributions.as_ref();
+            allocations.push(staccana_megadrop_merkle::HolderAllocation {
+                owner,
+                lamports: row.lamports,
+                contributions: staccana_megadrop_merkle::HolderContributions {
+                    nft_count: contrib.map(|c| c.nft_count).unwrap_or(row.nft_count),
+                    token_balance: contrib
+                        .map(|c| c.token_balance)
+                        .unwrap_or(row.token_balance),
+                },
+            });
+        }
+        let tree = staccana_megadrop_merkle::tree::build_tree(&allocations);
+        let root = tree.root.to_bytes();
+        eprintln!(
+            "[init] computed root from {} allocations: 0x{}",
+            allocations.len(),
+            hex::encode(root),
+        );
+        root
     } else {
         let hex = cli
             .root
-            .ok_or_else(|| anyhow!("must pass either --root <hex> or --placeholder-root"))?;
+            .ok_or_else(|| anyhow!("must pass --root <hex>, --allocations-json <path>, or --placeholder-root"))?;
         let bytes = hex::decode(hex.trim_start_matches("0x"))
             .context("decoding --root hex")?;
         if bytes.len() != 32 {
@@ -146,22 +246,45 @@ fn main() -> Result<()> {
     );
     eprintln!("[init] claimable_root:      0x{}", hex::encode(claimable_root));
 
-    // Build instruction data: 8-byte discriminator + Borsh(InitMegadropArgs)
-    let args = InitMegadropArgs {
-        claimable_root,
-        genesis_month: cli.genesis_month,
-        total_allocation_lamports,
-        treasury_authority: treasury_authority.to_bytes(),
+    // Build instruction data + accounts list.
+    let (data, accounts) = if cli.update {
+        // update_megadrop accepts Option<...> per field. We patch the same four
+        // fields init writes — caller can choose to overwrite all of them.
+        // Accounts: [authority(signer, NOT writable), megadrop_config(writable)].
+        let args = UpdateMegadropArgs {
+            claimable_root: Some(claimable_root),
+            genesis_month: Some(cli.genesis_month),
+            total_allocation_lamports: Some(total_allocation_lamports),
+            treasury_authority: Some(treasury_authority.to_bytes()),
+        };
+        let mut data = Vec::with_capacity(8 + (1 + 32) + (1 + 4) + (1 + 8) + (1 + 32));
+        data.extend_from_slice(&update_megadrop_discriminator());
+        args.serialize(&mut data).context("borsh-serialize update args")?;
+        let accounts = vec![
+            AccountMeta::new_readonly(payer.pubkey(), true), // authority (signer, NOT writable)
+            AccountMeta::new(megadrop_config, false),        // megadrop_config (writable)
+        ];
+        eprintln!("[update] sending update_megadrop tx — patching all four fields.");
+        (data, accounts)
+    } else {
+        // init_megadrop: full payload + system_program for the PDA allocation.
+        let args = InitMegadropArgs {
+            claimable_root,
+            genesis_month: cli.genesis_month,
+            total_allocation_lamports,
+            treasury_authority: treasury_authority.to_bytes(),
+        };
+        let mut data = Vec::with_capacity(8 + 32 + 4 + 8 + 32);
+        data.extend_from_slice(&init_megadrop_discriminator());
+        args.serialize(&mut data).context("borsh-serialize init args")?;
+        let accounts = vec![
+            AccountMeta::new(payer.pubkey(), true),                 // authority
+            AccountMeta::new(megadrop_config, false),               // megadrop_config
+            AccountMeta::new_readonly(system_program::id(), false), // system_program
+        ];
+        eprintln!("[init] sending init_megadrop tx...");
+        (data, accounts)
     };
-    let mut data = Vec::with_capacity(8 + 32 + 4 + 8 + 32);
-    data.extend_from_slice(&init_megadrop_discriminator());
-    args.serialize(&mut data).context("borsh-serialize args")?;
-
-    let accounts = vec![
-        AccountMeta::new(payer.pubkey(), true),         // authority (signer, writable)
-        AccountMeta::new(megadrop_config, false),       // megadrop_config (PDA, writable)
-        AccountMeta::new_readonly(system_program::id(), false), // system_program
-    ];
 
     let ix = Instruction { program_id, accounts, data };
 
@@ -169,11 +292,10 @@ fn main() -> Result<()> {
     let blockhash = rpc.get_latest_blockhash().context("get_latest_blockhash")?;
     let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[&payer], blockhash);
 
-    eprintln!("[init] sending tx...");
     let sig = rpc
         .send_and_confirm_transaction(&tx)
-        .context("send_and_confirm_transaction (already initialized? close + retry)")?;
-    eprintln!("[init] confirmed: {}", sig);
-    println!("MegadropConfig PDA initialized: {}", megadrop_config);
+        .context("send_and_confirm_transaction")?;
+    eprintln!("[done] confirmed: {}", sig);
+    println!("MegadropConfig PDA: {}", megadrop_config);
     Ok(())
 }
