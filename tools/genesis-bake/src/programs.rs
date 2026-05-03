@@ -43,7 +43,8 @@ use solana_sdk_ids::{bpf_loader_upgradeable, zk_elgamal_proof_program};
 
 use crate::pdas::{
     BRIDGE_PROGRAM_ID, LAZY_CLAIM_PROGRAM_ID, MEGADROP_PROGRAM_ID, SECRET_PUMP_PROGRAM_ID,
-    VALIDATOR_SUBSIDY_PROGRAM_ID,
+    SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_MEMO_PROGRAM_ID, SPL_TOKEN_2022_PROGRAM_ID,
+    SPL_TOKEN_PROGRAM_ID, VALIDATOR_SUBSIDY_PROGRAM_ID,
 };
 
 /// All five staccana program slots (in canonical order: lazy-claim, bridge,
@@ -70,14 +71,19 @@ pub struct ProgramPair {
 /// Iterate the canonical slot list, paired with the supplied paths from BakeInputs.
 /// Order is fixed (lazy-claim first, megadrop last) — same order the bake-summary
 /// renders.
+#[allow(clippy::too_many_arguments)]
 pub fn canonical_slots<'a>(
     lazy_claim_so: Option<&'a Path>,
     bridge_so: Option<&'a Path>,
     secret_pump_so: Option<&'a Path>,
     validator_subsidy_so: Option<&'a Path>,
     megadrop_so: Option<&'a Path>,
-) -> [ProgramSlot<'a>; 5] {
-    [
+    spl_token_so: Option<&'a Path>,
+    spl_token_2022_so: Option<&'a Path>,
+    spl_associated_token_so: Option<&'a Path>,
+    spl_memo_so: Option<&'a Path>,
+) -> Vec<ProgramSlot<'a>> {
+    vec![
         ProgramSlot {
             program_id: LAZY_CLAIM_PROGRAM_ID,
             name: "staccana_lazy_claim",
@@ -102,6 +108,26 @@ pub fn canonical_slots<'a>(
             program_id: MEGADROP_PROGRAM_ID,
             name: "staccana_megadrop",
             so_path: megadrop_so,
+        },
+        ProgramSlot {
+            program_id: SPL_TOKEN_PROGRAM_ID,
+            name: "spl_token (v3)",
+            so_path: spl_token_so,
+        },
+        ProgramSlot {
+            program_id: SPL_TOKEN_2022_PROGRAM_ID,
+            name: "spl_token_2022 (v8)",
+            so_path: spl_token_2022_so,
+        },
+        ProgramSlot {
+            program_id: SPL_ASSOCIATED_TOKEN_PROGRAM_ID,
+            name: "spl_associated_token_account",
+            so_path: spl_associated_token_so,
+        },
+        ProgramSlot {
+            program_id: SPL_MEMO_PROGRAM_ID,
+            name: "spl_memo (v3)",
+            so_path: spl_memo_so,
         },
     ]
 }
@@ -330,14 +356,18 @@ mod tests {
     }
 
     #[test]
-    fn canonical_slots_yields_five_in_canonical_order() {
-        let slots = canonical_slots(None, None, None, None, None);
-        assert_eq!(slots.len(), 5);
+    fn canonical_slots_yields_nine_in_canonical_order() {
+        let slots = canonical_slots(None, None, None, None, None, None, None, None, None);
+        assert_eq!(slots.len(), 9);
         assert_eq!(slots[0].program_id, LAZY_CLAIM_PROGRAM_ID);
         assert_eq!(slots[1].program_id, BRIDGE_PROGRAM_ID);
         assert_eq!(slots[2].program_id, SECRET_PUMP_PROGRAM_ID);
         assert_eq!(slots[3].program_id, VALIDATOR_SUBSIDY_PROGRAM_ID);
         assert_eq!(slots[4].program_id, MEGADROP_PROGRAM_ID);
+        assert_eq!(slots[5].program_id, SPL_TOKEN_PROGRAM_ID);
+        assert_eq!(slots[6].program_id, SPL_TOKEN_2022_PROGRAM_ID);
+        assert_eq!(slots[7].program_id, SPL_ASSOCIATED_TOKEN_PROGRAM_ID);
+        assert_eq!(slots[8].program_id, SPL_MEMO_PROGRAM_ID);
     }
 
     #[test]

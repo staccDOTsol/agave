@@ -61,6 +61,33 @@ pub const VALIDATOR_SUBSIDY_PROGRAM_ID: Pubkey =
 pub const MEGADROP_PROGRAM_ID: Pubkey =
     pubkey_from_b58_const(b"Megadrop11111111111111111111111111111111111");
 
+// --- Canonical SPL stack ---
+//
+// These are the upstream-canonical pubkeys for the SPL programs we bake into
+// genesis. Anchor types like `Program<'info, Token2022>` and
+// `Interface<'info, TokenInterface>` hardcode-check the program account is at
+// these exact addresses. Deploying our own copies at fresh post-boot addresses
+// triggers `InvalidProgramId` errors in every consumer (secret-pump,
+// bridge, wallets, explorers, ATA derivations…). Genesis-baking them at the
+// canonical addresses sidesteps the whole class of bugs — the BPF loader does
+// not require us to hold the canonical keypair for genesis-baked programs.
+
+/// SPL Token v3 (the original spl-token program). Mainnet pubkey.
+pub const SPL_TOKEN_PROGRAM_ID: Pubkey =
+    pubkey_from_b58_const(b"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+
+/// SPL Token-2022 (Token-22 v8). Mainnet pubkey.
+pub const SPL_TOKEN_2022_PROGRAM_ID: Pubkey =
+    pubkey_from_b58_const(b"TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+
+/// SPL Associated Token Account. Mainnet pubkey.
+pub const SPL_ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
+    pubkey_from_b58_const(b"ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+/// SPL Memo v3. Mainnet pubkey.
+pub const SPL_MEMO_PROGRAM_ID: Pubkey =
+    pubkey_from_b58_const(b"MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+
 /// Seed used for the treasury PDA derivation (single-element seed).
 ///
 /// The validator-subsidy program's CPIs that debit the treasury sign with this seed; if

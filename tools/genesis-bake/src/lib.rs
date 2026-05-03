@@ -141,6 +141,12 @@ pub struct BakeInputs {
     pub secret_pump_so: Option<PathBuf>,
     pub validator_subsidy_so: Option<PathBuf>,
     pub megadrop_so: Option<PathBuf>,
+    /// SPL stack baked at canonical mainnet pubkeys (sidesteps Anchor's
+    /// hardcoded program-id checks in `Program<'info, Token2022>` etc.).
+    pub spl_token_so: Option<PathBuf>,
+    pub spl_token_2022_so: Option<PathBuf>,
+    pub spl_associated_token_so: Option<PathBuf>,
+    pub spl_memo_so: Option<PathBuf>,
 }
 
 /// Keypair triplet for a non-primary bootstrap validator. The primary validator's
@@ -219,6 +225,10 @@ pub fn load_inputs_from_paths(
     secret_pump_so: Option<PathBuf>,
     validator_subsidy_so: Option<PathBuf>,
     megadrop_so: Option<PathBuf>,
+    spl_token_so: Option<PathBuf>,
+    spl_token_2022_so: Option<PathBuf>,
+    spl_associated_token_so: Option<PathBuf>,
+    spl_memo_so: Option<PathBuf>,
 ) -> Result<BakeInputs> {
     let additional_validators = additional_validator_keypair_triplets
         .into_iter()
@@ -243,6 +253,10 @@ pub fn load_inputs_from_paths(
         secret_pump_so,
         validator_subsidy_so,
         megadrop_so,
+        spl_token_so,
+        spl_token_2022_so,
+        spl_associated_token_so,
+        spl_memo_so,
     })
 }
 

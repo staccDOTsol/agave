@@ -177,8 +177,12 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
         inputs.secret_pump_so.as_deref(),
         inputs.validator_subsidy_so.as_deref(),
         inputs.megadrop_so.as_deref(),
+        inputs.spl_token_so.as_deref(),
+        inputs.spl_token_2022_so.as_deref(),
+        inputs.spl_associated_token_so.as_deref(),
+        inputs.spl_memo_so.as_deref(),
     );
-    let mut programs_installed = Vec::with_capacity(5);
+    let mut programs_installed = Vec::with_capacity(slots.len());
     for slot in slots.iter() {
         let Some(path) = slot.so_path else {
             // Operator chose to skip this program — chain still boots; that program
@@ -319,6 +323,10 @@ mod tests {
             secret_pump_so: None,
             validator_subsidy_so: None,
             megadrop_so: None,
+            spl_token_so: None,
+            spl_token_2022_so: None,
+            spl_associated_token_so: None,
+            spl_memo_so: None,
         }
     }
 

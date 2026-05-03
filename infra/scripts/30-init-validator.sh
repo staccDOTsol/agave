@@ -120,6 +120,16 @@ add_so_flag --secret-pump-so        "$SO_DIR/staccana_secret_pump.so"         se
 add_so_flag --validator-subsidy-so  "$SO_DIR/staccana_validator_subsidy.so"   validator-subsidy
 add_so_flag --megadrop-so           "$SO_DIR/staccana_megadrop.so"            megadrop
 
+# Canonical SPL stack — baked at TokenkegQfeZ.../TokenzQdB.../ATokenGP.../MemoSq4...
+# pubkeys so Anchor's Program<'info, Token2022> + Interface<'info, TokenInterface>
+# (which both hardcode-check the canonical addresses) work without forking the
+# anchor-spl crate. Sourced from the agave-bundled program-test directory.
+SPL_BUNDLE="${SPL_BUNDLE:-/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-program-test-2.3.13/src/programs}"
+add_so_flag --spl-token-so              "$SPL_BUNDLE/spl_token-3.5.0.so"                    spl-token-v3
+add_so_flag --spl-token-2022-so         "$SPL_BUNDLE/spl_token_2022-8.0.0.so"               spl-token-2022-v8
+add_so_flag --spl-associated-token-so   "$SPL_BUNDLE/spl_associated_token_account-1.1.1.so" spl-ata
+add_so_flag --spl-memo-so               "$SPL_BUNDLE/spl_memo-3.0.0.so"                     spl-memo-v3
+
 # 4. Bake the genesis. Replaces the prior `solana-genesis` invocation entirely.
 #
 # The new genesis hash will be DIFFERENT from the v0 vanilla one (Fp98...4FKqw); that's

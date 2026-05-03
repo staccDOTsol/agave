@@ -122,6 +122,31 @@ struct Cli {
     #[arg(long)]
     megadrop_so: Option<PathBuf>,
 
+    /// `.so` path for SPL Token v3 (canonical mainnet pubkey
+    /// `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`). Genesis-baking it here
+    /// avoids the post-boot deploy needing the canonical upgrade-authority
+    /// keypair (which we don't have).
+    #[arg(long)]
+    spl_token_so: Option<PathBuf>,
+
+    /// `.so` path for SPL Token-2022 v8 (canonical
+    /// `TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`). Required for any
+    /// downstream consumer that uses Anchor's `Program<'info, Token2022>` or
+    /// `Interface<'info, TokenInterface>` (which both hardcode-check the
+    /// canonical address).
+    #[arg(long)]
+    spl_token_2022_so: Option<PathBuf>,
+
+    /// `.so` path for SPL Associated Token Account (canonical
+    /// `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`).
+    #[arg(long)]
+    spl_associated_token_so: Option<PathBuf>,
+
+    /// `.so` path for SPL Memo v3 (canonical
+    /// `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`).
+    #[arg(long)]
+    spl_memo_so: Option<PathBuf>,
+
     /// Additional bootstrap validator keypair triplets. Each occurrence takes a
     /// comma-separated `identity.json,vote.json,stake.json` triplet. May be passed
     /// multiple times to add multiple validators. Each one will be materialized
@@ -219,6 +244,10 @@ fn main() -> Result<()> {
         cli.secret_pump_so,
         cli.validator_subsidy_so,
         cli.megadrop_so,
+        cli.spl_token_so,
+        cli.spl_token_2022_so,
+        cli.spl_associated_token_so,
+        cli.spl_memo_so,
     )?;
 
     let (config, summary) = bake(&inputs)?;
