@@ -57,6 +57,7 @@ import {
   buildBuyInstruction,
   buildCreateAtaIdempotentInstruction,
   buildCreateInstruction,
+  buildSeedTreasuryIfNeededInstruction,
   initialReserves,
   quoteBuy,
   token22Ata,
@@ -219,6 +220,21 @@ export default function CreatePage(): JSX.Element {
 
       // ---- 5. Optional seed buy ----
       if (seedBuyLamports && seedBuyLamports > 0n) {
+        // Treasury seed: the secret-pump treasury is a constant ASCII placeholder
+        // pubkey (not a real PDA). On a fresh cluster it is a non-existent
+        // system account; the first `system_program::transfer` of the protocol
+        // fee implicitly creates it with whatever lamports the transfer
+        // carries. If those lamports are below `rent.minimum_balance(0)` the
+        // runtime reverts the WHOLE tx with
+        // `InsufficientFundsForRent { account_index: <treasury> }` AFTER the
+        // buy ix has already logged success. Pre-fund the treasury to the
+        // rent-exempt minimum *before* the buy ix runs to dodge this trap.
+        // No-op once the treasury has any lamports >= rent minimum.
+        const treasurySeedIx = await buildSeedTreasuryIfNeededInstruction({
+          connection,
+          payer: publicKey,
+        });
+        if (treasurySeedIx) ixs.push(treasurySeedIx);
         ixs.push(
           buildCreateAtaIdempotentInstruction({
             payer: publicKey,

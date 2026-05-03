@@ -18,6 +18,7 @@
  */
 
 import {
+  Connection,
   PublicKey,
   SystemProgram,
   TransactionInstruction,
@@ -536,5 +537,50 @@ export function buildSellInstruction(args: SellIxArgs): TransactionInstruction {
       { pubkey: TOKEN_2022_PROGRAM_ID, isWritable: false, isSigner: false },
     ],
     data: Buffer.from(data),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Treasury rent-exempt seeding
+// ---------------------------------------------------------------------------
+
+/**
+ * Probe the secret-pump treasury account and, if it has fewer lamports than the
+ * rent-exempt minimum for a zero-data system account, return a `transfer` ix
+ * that tops it up out of `payer`'s wallet. Returns `null` if no top-up is
+ * needed.
+ *
+ * Why this exists: `secret_pump::buy` (and `sell`) move the 1% protocol fee
+ * directly to [`SECRET_PUMP_TREASURY`] via `system_program::transfer`. The
+ * treasury is a constant ASCII placeholder pubkey (NOT a derived PDA) — on a
+ * fresh cluster it is a non-existent system account. The first transfer to it
+ * implicitly creates a zero-data system-owned account funded with whatever
+ * lamports the transfer carries. The Solana runtime runs an end-of-tx rent
+ * check on every account whose balance changed; if the treasury was just
+ * created and the trade fee is under `rent.minimum_balance(0)` (~890_880
+ * lamports on mainnet/devnet/staccana — i.e., ~0.00089 SOL), the entire
+ * transaction reverts with `InsufficientFundsForRent { account_index: <treasury> }`
+ * AFTER the buy ix logs "success".
+ *
+ * On a 0.01 SOL seed buy the fee is 100_000 lamports — well under the
+ * threshold — so the very first launch on a fresh cluster will fail without
+ * pre-funding.
+ *
+ * Top-up amount = exactly `rent.minimum_balance(0)`. Anything beyond that
+ * accrues to the treasury normally on every subsequent trade.
+ */
+export async function buildSeedTreasuryIfNeededInstruction(args: {
+  connection: Connection;
+  payer: PublicKey;
+}): Promise<TransactionInstruction | null> {
+  const minRent = await args.connection.getMinimumBalanceForRentExemption(0);
+  const acct = await args.connection.getAccountInfo(SECRET_PUMP_TREASURY, "confirmed");
+  const have = acct?.lamports ?? 0;
+  if (have >= minRent) return null;
+  const topUp = minRent - have;
+  return SystemProgram.transfer({
+    fromPubkey: args.payer,
+    toPubkey: SECRET_PUMP_TREASURY,
+    lamports: topUp,
   });
 }

@@ -44,6 +44,7 @@ import {
   bondingCurvePda,
   buildBuyInstruction,
   buildCreateAtaIdempotentInstruction,
+  buildSeedTreasuryIfNeededInstruction,
   buildSellInstruction,
   curveVaultPda,
   decodeBondingCurve,
@@ -731,6 +732,21 @@ function TradePanel({
       setSubmitting(true);
       const tx = new Transaction();
       const ata = token22Ata(publicKey, mint);
+      // Treasury seed: the secret-pump treasury is a constant placeholder
+      // pubkey (NOT a real PDA). On a fresh cluster it is a non-existent
+      // system account; the first `system_program::transfer` of the protocol
+      // fee implicitly creates it with whatever lamports the transfer
+      // carries. If the trade fee is below `rent.minimum_balance(0)`
+      // (~890_880 lamports / ~0.00089 SOL) the runtime reverts the whole tx
+      // with `InsufficientFundsForRent` AFTER the buy/sell ix has already
+      // logged success. Pre-fund to dodge. No-op once the treasury is funded.
+      // We resolve the ix here and prepend it at the very end of build (the
+      // sell branch may clear `tx.instructions` on a failed confidential
+      // chain — re-prepending after that survives the reset).
+      const treasurySeedIx = await buildSeedTreasuryIfNeededInstruction({
+        connection,
+        payer: publicKey,
+      });
       if (side === "buy") {
         setStage("Building ATA…");
         tx.add(buildCreateAtaIdempotentInstruction({ payer: publicKey, owner: publicKey, mint }));
@@ -952,6 +968,9 @@ function TradePanel({
           setStage("Submitting sell…");
         }
       }
+      // Prepend the treasury seed (if needed) AFTER the sell branch may have
+      // wiped `tx.instructions` on a failed confidential withdraw chain.
+      if (treasurySeedIx) tx.instructions.unshift(treasurySeedIx);
       tx.feePayer = publicKey;
       tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
 
