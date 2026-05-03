@@ -24,6 +24,7 @@ members = [
     "integration-tests",
     "e2e-tests",
 ]
+exclude = ["proofs-pkg"]
 # Planned crates (uncomment as they land):
 #   "programs/secret-ray",          # forked Raydium AMM v4 / CLMM / CPMM + router
 #   "programs/secret-stake",

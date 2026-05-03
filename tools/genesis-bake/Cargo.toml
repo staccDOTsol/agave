@@ -35,8 +35,24 @@ solana-cluster-type = { version = "2", features = ["serde"] }
 solana-fee-calculator = { version = "2", features = ["serde"] }
 solana-inflation = { version = "2", features = ["serde"] }
 solana-feature-gate-interface = { version = "2", features = ["bincode"] }
+# Lets us iterate every runtime feature gate the agave validator knows about
+# so we can activate them all at slot 0 (mirrors `solana-test-validator`'s
+# behavior). Without this, core-BPF programs from current mainnet hit
+# `unsupported BPF instruction` because their SBPFv3 / new syscalls are gated
+# behind features our cluster never flipped on. agave-feature-set 2.x is
+# version-aligned with our other 2.x deps; bump in lockstep with agave.
+agave-feature-set = "2"
 solana-sdk-ids = "2"
 solana-rent = { version = "2", features = ["serde"] }
+# Lets us set EpochSchedule explicitly in genesis. The default schedule
+# (slots_per_epoch=432_000, warmup=true) gates stake activation through the
+# warmup curve — meaning in epoch 0 only the bootstrap-validator stake counts
+# as active, even for additional bootstrap validators baked with the
+# Epoch::MAX delegation marker. The cluster produces a few bootstrap-leader
+# slots and then stalls because no other validator is treated as a leader.
+# Setting warmup=false short-circuits warmup so all 4 baked stakes
+# participate in the slot-0 leader schedule.
+solana-epoch-schedule = "2"
 solana-loader-v3-interface = { version = "3", features = ["serde", "bincode"] }
 # Vote + stake program crates: needed to materialize a fully-initialized vote
 # account + delegated stake account at slot 0 so the runtime's `Bank::new_with_paths`

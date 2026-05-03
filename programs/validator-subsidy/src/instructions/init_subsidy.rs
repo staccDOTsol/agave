@@ -43,8 +43,14 @@ pub struct InitSubsidyArgs {
     /// Federation member count (N).
     pub federation_n: u8,
 
-    /// Federation pubkeys. Slots beyond `federation_n` are ignored.
-    pub federation_members: [Pubkey; MAX_FEDERATION_MEMBERS],
+    /// Federation pubkeys. Variable-length on the wire — Anchor serializes a
+    /// `Vec<Pubkey>` as `[u32 len-LE | members…]`. Length must match
+    /// `federation_n`. Storage in `SubsidyConfig` is still a fixed
+    /// `[Pubkey; MAX_FEDERATION_MEMBERS]`, zero-padded; the wire-side change
+    /// just keeps the ix data under the 1232-byte legacy tx ceiling for
+    /// reasonable N (e.g. M-of-9 → ~408 bytes vs the old 1142 bytes that
+    /// hit "encoding overruns Uint8Array").
+    pub federation_members: Vec<Pubkey>,
 }
 
 #[derive(Accounts)]
@@ -83,7 +89,8 @@ pub fn handler(ctx: Context<InitSubsidy>, args: InitSubsidyArgs) -> Result<()> {
         args.federation_m > 0
             && args.federation_n > 0
             && args.federation_n as usize <= MAX_FEDERATION_MEMBERS
-            && args.federation_m <= args.federation_n,
+            && args.federation_m <= args.federation_n
+            && args.federation_members.len() == args.federation_n as usize,
         SubsidyError::BadFederationParams
     );
 
@@ -100,7 +107,14 @@ pub fn handler(ctx: Context<InitSubsidy>, args: InitSubsidyArgs) -> Result<()> {
     cfg.last_distributed_epoch = 0;
     cfg.federation_m = args.federation_m;
     cfg.federation_n = args.federation_n;
-    cfg.federation_members = args.federation_members;
+    // Storage is fixed-size [Pubkey; MAX_FEDERATION_MEMBERS], zero-padded.
+    // Copy the variable-length wire vec into the prefix; leave the tail as
+    // `Pubkey::default()` from the `init` zero-initialization.
+    let mut padded = [Pubkey::default(); MAX_FEDERATION_MEMBERS];
+    for (i, k) in args.federation_members.iter().enumerate() {
+        padded[i] = *k;
+    }
+    cfg.federation_members = padded;
     cfg.bump = ctx.bumps.subsidy_config;
 
     let reg = &mut ctx.accounts.validator_registry;

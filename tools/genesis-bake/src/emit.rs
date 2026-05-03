@@ -233,6 +233,12 @@ mod tests {
             secret_pump_so: None,
             validator_subsidy_so: None,
             megadrop_so: None,
+            spl_token_so: None,
+            spl_token_2022_so: None,
+            spl_associated_token_so: None,
+            spl_memo_so: None,
+            address_lookup_table_so: None,
+            staccana_program_upgrade_authority: None,
         }
     }
 

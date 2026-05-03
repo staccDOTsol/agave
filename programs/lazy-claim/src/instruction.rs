@@ -25,15 +25,170 @@ use crate::error::LazyClaimError;
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LazyClaimInstruction {
+    /// Single-tx claim. Inline proof in ix data — fits trees up to ~17 levels deep.
     Claim = 0x00,
+    /// Allocate a proof-buffer PDA for staging long proofs across multiple txs.
+    InitProofBuffer = 0x01,
+    /// Append bytes to a previously initialized proof-buffer PDA.
+    WriteProofBuffer = 0x02,
+    /// Final claim ix that reads the proof from a staged proof-buffer PDA, runs the
+    /// existing claim flow, then closes the buffer (rent → payer).
+    ClaimFromBuffer = 0x03,
 }
 
 impl LazyClaimInstruction {
     pub fn from_byte(b: u8) -> Result<Self, ProgramError> {
         match b {
             0x00 => Ok(Self::Claim),
+            0x01 => Ok(Self::InitProofBuffer),
+            0x02 => Ok(Self::WriteProofBuffer),
+            0x03 => Ok(Self::ClaimFromBuffer),
             _ => Err(LazyClaimError::UnknownInstruction.into()),
         }
+    }
+}
+
+/// Args for `InitProofBuffer`. Wire format:
+///
+/// ```text
+/// [0..1]  discriminator (0x01)
+/// [1..33] pubkey (32 bytes — the claim leaf pubkey, used in the PDA seeds)
+/// [33..37] total_len (LE u32) — total bytes that will be written into the buffer
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitProofBufferArgs {
+    pub pubkey: [u8; 32],
+    pub total_len: u32,
+}
+
+impl InitProofBufferArgs {
+    pub const WIRE_LEN: usize = 32 + 4;
+
+    pub fn to_ix_data(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + Self::WIRE_LEN);
+        out.push(LazyClaimInstruction::InitProofBuffer as u8);
+        out.extend_from_slice(&self.pubkey);
+        out.extend_from_slice(&self.total_len.to_le_bytes());
+        out
+    }
+
+    pub fn decode_body(body: &[u8]) -> Result<Self, ProgramError> {
+        if body.len() < Self::WIRE_LEN {
+            return Err(LazyClaimError::BadInstructionData.into());
+        }
+        let mut pubkey = [0u8; 32];
+        pubkey.copy_from_slice(&body[0..32]);
+        let mut len_bytes = [0u8; 4];
+        len_bytes.copy_from_slice(&body[32..36]);
+        Ok(Self {
+            pubkey,
+            total_len: u32::from_le_bytes(len_bytes),
+        })
+    }
+}
+
+/// Args for `WriteProofBuffer`. Wire format:
+///
+/// ```text
+/// [0..1]   discriminator (0x02)
+/// [1..5]   offset (LE u32) — byte offset within the buffer payload
+/// [5..7]   chunk_len (LE u16)
+/// [7..]    chunk_bytes (chunk_len bytes)
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteProofBufferArgs {
+    pub offset: u32,
+    pub bytes: Vec<u8>,
+}
+
+impl WriteProofBufferArgs {
+    pub fn to_ix_data(&self) -> Result<Vec<u8>, ProgramError> {
+        let chunk_len = u16::try_from(self.bytes.len())
+            .map_err(|_| ProgramError::from(LazyClaimError::BadInstructionData))?;
+        let mut out = Vec::with_capacity(1 + 4 + 2 + self.bytes.len());
+        out.push(LazyClaimInstruction::WriteProofBuffer as u8);
+        out.extend_from_slice(&self.offset.to_le_bytes());
+        out.extend_from_slice(&chunk_len.to_le_bytes());
+        out.extend_from_slice(&self.bytes);
+        Ok(out)
+    }
+
+    pub fn decode_body(body: &[u8]) -> Result<Self, ProgramError> {
+        if body.len() < 4 + 2 {
+            return Err(LazyClaimError::BadInstructionData.into());
+        }
+        let mut off_bytes = [0u8; 4];
+        off_bytes.copy_from_slice(&body[0..4]);
+        let offset = u32::from_le_bytes(off_bytes);
+        let mut len_bytes = [0u8; 2];
+        len_bytes.copy_from_slice(&body[4..6]);
+        let chunk_len = u16::from_le_bytes(len_bytes) as usize;
+        if body.len() < 6 + chunk_len {
+            return Err(LazyClaimError::BadInstructionData.into());
+        }
+        let bytes = body[6..6 + chunk_len].to_vec();
+        Ok(Self { offset, bytes })
+    }
+}
+
+/// Args for `ClaimFromBuffer`. Same shape as `Claim` minus the inline proof bytes —
+/// they're read from the proof-buffer PDA passed at the end of the accounts list.
+///
+/// Wire format:
+///
+/// ```text
+/// [0..1]   discriminator (0x03)
+/// [1..33]  pubkey (32 bytes)
+/// [33..41] lamports (LE u64)
+/// [41..43] proof_len (LE u16) — sibling count; total proof bytes = proof_len * 32
+/// [43..]   proof_flags: ceil(proof_len / 8) bytes
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimFromBufferArgs {
+    pub pubkey: [u8; 32],
+    pub lamports: u64,
+    pub proof_len: u16,
+    pub proof_flags: Vec<u8>,
+}
+
+impl ClaimFromBufferArgs {
+    pub fn to_ix_data(&self) -> Result<Vec<u8>, ProgramError> {
+        let expected_flag_bytes = (self.proof_len as usize + 7) / 8;
+        if self.proof_flags.len() != expected_flag_bytes {
+            return Err(LazyClaimError::ProofLengthMismatch.into());
+        }
+        let mut out = Vec::with_capacity(1 + 32 + 8 + 2 + self.proof_flags.len());
+        out.push(LazyClaimInstruction::ClaimFromBuffer as u8);
+        out.extend_from_slice(&self.pubkey);
+        out.extend_from_slice(&self.lamports.to_le_bytes());
+        out.extend_from_slice(&self.proof_len.to_le_bytes());
+        out.extend_from_slice(&self.proof_flags);
+        Ok(out)
+    }
+
+    pub fn decode_body(body: &[u8]) -> Result<Self, ProgramError> {
+        if body.len() < 32 + 8 + 2 {
+            return Err(LazyClaimError::BadInstructionData.into());
+        }
+        let mut pubkey = [0u8; 32];
+        pubkey.copy_from_slice(&body[0..32]);
+        let mut lamport_bytes = [0u8; 8];
+        lamport_bytes.copy_from_slice(&body[32..40]);
+        let lamports = u64::from_le_bytes(lamport_bytes);
+        let mut len_bytes = [0u8; 2];
+        len_bytes.copy_from_slice(&body[40..42]);
+        let proof_len = u16::from_le_bytes(len_bytes);
+        let flag_bytes = (proof_len as usize + 7) / 8;
+        if body.len() < 42 + flag_bytes {
+            return Err(LazyClaimError::BadInstructionData.into());
+        }
+        let proof_flags = body[42..42 + flag_bytes].to_vec();
+        Ok(Self {
+            pubkey,
+            lamports,
+            proof_len,
+            proof_flags,
+        })
     }
 }
 
@@ -81,6 +236,7 @@ impl ClaimArgs {
         }
         match LazyClaimInstruction::from_byte(data[0])? {
             LazyClaimInstruction::Claim => Self::decode_body(&data[1..]),
+            _ => Err(LazyClaimError::UnknownInstruction.into()),
         }
     }
 

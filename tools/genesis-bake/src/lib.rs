@@ -148,6 +148,27 @@ pub struct BakeInputs {
     pub spl_token_2022_so: Option<PathBuf>,
     pub spl_associated_token_so: Option<PathBuf>,
     pub spl_memo_so: Option<PathBuf>,
+    /// AddressLookupTable program (`AddressLookupTab1e1111111111111111111111111`).
+    /// In agave 2.3+ this is no longer a native builtin — it's a core-BPF
+    /// program that has to be deployed at the canonical address. Without
+    /// this, every v0 transaction referencing a LUT pre-flight-rejects
+    /// with `ProgramAccountNotFound`. Source `.so`:
+    /// `solana-program-test-2.3.13/src/programs/core_bpf_address_lookup_table-3.0.0.so`.
+    pub address_lookup_table_so: Option<PathBuf>,
+    /// Upgrade authority baked into the staccana programs' `ProgramData`
+    /// header at slot 0. `None` (the historical default) hard-freezes them
+    /// immutable forever — which is what bit us when the proof-buffer
+    /// additions arrived: re-deploying the patched .so was impossible
+    /// without another full genesis rebake.
+    ///
+    /// Set this to a pubkey held by the bake operator (typically the
+    /// deployer keypair) so future patches can ship via
+    /// `solana program deploy --program-id ... --upgrade-authority ...`
+    /// against `rpc.mp.fun` instead of needing to re-bake the chain.
+    ///
+    /// SPL programs always bake immutable regardless — they're upstream
+    /// canonical and we never want to upgrade them out from under user txs.
+    pub staccana_program_upgrade_authority: Option<Pubkey>,
 }
 
 /// Keypair triplet for a non-primary bootstrap validator. The primary validator's
@@ -230,6 +251,8 @@ pub fn load_inputs_from_paths(
     spl_token_2022_so: Option<PathBuf>,
     spl_associated_token_so: Option<PathBuf>,
     spl_memo_so: Option<PathBuf>,
+    address_lookup_table_so: Option<PathBuf>,
+    staccana_program_upgrade_authority: Option<Pubkey>,
 ) -> Result<BakeInputs> {
     let additional_validators = additional_validator_keypair_triplets
         .into_iter()
@@ -258,6 +281,8 @@ pub fn load_inputs_from_paths(
         spl_token_2022_so,
         spl_associated_token_so,
         spl_memo_so,
+        address_lookup_table_so,
+        staccana_program_upgrade_authority,
     })
 }
 

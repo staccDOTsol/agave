@@ -43,6 +43,14 @@ SO_DIR="${SO_DIR:-$STACCANA_DIR/target/deploy}"
 #   development | devnet | testnet | mainnet-beta
 CLUSTER_TYPE="${CLUSTER_TYPE:-development}"
 
+# Optional: a base58 pubkey baked into every staccana program's ProgramData
+# header at slot 0 as the upgrade authority. Without it, programs are
+# immutable from genesis — every future patch means another full rebake.
+# With it, post-boot patches go through `solana program deploy
+# --upgrade-authority <auth>.json --program-id <pid>` against rpc.mp.fun.
+# SPL programs always bake immutable regardless.
+UPGRADE_AUTHORITY="${UPGRADE_AUTHORITY:-}"
+
 mkdir -p "$KEY_DIR" "$LEDGER_DIR"
 chmod 700 "$KEY_DIR"
 
@@ -130,6 +138,10 @@ add_so_flag --spl-token-2022-so         "$SPL_BUNDLE/spl_token_2022-8.0.0.so"   
 add_so_flag --spl-associated-token-so   "$SPL_BUNDLE/spl_associated_token_account-1.1.1.so" spl-ata
 add_so_flag --spl-memo-so               "$SPL_BUNDLE/spl_memo-3.0.0.so"                     spl-memo-v3
 
+# AddressLookupTable as core-BPF (no longer a native builtin in agave 2.3+).
+# Without this, every v0 transaction referencing a LUT preflight-rejects.
+add_so_flag --address-lookup-table-so   "$SPL_BUNDLE/core_bpf_address_lookup_table-3.0.0.so" address-lookup-table-v3
+
 # 4. Bake the genesis. Replaces the prior `solana-genesis` invocation entirely.
 #
 # The new genesis hash will be DIFFERENT from the v0 vanilla one (Fp98...4FKqw); that's
@@ -146,6 +158,7 @@ cargo run --release \
   --cluster-type        "$CLUSTER_TYPE" \
   "${EXTRA_VALIDATOR_FLAGS[@]}" \
   "${SO_FLAGS[@]}" \
+  ${UPGRADE_AUTHORITY:+--staccana-program-upgrade-authority "$UPGRADE_AUTHORITY"} \
   --output-ledger-dir   "$LEDGER_DIR"
 
 # Detect the ledger tool binary FIRST, before any invocation. agave 2.x rebrands

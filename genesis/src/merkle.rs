@@ -54,20 +54,53 @@ pub struct MerkleTree {
 
 impl MerkleTree {
     /// Build a Merkle tree from leaves. Sorts by pubkey ascending for determinism.
+    pub fn build(leaves: Vec<ClaimableLeaf>) -> Self {
+        let with_layers = MerkleTreeWithLayers::build(leaves);
+        Self {
+            root: with_layers.root,
+            leaf_count: with_layers.leaf_count,
+        }
+    }
+}
+
+/// A Merkle tree that retains every internal layer so per-leaf proofs can be
+/// generated on demand.
+///
+/// Memory cost: the full tree holds roughly `2 * leaf_count` 32-byte hashes.
+/// For the mainnet snapshot's ~86M claimable leaves that's ~5.5 GB resident,
+/// which is fine on the snapshot host (124 GB RAM) but unsuitable for tiny
+/// validators. Use [`MerkleTree::build`] when you only need the root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MerkleTreeWithLayers {
+    pub root: MerkleRoot,
+    pub leaf_count: usize,
+    /// Sorted leaves (by pubkey ascending), parallel to layer 0.
+    pub leaves: Vec<ClaimableLeaf>,
+    /// One entry per tree level, bottom-up. `layers[0]` are the leaf hashes,
+    /// `layers[layers.len()-1]` is `[root]`.
+    pub layers: Vec<Vec<Hash>>,
+}
+
+impl MerkleTreeWithLayers {
+    /// Build the tree, retaining every layer for proof generation.
     pub fn build(mut leaves: Vec<ClaimableLeaf>) -> Self {
         if leaves.is_empty() {
             return Self {
                 root: MerkleRoot(Hash::default()),
                 leaf_count: 0,
+                leaves: Vec::new(),
+                layers: Vec::new(),
             };
         }
 
         leaves.sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
         let leaf_count = leaves.len();
 
-        let mut layer: Vec<Hash> = leaves.iter().map(ClaimableLeaf::hash).collect();
+        let leaf_layer: Vec<Hash> = leaves.iter().map(ClaimableLeaf::hash).collect();
+        let mut layers: Vec<Vec<Hash>> = vec![leaf_layer];
 
-        while layer.len() > 1 {
+        while layers.last().expect("non-empty").len() > 1 {
+            let layer = layers.last().expect("non-empty");
             let mut next_layer: Vec<Hash> = Vec::with_capacity(layer.len() / 2 + 1);
             for chunk in layer.chunks(2) {
                 let combined = if chunk.len() == 2 {
@@ -78,13 +111,71 @@ impl MerkleTree {
                 };
                 next_layer.push(combined);
             }
-            layer = next_layer;
+            layers.push(next_layer);
         }
 
+        let root = MerkleRoot(layers.last().expect("non-empty")[0]);
+
         Self {
-            root: MerkleRoot(layer[0]),
+            root,
             leaf_count,
+            leaves,
+            layers,
         }
+    }
+
+    /// Inclusion proof for the leaf at sorted-index `leaf_index`.
+    ///
+    /// Returns the list of sibling hashes from leaf level up to (but not
+    /// including) the root. To verify, hash the leaf with [`LEAF_DOMAIN`],
+    /// then iteratively combine with each sibling using [`NODE_DOMAIN`] —
+    /// the order is `(left, right)` based on the position bit (low bit of the
+    /// running index).
+    ///
+    /// Odd-leaf nodes self-pair, matching the tree construction: when a node
+    /// has no sibling at a given layer, the proof step uses that node itself.
+    pub fn proof(&self, leaf_index: usize) -> Vec<Hash> {
+        assert!(
+            leaf_index < self.leaf_count,
+            "leaf_index {leaf_index} out of bounds for {} leaves",
+            self.leaf_count
+        );
+        let mut proof = Vec::with_capacity(self.layers.len().saturating_sub(1));
+        let mut idx = leaf_index;
+        // Walk every layer except the root.
+        for layer in &self.layers[..self.layers.len() - 1] {
+            let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+            let sibling = if sibling_idx < layer.len() {
+                layer[sibling_idx]
+            } else {
+                // Odd node at this layer: self-pair.
+                layer[idx]
+            };
+            proof.push(sibling);
+            idx /= 2;
+        }
+        proof
+    }
+
+    /// Verify a previously-generated proof. Used by tests and downstream
+    /// crates to sanity-check shard emission.
+    pub fn verify(
+        leaf: &ClaimableLeaf,
+        leaf_index: usize,
+        proof: &[Hash],
+        root: &MerkleRoot,
+    ) -> bool {
+        let mut h = leaf.hash();
+        let mut idx = leaf_index;
+        for sibling in proof {
+            h = if idx % 2 == 0 {
+                hashv(&[&[NODE_DOMAIN], h.as_ref(), sibling.as_ref()])
+            } else {
+                hashv(&[&[NODE_DOMAIN], sibling.as_ref(), h.as_ref()])
+            };
+            idx /= 2;
+        }
+        h == root.0
     }
 }
 
@@ -152,5 +243,85 @@ mod tests {
         let tree_a = MerkleTree::build(vec![leaf(1, 100), leaf(2, 200)]);
         let tree_b = MerkleTree::build(vec![leaf(1, 100), leaf(3, 200)]);
         assert_ne!(tree_a.root, tree_b.root);
+    }
+
+    #[test]
+    fn with_layers_root_matches_compact_build() {
+        let leaves = vec![leaf(1, 10), leaf(2, 20), leaf(3, 30), leaf(4, 40)];
+        let compact = MerkleTree::build(leaves.clone());
+        let with_layers = MerkleTreeWithLayers::build(leaves);
+        assert_eq!(compact.root, with_layers.root);
+        assert_eq!(compact.leaf_count, with_layers.leaf_count);
+    }
+
+    #[test]
+    fn proofs_verify_for_every_leaf_even_count() {
+        let leaves = vec![leaf(1, 10), leaf(2, 20), leaf(3, 30), leaf(4, 40)];
+        let tree = MerkleTreeWithLayers::build(leaves.clone());
+        // Use the sorted leaves from inside the tree so indices line up.
+        for (i, l) in tree.leaves.iter().enumerate() {
+            let proof = tree.proof(i);
+            assert!(
+                MerkleTreeWithLayers::verify(l, i, &proof, &tree.root),
+                "leaf {i} failed to verify"
+            );
+        }
+    }
+
+    #[test]
+    fn proofs_verify_for_every_leaf_odd_count() {
+        let leaves = vec![leaf(1, 10), leaf(2, 20), leaf(3, 30)];
+        let tree = MerkleTreeWithLayers::build(leaves);
+        for (i, l) in tree.leaves.iter().enumerate() {
+            let proof = tree.proof(i);
+            assert!(
+                MerkleTreeWithLayers::verify(l, i, &proof, &tree.root),
+                "leaf {i} failed to verify"
+            );
+        }
+    }
+
+    #[test]
+    fn proofs_verify_for_single_leaf() {
+        let leaves = vec![leaf(7, 777)];
+        let tree = MerkleTreeWithLayers::build(leaves);
+        let proof = tree.proof(0);
+        assert!(proof.is_empty(), "single-leaf proof should be empty");
+        assert!(MerkleTreeWithLayers::verify(
+            &tree.leaves[0],
+            0,
+            &proof,
+            &tree.root
+        ));
+    }
+
+    #[test]
+    fn proof_for_larger_tree_verifies() {
+        // 17 leaves: forces multiple layers with odd-leaf duplication on more
+        // than one level (17 -> 9 -> 5 -> 3 -> 2 -> 1).
+        let leaves: Vec<_> = (1u8..=17).map(|b| leaf(b, b as u64 * 100)).collect();
+        let tree = MerkleTreeWithLayers::build(leaves);
+        for (i, l) in tree.leaves.iter().enumerate() {
+            let proof = tree.proof(i);
+            assert!(
+                MerkleTreeWithLayers::verify(l, i, &proof, &tree.root),
+                "leaf {i} failed to verify (proof len = {})",
+                proof.len()
+            );
+        }
+    }
+
+    #[test]
+    fn proof_does_not_verify_against_wrong_root() {
+        let leaves = vec![leaf(1, 10), leaf(2, 20), leaf(3, 30)];
+        let tree = MerkleTreeWithLayers::build(leaves);
+        let proof = tree.proof(0);
+        let wrong = MerkleRoot(Hash::default());
+        assert!(!MerkleTreeWithLayers::verify(
+            &tree.leaves[0],
+            0,
+            &proof,
+            &wrong
+        ));
     }
 }

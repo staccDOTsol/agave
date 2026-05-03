@@ -101,4 +101,31 @@ pub mod staccana_megadrop {
     ) -> Result<()> {
         instructions::claim_megadrop::handler(ctx, args)
     }
+
+    /// Allocate a per-(holder, payer) proof-buffer PDA for staging long Merkle
+    /// proofs across multiple txs. See `instructions::proof_buffer` for layout.
+    pub fn init_megadrop_proof_buffer(
+        ctx: Context<InitMegadropProofBuffer>,
+        args: InitMegadropProofBufferArgs,
+    ) -> Result<()> {
+        instructions::proof_buffer::init_proof_buffer_handler(ctx, args)
+    }
+
+    /// Append `bytes` into a previously initialized proof buffer at `offset`.
+    /// Idempotent on offset; updates the high-water mark.
+    pub fn write_megadrop_proof_buffer(
+        ctx: Context<WriteMegadropProofBuffer>,
+        args: WriteMegadropProofBufferArgs,
+    ) -> Result<()> {
+        instructions::proof_buffer::write_proof_buffer_handler(ctx, args)
+    }
+
+    /// Final claim using a staged proof buffer instead of inline proof bytes.
+    /// Same checks as `claim_megadrop`; closes the buffer (rent → relayer) on success.
+    pub fn claim_megadrop_from_buffer(
+        ctx: Context<ClaimMegadropFromBuffer>,
+        args: ClaimMegadropFromBufferArgs,
+    ) -> Result<()> {
+        instructions::proof_buffer::claim_megadrop_from_buffer_handler(ctx, args)
+    }
 }

@@ -39,7 +39,9 @@ use solana_account::{AccountSharedData, WritableAccount};
 use solana_loader_v3_interface::{get_program_data_address, state::UpgradeableLoaderState};
 use solana_pubkey::Pubkey;
 use solana_rent::Rent;
-use solana_sdk_ids::{bpf_loader_upgradeable, zk_elgamal_proof_program};
+use solana_sdk_ids::{
+    address_lookup_table, bpf_loader_upgradeable, zk_elgamal_proof_program,
+};
 
 use crate::pdas::{
     BRIDGE_PROGRAM_ID, LAZY_CLAIM_PROGRAM_ID, MEGADROP_PROGRAM_ID, SECRET_PUMP_PROGRAM_ID,
@@ -82,6 +84,7 @@ pub fn canonical_slots<'a>(
     spl_token_2022_so: Option<&'a Path>,
     spl_associated_token_so: Option<&'a Path>,
     spl_memo_so: Option<&'a Path>,
+    address_lookup_table_so: Option<&'a Path>,
 ) -> Vec<ProgramSlot<'a>> {
     vec![
         ProgramSlot {
@@ -129,7 +132,21 @@ pub fn canonical_slots<'a>(
             name: "spl_memo (v3)",
             so_path: spl_memo_so,
         },
+        ProgramSlot {
+            program_id: address_lookup_table_program_id(),
+            name: "address_lookup_table (core-bpf v3)",
+            so_path: address_lookup_table_so,
+        },
     ]
+}
+
+/// Address Lookup Table program ID — `AddressLookupTab1e1111111111111111111111111`.
+/// In agave 2.3+ this is no longer a native builtin; it's a regular BPF
+/// program deployed at the canonical address. Source `.so` ships with
+/// `solana-program-test`'s programs directory as
+/// `core_bpf_address_lookup_table-3.0.0.so`.
+pub fn address_lookup_table_program_id() -> Pubkey {
+    address_lookup_table::id()
 }
 
 /// Build a single Program + ProgramData pair for a program whose `.so` byte payload
@@ -245,6 +262,36 @@ pub fn zk_elgamal_proof_native_processor() -> (String, Pubkey) {
     )
 }
 
+// AddressLookupTable was a native builtin in agave <2.3 and is now a
+// core-BPF program at `AddressLookupTab1e1111111111111111111111111` shipped
+// as `core_bpf_address_lookup_table-3.0.0.so`. It enters the genesis via
+// `canonical_slots()` like any other BPF program — see
+// `address_lookup_table_program_id` above.
+
+/// Build the executable account that lives at a native program's address.
+///
+/// agave 3.x demands BOTH `add_native_instruction_processor` (registers the
+/// program with the runtime's BankBuilder) AND `add_account` (puts an
+/// executable, NativeLoader-owned account at the program ID so
+/// `getAccountInfo` resolves and tx loaders can find it). Without the
+/// account, txs that touch the program preflight-reject with
+/// `ProgramAccountNotFound` and zero logs / zero CU consumed — exactly
+/// what we hit on launch/create, /validators init_subsidy, and any
+/// confidential transfer chain referencing a LUT.
+///
+/// Pattern matches `solana_sdk::native_loader::create_loadable_account_for_test`
+/// — executable account, owner = NativeLoader, data = name bytes,
+/// rent-exempt minimum lamports for the data length.
+pub fn native_program_account(name: &str) -> AccountSharedData {
+    use solana_sdk_ids::native_loader;
+    let data = name.as_bytes().to_vec();
+    let lamports = Rent::default().minimum_balance(data.len()).max(1);
+    let mut account = AccountSharedData::new(lamports, data.len(), &native_loader::id());
+    account.set_data_from_slice(&data);
+    account.set_executable(true);
+    account
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,7 +404,7 @@ mod tests {
 
     #[test]
     fn canonical_slots_yields_nine_in_canonical_order() {
-        let slots = canonical_slots(None, None, None, None, None, None, None, None, None);
+        let slots = canonical_slots(None, None, None, None, None, None, None, None, None, None);
         assert_eq!(slots.len(), 9);
         assert_eq!(slots[0].program_id, LAZY_CLAIM_PROGRAM_ID);
         assert_eq!(slots[1].program_id, BRIDGE_PROGRAM_ID);

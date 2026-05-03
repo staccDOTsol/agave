@@ -154,6 +154,16 @@ pub fn lazy_claim_config_pda() -> (Pubkey, u8) {
     Pubkey::find_program_address(&[LAZY_CLAIM_CONFIG_SEED], &LAZY_CLAIM_PROGRAM_ID)
 }
 
+/// Megadrop singleton config PDA seed. Mirrors
+/// `programs/megadrop/src/state.rs::MEGADROP_CONFIG_SEED`.
+pub const MEGADROP_CONFIG_SEED: &[u8] = b"megadrop_config";
+
+/// Derive the megadrop Config singleton PDA address (and bump). Derives from
+/// `["megadrop_config"] / MEGADROP_PROGRAM_ID`.
+pub fn megadrop_config_pda() -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[MEGADROP_CONFIG_SEED], &MEGADROP_PROGRAM_ID)
+}
+
 /// `const fn` base58 → 32-byte pubkey. Used at module scope to evaluate placeholder
 /// program IDs without paying any runtime cost; if any decode fails the const eval
 /// panics (caught at compile time on first build).

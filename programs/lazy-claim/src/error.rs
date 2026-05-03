@@ -53,6 +53,21 @@ pub enum LazyClaimError {
 
     #[error("instructions sysvar account is not the canonical sysvar")]
     BadInstructionsSysvar = 13,
+
+    #[error("proof buffer PDA address does not match the expected derivation")]
+    BadProofBufferPda = 14,
+
+    #[error("proof buffer write would overflow the declared total length")]
+    ProofBufferOverflow = 15,
+
+    #[error("proof buffer payload was not fully written before claim_from_buffer")]
+    ProofBufferIncomplete = 16,
+
+    #[error("proof buffer header is malformed or has wrong discriminator")]
+    BadProofBuffer = 17,
+
+    #[error("proof buffer total length disagrees with declared proof_len")]
+    ProofBufferLengthMismatch = 18,
 }
 
 impl From<LazyClaimError> for ProgramError {

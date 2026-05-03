@@ -103,13 +103,22 @@ async function translateOne(request, item) {
 
 export default {
   async fetch(request, env, ctx) {
+    // WebSocket upgrade — pass straight through to the cloudflared origin
+    // (which now routes via nginx on val-1 that demuxes by `Upgrade` header
+    // to agave's pubsub on :8900). The Worker mustn't intercept these or
+    // web3.js's `confirmTransaction` hangs with `Unexpected server response:
+    // 200` because the GET branch below returns a health JSON instead of
+    // upgrading to 101.
+    if ((request.headers.get("upgrade") || "").toLowerCase() === "websocket") {
+      return fetch(request);
+    }
     if (request.method === "GET") {
       // Useful health-check.
       return new Response(
         JSON.stringify({
           name: "rpc.mp.fun compat proxy",
           translatedMethods: ["getRecentBlockhash", "getFees", "getMinimumLedgerSlot"],
-          upstream: "agave 3.1.14 via cloudflared tunnel from val-1",
+          upstream: "agave 3.1.14 via cloudflared tunnel from val-1 (nginx demux: HTTP→:8899, WS→:8900)",
         }),
         { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } },
       );

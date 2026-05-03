@@ -79,4 +79,19 @@ pub enum MegadropError {
 
     #[msg("init_megadrop args fail sanity (e.g. zero total allocation, zero genesis month)")]
     BadInitArgs = 22,
+
+    #[msg("proof buffer PDA address does not match the expected derivation")]
+    BadProofBufferPda = 23,
+
+    #[msg("proof buffer write would overflow the declared total length")]
+    ProofBufferOverflow = 24,
+
+    #[msg("proof buffer payload was not fully written before claim_megadrop_from_buffer")]
+    ProofBufferIncomplete = 25,
+
+    #[msg("proof buffer header is malformed or has wrong discriminator")]
+    BadProofBuffer = 26,
+
+    #[msg("proof buffer total length disagrees with declared proof_len")]
+    ProofBufferLengthMismatch = 27,
 }

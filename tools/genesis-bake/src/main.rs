@@ -32,10 +32,17 @@
 //!     `InvalidBlock(Incomplete)`
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, ValueEnum};
 use solana_cluster_type::ClusterType;
+use solana_pubkey::Pubkey;
+
+/// Parse a base58-encoded pubkey from a CLI string. Used by clap value parsers.
+fn parse_pubkey(s: &str) -> Result<Pubkey, String> {
+    Pubkey::from_str(s).map_err(|e| format!("invalid base58 pubkey {s:?}: {e}"))
+}
 
 use staccana_genesis_bake::{
     bake, emit::log_bake_summary, emit::write_ledger, load_inputs_from_paths,
@@ -147,6 +154,29 @@ struct Cli {
     #[arg(long)]
     spl_memo_so: Option<PathBuf>,
 
+    /// `.so` path for the AddressLookupTable core-BPF program (deployed at
+    /// `AddressLookupTab1e1111111111111111111111111`). Required for any v0
+    /// transaction that references a LUT — without it, every page that
+    /// hit the legacy 1232-byte ceiling pre-flight-rejects with
+    /// `ProgramAccountNotFound`. Source ships with `solana-program-test`
+    /// as `core_bpf_address_lookup_table-3.0.0.so`.
+    #[arg(long)]
+    address_lookup_table_so: Option<PathBuf>,
+
+    /// Upgrade authority pubkey (base58) baked into the staccana programs
+    /// at slot 0. Without this flag the staccana programs (lazy-claim,
+    /// bridge, secret-pump, validator-subsidy, megadrop) are immutable
+    /// from genesis — any future on-chain bug means another full rebake.
+    /// With this flag set to a pubkey the operator controls, future
+    /// patches can ship via `solana program deploy --upgrade-authority`
+    /// without touching genesis.
+    ///
+    /// SPL programs (token, token-2022, ATA, memo) always bake immutable
+    /// regardless of this flag — they're upstream canonical and we never
+    /// upgrade them out from under live txs.
+    #[arg(long, value_parser = parse_pubkey)]
+    staccana_program_upgrade_authority: Option<Pubkey>,
+
     /// Additional bootstrap validator keypair triplets. Each occurrence takes a
     /// comma-separated `identity.json,vote.json,stake.json` triplet. May be passed
     /// multiple times to add multiple validators. Each one will be materialized
@@ -248,6 +278,8 @@ fn main() -> Result<()> {
         cli.spl_token_2022_so,
         cli.spl_associated_token_so,
         cli.spl_memo_so,
+        cli.address_lookup_table_so,
+        cli.staccana_program_upgrade_authority,
     )?;
 
     let (config, summary) = bake(&inputs)?;

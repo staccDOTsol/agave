@@ -115,6 +115,84 @@ pub fn find_claimed_marker_pda(pubkey: &Pubkey, program_id: &Pubkey) -> (Pubkey,
     Pubkey::find_program_address(&[CLAIMED_MARKER_SEED, pubkey.as_ref()], program_id)
 }
 
+/// PDA seed prefix for a per-(claim, payer) proof buffer staging account.
+///
+/// Full seed list is `["proof_buffer", pubkey, payer]` — keying on payer (rather than
+/// just `pubkey`) lets multiple users concurrently stage proofs for *different*
+/// leaves without colliding, and prevents an attacker from grief-allocating a
+/// claimer's buffer in the wrong shape (since they'd own a different PDA).
+pub const PROOF_BUFFER_SEED: &[u8] = b"proof_buffer";
+
+/// On-chain header for the proof-buffer staging account.
+///
+/// Layout (16 bytes; payload follows):
+/// * `[0..1]`   discriminator (constant `0x03`)
+/// * `[1..2]`   version (currently `0x01`)
+/// * `[2..4]`   reserved
+/// * `[4..8]`   total_len (LE u32) — total bytes the buffer will hold
+/// * `[8..12]`  bytes_written (LE u32) — high-water mark; ix-side caller updates
+/// * `[12..16]` reserved
+/// * `[16..16 + total_len]` raw proof bytes (siblings concatenated)
+///
+/// `bytes_written` is a high-water mark only; `WriteProofBuffer` patches at any
+/// `offset` and extends the high-water mark to `max(prev, offset + len)`. This makes
+/// writes idempotent and tolerates retries without rewinding state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProofBufferHeader {
+    pub total_len: u32,
+    pub bytes_written: u32,
+}
+
+impl ProofBufferHeader {
+    pub const DISCRIMINATOR: u8 = 0x03;
+    pub const VERSION: u8 = 0x01;
+    /// Header size in bytes (16); raw proof bytes follow.
+    pub const HEADER_SIZE: usize = 16;
+
+    pub fn pack_header(&self, out: &mut [u8]) -> Result<(), ProgramError> {
+        if out.len() < Self::HEADER_SIZE {
+            return Err(LazyClaimError::BadProofBuffer.into());
+        }
+        out[0] = Self::DISCRIMINATOR;
+        out[1] = Self::VERSION;
+        out[2] = 0;
+        out[3] = 0;
+        out[4..8].copy_from_slice(&self.total_len.to_le_bytes());
+        out[8..12].copy_from_slice(&self.bytes_written.to_le_bytes());
+        out[12..16].copy_from_slice(&[0u8; 4]);
+        Ok(())
+    }
+
+    pub fn unpack_header(data: &[u8]) -> Result<Self, ProgramError> {
+        if data.len() < Self::HEADER_SIZE {
+            return Err(LazyClaimError::BadProofBuffer.into());
+        }
+        if data[0] != Self::DISCRIMINATOR || data[1] != Self::VERSION {
+            return Err(LazyClaimError::BadProofBuffer.into());
+        }
+        let mut total_bytes = [0u8; 4];
+        total_bytes.copy_from_slice(&data[4..8]);
+        let mut written_bytes = [0u8; 4];
+        written_bytes.copy_from_slice(&data[8..12]);
+        Ok(Self {
+            total_len: u32::from_le_bytes(total_bytes),
+            bytes_written: u32::from_le_bytes(written_bytes),
+        })
+    }
+}
+
+/// Derive the per-(claim-pubkey, payer) proof-buffer PDA address and bump seed.
+pub fn find_proof_buffer_pda(
+    pubkey: &Pubkey,
+    payer: &Pubkey,
+    program_id: &Pubkey,
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[PROOF_BUFFER_SEED, pubkey.as_ref(), payer.as_ref()],
+        program_id,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

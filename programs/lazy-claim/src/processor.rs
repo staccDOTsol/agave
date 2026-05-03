@@ -28,9 +28,14 @@ use solana_program::sysvar::instructions::{
 use solana_program::sysvar::Sysvar;
 
 use crate::error::LazyClaimError;
-use crate::instruction::{ClaimArgs, LazyClaimInstruction};
+use crate::instruction::{
+    ClaimArgs, ClaimFromBufferArgs, InitProofBufferArgs, LazyClaimInstruction, WriteProofBufferArgs,
+};
 use crate::merkle::{leaf_hash, verify_inclusion};
-use crate::state::{find_claimed_marker_pda, ClaimedMarker, LazyClaimConfig, CLAIMED_MARKER_SEED};
+use crate::state::{
+    find_claimed_marker_pda, find_proof_buffer_pda, ClaimedMarker, LazyClaimConfig,
+    ProofBufferHeader, CLAIMED_MARKER_SEED, PROOF_BUFFER_SEED,
+};
 
 /// Static prefix from SPEC §4.2 — exactly 17 bytes.
 pub const CLAIM_MESSAGE_PREFIX: &[u8] = b"STACCANA_CLAIM_V1";
@@ -52,6 +57,18 @@ pub fn process_instruction(
             let args = ClaimArgs::decode_body(&data[1..])?;
             process_claim(program_id, accounts, &args)
         }
+        LazyClaimInstruction::InitProofBuffer => {
+            let args = InitProofBufferArgs::decode_body(&data[1..])?;
+            process_init_proof_buffer(program_id, accounts, &args)
+        }
+        LazyClaimInstruction::WriteProofBuffer => {
+            let args = WriteProofBufferArgs::decode_body(&data[1..])?;
+            process_write_proof_buffer(program_id, accounts, &args)
+        }
+        LazyClaimInstruction::ClaimFromBuffer => {
+            let args = ClaimFromBufferArgs::decode_body(&data[1..])?;
+            process_claim_from_buffer(program_id, accounts, &args)
+        }
     }
 }
 
@@ -67,13 +84,230 @@ pub fn process_claim(
     let instructions_ai = next_account_info(iter)?;
     let treasury_ai = next_account_info(iter)?;
     let marker_ai = next_account_info(iter)?;
-    // Marker-init CPI accounts: a fee-payer for rent (typically the transaction payer)
-    // and the system program. These are appended to the SPEC §4.1 list to support the
-    // `system_program::create_account` CPI that allocates the marker PDA in this same
-    // instruction.
     let payer_ai = next_account_info(iter)?;
     let system_program_ai = next_account_info(iter)?;
 
+    let proof_hashes: Vec<Hash> = args
+        .proof
+        .iter()
+        .map(|b| Hash::new_from_array(*b))
+        .collect();
+
+    finalize_claim(
+        program_id,
+        recipient_ai,
+        config_ai,
+        instructions_ai,
+        treasury_ai,
+        marker_ai,
+        payer_ai,
+        system_program_ai,
+        &args.pubkey,
+        args.lamports,
+        &proof_hashes,
+        &args.proof_flags,
+    )
+}
+
+/// Allocate (and zero-init the header of) the proof-buffer PDA at
+/// `["proof_buffer", pubkey, payer]`.
+///
+/// Accounts:
+/// 0. `proof_buffer_ai` — the PDA to create [writable]
+/// 1. `payer_ai`        — pays rent + signs the create CPI [signer, writable]
+/// 2. `system_program_ai`
+pub fn process_init_proof_buffer(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: &InitProofBufferArgs,
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let proof_buffer_ai = next_account_info(iter)?;
+    let payer_ai = next_account_info(iter)?;
+    let system_program_ai = next_account_info(iter)?;
+
+    let pubkey_bytes = args.pubkey;
+    let pubkey = Pubkey::new_from_array(pubkey_bytes);
+    let (expected_pda, bump) = find_proof_buffer_pda(&pubkey, payer_ai.key, program_id);
+    if proof_buffer_ai.key != &expected_pda {
+        return Err(LazyClaimError::BadProofBufferPda.into());
+    }
+    if !payer_ai.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    let space = ProofBufferHeader::HEADER_SIZE
+        .checked_add(args.total_len as usize)
+        .ok_or(ProgramError::from(LazyClaimError::ProofBufferOverflow))?;
+    let rent = Rent::get()?;
+    let lamports_for_rent = rent.minimum_balance(space);
+
+    let create_ix = system_instruction::create_account(
+        payer_ai.key,
+        proof_buffer_ai.key,
+        lamports_for_rent,
+        space as u64,
+        program_id,
+    );
+    invoke_signed(
+        &create_ix,
+        &[
+            payer_ai.clone(),
+            proof_buffer_ai.clone(),
+            system_program_ai.clone(),
+        ],
+        &[&[
+            PROOF_BUFFER_SEED,
+            pubkey_bytes.as_ref(),
+            payer_ai.key.as_ref(),
+            &[bump],
+        ]],
+    )?;
+
+    let header = ProofBufferHeader {
+        total_len: args.total_len,
+        bytes_written: 0,
+    };
+    let mut data = proof_buffer_ai.try_borrow_mut_data()?;
+    header.pack_header(&mut data)?;
+    Ok(())
+}
+
+/// Append `bytes` into the proof buffer at `offset`. Idempotent on offset — re-writing
+/// the same span is fine. Updates the `bytes_written` high-water mark.
+///
+/// Accounts:
+/// 0. `proof_buffer_ai` [writable]
+pub fn process_write_proof_buffer(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: &WriteProofBufferArgs,
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let proof_buffer_ai = next_account_info(iter)?;
+
+    if proof_buffer_ai.owner != program_id {
+        return Err(LazyClaimError::BadProofBuffer.into());
+    }
+    let mut data = proof_buffer_ai.try_borrow_mut_data()?;
+    let mut header = ProofBufferHeader::unpack_header(&data)?;
+
+    let off = args.offset as usize;
+    let end = off
+        .checked_add(args.bytes.len())
+        .ok_or(ProgramError::from(LazyClaimError::ProofBufferOverflow))?;
+    if end > header.total_len as usize {
+        return Err(LazyClaimError::ProofBufferOverflow.into());
+    }
+    let abs_end = ProofBufferHeader::HEADER_SIZE
+        .checked_add(end)
+        .ok_or(ProgramError::from(LazyClaimError::ProofBufferOverflow))?;
+    if abs_end > data.len() {
+        return Err(LazyClaimError::ProofBufferOverflow.into());
+    }
+    let abs_off = ProofBufferHeader::HEADER_SIZE + off;
+    data[abs_off..abs_end].copy_from_slice(&args.bytes);
+
+    let new_written = core::cmp::max(header.bytes_written as usize, end) as u32;
+    header.bytes_written = new_written;
+    header.pack_header(&mut data)?;
+    Ok(())
+}
+
+/// Final claim using a proof buffer instead of inline proof bytes. Same accounts as
+/// `Claim` plus the proof-buffer PDA appended at the end. After successful claim, the
+/// buffer is closed (lamports → payer, data zeroed, owner re-assigned to system).
+pub fn process_claim_from_buffer(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: &ClaimFromBufferArgs,
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let recipient_ai = next_account_info(iter)?;
+    let config_ai = next_account_info(iter)?;
+    let instructions_ai = next_account_info(iter)?;
+    let treasury_ai = next_account_info(iter)?;
+    let marker_ai = next_account_info(iter)?;
+    let payer_ai = next_account_info(iter)?;
+    let system_program_ai = next_account_info(iter)?;
+    let proof_buffer_ai = next_account_info(iter)?;
+
+    // Validate buffer ownership + PDA derivation against (pubkey, payer).
+    if proof_buffer_ai.owner != program_id {
+        return Err(LazyClaimError::BadProofBuffer.into());
+    }
+    let pubkey = Pubkey::new_from_array(args.pubkey);
+    let (expected_buffer, _bump) = find_proof_buffer_pda(&pubkey, payer_ai.key, program_id);
+    if proof_buffer_ai.key != &expected_buffer {
+        return Err(LazyClaimError::BadProofBufferPda.into());
+    }
+
+    // Read the staged proof. Validate the buffer was fully populated for this proof_len.
+    let proof_byte_len = (args.proof_len as usize)
+        .checked_mul(32)
+        .ok_or(ProgramError::from(LazyClaimError::ProofBufferOverflow))?;
+    let proof_hashes = {
+        let buf = proof_buffer_ai.try_borrow_data()?;
+        let header = ProofBufferHeader::unpack_header(&buf)?;
+        if (header.total_len as usize) < proof_byte_len {
+            return Err(LazyClaimError::ProofBufferLengthMismatch.into());
+        }
+        if (header.bytes_written as usize) < proof_byte_len {
+            return Err(LazyClaimError::ProofBufferIncomplete.into());
+        }
+        let payload_start = ProofBufferHeader::HEADER_SIZE;
+        let payload_end = payload_start + proof_byte_len;
+        if payload_end > buf.len() {
+            return Err(LazyClaimError::ProofBufferOverflow.into());
+        }
+        let mut proof_hashes: Vec<Hash> = Vec::with_capacity(args.proof_len as usize);
+        for i in 0..(args.proof_len as usize) {
+            let off = payload_start + i * 32;
+            let mut sibling = [0u8; 32];
+            sibling.copy_from_slice(&buf[off..off + 32]);
+            proof_hashes.push(Hash::new_from_array(sibling));
+        }
+        proof_hashes
+    };
+
+    finalize_claim(
+        program_id,
+        recipient_ai,
+        config_ai,
+        instructions_ai,
+        treasury_ai,
+        marker_ai,
+        payer_ai,
+        system_program_ai,
+        &args.pubkey,
+        args.lamports,
+        &proof_hashes,
+        &args.proof_flags,
+    )?;
+
+    // Close the proof buffer — return rent to payer, zero data, hand back to system.
+    close_proof_buffer(proof_buffer_ai, payer_ai)?;
+    Ok(())
+}
+
+/// Internal: do the actual claim verification + state mutation. Shared by `Claim` and
+/// `ClaimFromBuffer`. The proof is already in `Hash` form so the caller can source it
+/// from inline ix data or a staged buffer.
+#[allow(clippy::too_many_arguments)]
+fn finalize_claim<'a>(
+    program_id: &Pubkey,
+    recipient_ai: &AccountInfo<'a>,
+    config_ai: &AccountInfo<'a>,
+    instructions_ai: &AccountInfo<'a>,
+    treasury_ai: &AccountInfo<'a>,
+    marker_ai: &AccountInfo<'a>,
+    payer_ai: &AccountInfo<'a>,
+    system_program_ai: &AccountInfo<'a>,
+    pubkey: &[u8; 32],
+    lamports: u64,
+    proof_hashes: &[Hash],
+    proof_flags: &[u8],
+) -> ProgramResult {
     // Step 0: validate the config account is owned by us and unpack the embedded root.
     if config_ai.owner != program_id {
         return Err(LazyClaimError::BadConfigAccount.into());
@@ -84,24 +318,19 @@ pub fn process_claim(
     };
 
     // Step 1 & 2: Merkle inclusion against the embedded root.
-    let leaf = leaf_hash(&args.pubkey, args.lamports);
-    let proof_hashes: Vec<Hash> = args
-        .proof
-        .iter()
-        .map(|b| Hash::new_from_array(*b))
-        .collect();
-    if !verify_inclusion(leaf, &proof_hashes, &args.proof_flags, &config.claimable_root) {
+    let leaf = leaf_hash(pubkey, lamports);
+    if !verify_inclusion(leaf, proof_hashes, proof_flags, &config.claimable_root) {
         return Err(LazyClaimError::BadMerkleProof.into());
     }
 
-    // Step 3: ed25519 precompile must immediately precede this ix and sign the §4.2 message.
+    // Step 3: ed25519 precompile must immediately precede this ix.
     if instructions_ai.key != &instructions_sysvar::id() {
         return Err(LazyClaimError::BadInstructionsSysvar.into());
     }
-    verify_prior_ed25519_signature(instructions_ai, program_id, &args.pubkey, args.lamports)?;
+    verify_prior_ed25519_signature(instructions_ai, program_id, pubkey, lamports)?;
 
     // Step 4: recipient pubkey check.
-    if recipient_ai.key.to_bytes() != args.pubkey {
+    if recipient_ai.key.to_bytes() != *pubkey {
         return Err(LazyClaimError::RecipientMismatch.into());
     }
 
@@ -117,21 +346,39 @@ pub fn process_claim(
         return Err(LazyClaimError::AlreadyClaimed.into());
     }
 
-    // Step 6: credit lamports. See function for the genesis-wiring requirement.
-    credit_lamports(treasury_ai, recipient_ai, args.lamports)?;
+    // Step 6: credit lamports.
+    credit_lamports(treasury_ai, recipient_ai, lamports)?;
 
-    // Step 7: initialize the claimed-marker PDA. Allocates via CPI to system_program then
-    // packs the marker payload — see `init_claimed_marker` for the wiring details.
+    // Step 7: initialize the claimed-marker PDA.
     init_claimed_marker(
         marker_ai,
         payer_ai,
         system_program_ai,
         program_id,
         recipient_ai.key,
-        args.lamports,
+        lamports,
     )?;
 
     msg!("staccana lazy-claim: materialized {}", recipient_ai.key);
+    Ok(())
+}
+
+/// Close the proof-buffer PDA: return rent to payer, zero out data. Owner stays this
+/// program but the account becomes lamport-zero so the runtime garbage-collects it
+/// once the tx commits.
+fn close_proof_buffer(buffer_ai: &AccountInfo, payer_ai: &AccountInfo) -> Result<(), ProgramError> {
+    let mut buffer_lamports = buffer_ai.try_borrow_mut_lamports()?;
+    let mut payer_lamports = payer_ai.try_borrow_mut_lamports()?;
+    let amount = **buffer_lamports;
+    **buffer_lamports = 0;
+    **payer_lamports = payer_lamports
+        .checked_add(amount)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    let mut data = buffer_ai.try_borrow_mut_data()?;
+    for b in data.iter_mut() {
+        *b = 0;
+    }
     Ok(())
 }
 

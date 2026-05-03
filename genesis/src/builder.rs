@@ -6,7 +6,7 @@
 //! consumes.
 
 use crate::classic_defaults::{ClassicDefaults, FeeRateGovernor};
-use crate::merkle::{ClaimableLeaf, MerkleRoot, MerkleTree};
+use crate::merkle::{ClaimableLeaf, MerkleRoot, MerkleTree, MerkleTreeWithLayers};
 use crate::partition::{partition, Account, Disposition};
 use crate::treasury::Treasury;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,46 @@ where
         fee_governor: ClassicDefaults::fee_rate_governor(),
         inflation_disabled: ClassicDefaults::inflation_disabled(),
     }
+}
+
+/// Like [`build_genesis`] but also returns the full [`MerkleTreeWithLayers`]
+/// so the caller can emit per-leaf inclusion proofs (used by the lazy-claim
+/// shard indexer in `staccana-snapshot-fork`).
+///
+/// Trades RAM for capability: see [`MerkleTreeWithLayers`] for the cost.
+pub fn build_genesis_with_tree<A, I>(accounts: I) -> (GenesisOutput, MerkleTreeWithLayers)
+where
+    A: Account,
+    I: IntoIterator<Item = A>,
+{
+    let mut claimable: Vec<ClaimableLeaf> = Vec::new();
+    let mut treasury = Treasury::new();
+
+    for account in accounts {
+        match partition(&account) {
+            Disposition::Claimable => {
+                claimable.push(ClaimableLeaf {
+                    pubkey: *account.pubkey(),
+                    lamports: account.lamports(),
+                });
+            }
+            Disposition::Treasury => {
+                treasury.credit(account.lamports());
+            }
+        }
+    }
+
+    let claimable_count = claimable.len();
+    let tree = MerkleTreeWithLayers::build(claimable);
+
+    let output = GenesisOutput {
+        claimable_root: tree.root,
+        claimable_count,
+        treasury,
+        fee_governor: ClassicDefaults::fee_rate_governor(),
+        inflation_disabled: ClassicDefaults::inflation_disabled(),
+    };
+    (output, tree)
 }
 
 #[cfg(test)]

@@ -13,6 +13,8 @@
 
 pub mod claim_megadrop;
 pub mod init_megadrop;
+pub mod proof_buffer;
 
 pub use claim_megadrop::*;
 pub use init_megadrop::*;
+pub use proof_buffer::*;

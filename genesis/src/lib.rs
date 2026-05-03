@@ -20,11 +20,13 @@ pub mod merkle;
 pub mod partition;
 pub mod treasury;
 
-pub use builder::{build_genesis, GenesisOutput};
+pub use builder::{build_genesis, build_genesis_with_tree, GenesisOutput};
 pub use classic_defaults::{
     ClassicDefaults, FeeRateGovernor, BURN_PERCENT, CTE_FEATURE_GATES_AT_GENESIS,
     FIXED_TRANSACTION_FEE_LAMPORTS, VOTE_TRANSACTION_FEE_LAMPORTS,
 };
-pub use merkle::{ClaimableLeaf, MerkleRoot, MerkleTree, LEAF_DOMAIN, NODE_DOMAIN};
+pub use merkle::{
+    ClaimableLeaf, MerkleRoot, MerkleTree, MerkleTreeWithLayers, LEAF_DOMAIN, NODE_DOMAIN,
+};
 pub use partition::{partition, Account, Disposition, SYSTEM_PROGRAM_ID};
 pub use treasury::Treasury;

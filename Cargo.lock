@@ -9889,6 +9889,7 @@ dependencies = [
 name = "staccana-genesis-bake"
 version = "0.1.0"
 dependencies = [
+ "agave-feature-set",
  "anyhow",
  "bincode",
  "bs58",
@@ -9897,6 +9898,7 @@ dependencies = [
  "serde_json",
  "solana-account",
  "solana-cluster-type",
+ "solana-epoch-schedule 2.2.1",
  "solana-feature-gate-interface 2.2.2",
  "solana-fee-calculator 2.2.1",
  "solana-genesis-config",
@@ -9914,6 +9916,8 @@ dependencies = [
  "solana-stake-program",
  "solana-vote-interface",
  "solana-vote-program",
+ "spl-pod 0.5.1",
+ "spl-token-2022",
  "staccana-genesis",
  "staccana-genesis-emit",
  "staccana-lazy-claim",
@@ -10066,6 +10070,18 @@ dependencies = [
  "solana-sdk-ids 3.1.0",
  "staccana-bridge",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "staccana-wssol-init"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "solana-client",
+ "solana-sdk",
+ "spl-token-2022",
 ]
 
 [[package]]

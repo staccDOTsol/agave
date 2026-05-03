@@ -133,6 +133,38 @@ pub fn find_treasury_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[TREASURY_AUTHORITY_SEED], program_id)
 }
 
+/// PDA seed prefix for a per-(holder, payer) megadrop proof-buffer staging account.
+///
+/// Full seeds: `["megadrop_proof_buffer", holder, payer]`. Multiple users staging at
+/// the same time → no PDA collision. The buffer is closed on `ClaimMegadropFromBuffer`.
+pub const MEGADROP_PROOF_BUFFER_SEED: &[u8] = b"megadrop_proof_buffer";
+
+/// Header for the megadrop proof-buffer staging account. Identical layout to the
+/// lazy-claim version (see `programs/lazy-claim/src/state.rs::ProofBufferHeader`):
+///
+/// * `[0..1]`   discriminator (constant `0x03`)
+/// * `[1..2]`   version (currently `0x01`)
+/// * `[2..4]`   reserved
+/// * `[4..8]`   total_len (LE u32)
+/// * `[8..12]`  bytes_written (LE u32)
+/// * `[12..16]` reserved
+/// * `[16..]`   raw proof bytes (siblings concatenated, 32-byte each)
+pub const PROOF_BUFFER_DISCRIMINATOR: u8 = 0x03;
+pub const PROOF_BUFFER_VERSION: u8 = 0x01;
+pub const PROOF_BUFFER_HEADER_SIZE: usize = 16;
+
+/// Derive the megadrop proof-buffer PDA for `(holder, payer)`.
+pub fn find_megadrop_proof_buffer_pda(
+    holder: &Pubkey,
+    payer: &Pubkey,
+    program_id: &Pubkey,
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[MEGADROP_PROOF_BUFFER_SEED, holder.as_ref(), payer.as_ref()],
+        program_id,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -154,9 +154,23 @@ pub fn faucet_account(faucet: Pubkey) -> (Pubkey, AccountSharedData) {
 /// `init_subsidy` ix post-boot.
 pub fn treasury_account(lamports: u64) -> (Pubkey, AccountSharedData) {
     let (pda, _bump) = treasury_pda();
+    // Owner = LAZY_CLAIM_PROGRAM_ID. lazy-claim debits the treasury via direct
+    // `try_borrow_mut_lamports` mutation in `processor.rs::credit_lamports`.
+    // The Solana runtime forbids direct lamport mutation by any program OTHER
+    // than the account's owner — if the treasury were owned by validator-
+    // subsidy (the program named in the seeds), every claim tx would fail at
+    // the very last step with "instruction spent from the balance of an
+    // account it does not own", AFTER the merkle proof has already verified
+    // and the program has logged "materialized <recipient>".
+    //
+    // Trade-off: the validator-subsidy program can no longer `invoke_signed`
+    // out of this PDA via the seed authority. Subsidy disbursement will need
+    // a CPI through lazy-claim (or a future shared treasury-router program)
+    // to release SOL out of the treasury. Tracking item: subsidy disbursement
+    // path is broken until that wiring lands; lazy-claim claim is unblocked.
     (
         pda,
-        AccountSharedData::new(lamports, 0, &VALIDATOR_SUBSIDY_PROGRAM_ID),
+        AccountSharedData::new(lamports, 0, &LAZY_CLAIM_PROGRAM_ID),
     )
 }
 

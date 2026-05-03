@@ -29,9 +29,15 @@ pub mod processor;
 pub mod state;
 
 pub use error::LazyClaimError;
-pub use instruction::{ClaimArgs, LazyClaimInstruction};
+pub use instruction::{
+    ClaimArgs, ClaimFromBufferArgs, InitProofBufferArgs, LazyClaimInstruction,
+    WriteProofBufferArgs,
+};
 pub use processor::{build_claim_message, process_instruction, CLAIM_MESSAGE_PREFIX};
-pub use state::{find_claimed_marker_pda, ClaimedMarker, LazyClaimConfig, CLAIMED_MARKER_SEED};
+pub use state::{
+    find_claimed_marker_pda, find_proof_buffer_pda, ClaimedMarker, LazyClaimConfig,
+    ProofBufferHeader, CLAIMED_MARKER_SEED, PROOF_BUFFER_SEED,
+};
 
 #[cfg(all(target_os = "solana", feature = "bpf-entrypoint"))]
 solana_program::entrypoint!(process_instruction);

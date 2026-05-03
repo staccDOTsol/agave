@@ -11,6 +11,7 @@
 //! ready for `GenesisConfig::write` (or `bincode::serialize_into`) — see [`crate::emit`].
 
 use anyhow::{Context, Result};
+use solana_epoch_schedule::EpochSchedule;
 use solana_fee_calculator::FeeRateGovernor;
 use solana_genesis_config::GenesisConfig;
 use solana_inflation::Inflation;
@@ -27,7 +28,8 @@ use crate::accounts::{
 };
 use crate::features::build_all_feature_accounts;
 use crate::programs::{
-    build_program_pair_from_path, canonical_slots, zk_elgamal_proof_native_processor, ProgramPair,
+    build_program_pair_from_path, canonical_slots, native_program_account,
+    zk_elgamal_proof_native_processor, ProgramPair,
 };
 use crate::BakeInputs;
 
@@ -93,9 +95,22 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
     let fee_rate_governor = convert_fee_governor(&inputs.composed.fee_governor);
     let inflation = Inflation::new_disabled();
 
+    // EpochSchedule with `warmup=false` so the four bootstrap validators we bake
+    // with `Epoch::MAX` delegation markers all count as fully-active stake from
+    // slot 0. With the default schedule (slots_per_epoch=432_000, warmup=true)
+    // the runtime runs every stake — even Epoch::MAX bootstrap stakes — through
+    // the warmup curve, leaving only the primary bootstrap with positive
+    // active stake at epoch 0. The leader schedule then has only val-1 in it
+    // for ~432k slots, so as soon as val-1 finishes its bootstrap leader
+    // window (slots 0-3) the chain stalls forever waiting for non-existent
+    // leaders. `slots_per_epoch=432_000` is kept (matches mainnet); the
+    // change is solely the warmup flag.
+    let epoch_schedule = EpochSchedule::custom(432_000, 432_000, false);
+
     let mut config = GenesisConfig {
         fee_rate_governor,
         inflation,
+        epoch_schedule,
         cluster_type: inputs.cluster_type,
         ..GenesisConfig::default()
     };
@@ -181,7 +196,24 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
         inputs.spl_token_2022_so.as_deref(),
         inputs.spl_associated_token_so.as_deref(),
         inputs.spl_memo_so.as_deref(),
+        inputs.address_lookup_table_so.as_deref(),
     );
+    // Staccana programs (lazy-claim, bridge, secret-pump, validator-subsidy,
+    // megadrop) get the operator's upgrade authority baked in if one was
+    // supplied — that lets us patch them post-boot without rebaking. SPL
+    // programs always stay immutable (we never want to upgrade Token-2022
+    // out from under live user txs).
+    let staccana_program_ids: std::collections::HashSet<Pubkey> = [
+        crate::pdas::LAZY_CLAIM_PROGRAM_ID,
+        crate::pdas::BRIDGE_PROGRAM_ID,
+        crate::pdas::SECRET_PUMP_PROGRAM_ID,
+        crate::pdas::VALIDATOR_SUBSIDY_PROGRAM_ID,
+        crate::pdas::MEGADROP_PROGRAM_ID,
+    ]
+    .into_iter()
+    .collect();
+    let staccana_authority = inputs.staccana_program_upgrade_authority;
+
     let mut programs_installed = Vec::with_capacity(slots.len());
     for slot in slots.iter() {
         let Some(path) = slot.so_path else {
@@ -190,8 +222,19 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
             // BakeSummary by absence.
             continue;
         };
-        let pair: ProgramPair = build_program_pair_from_path(slot.program_id, path)
-            .with_context(|| format!("building Program/ProgramData pair for {}", slot.name))?;
+        let authority_for_this_slot = if staccana_program_ids.contains(&slot.program_id) {
+            staccana_authority
+        } else {
+            None
+        };
+        let elf = std::fs::read(path)
+            .with_context(|| format!("reading .so for {} at {}", slot.name, path.display()))?;
+        let pair: ProgramPair = crate::programs::build_program_pair_with_authority(
+            slot.program_id,
+            elf,
+            authority_for_this_slot,
+        )
+        .with_context(|| format!("building Program/ProgramData pair for {}", slot.name))?;
         programs_installed.push(ProgramSummary {
             name: slot.name,
             program_id: pair.program_id,
@@ -202,10 +245,27 @@ pub fn assemble_genesis_config(inputs: &BakeInputs) -> Result<(GenesisConfig, Ba
         config.add_account(pair.program_data_address, pair.program_data_account);
     }
 
-    // ---- ZK ElGamal Proof native program (CTE prerequisite) ----
-    let (native_name, native_id) = zk_elgamal_proof_native_processor();
-    config.add_native_instruction_processor(native_name.clone(), native_id);
-    let native_programs_installed = vec![(native_name, native_id)];
+    // ---- Native programs ----
+    //
+    // Both registered via `add_native_instruction_processor`. Without these
+    // entries, agave 3.x on `cluster_type != mainnet-beta` does NOT
+    // auto-load them, and every tx that touches them pre-flight-rejects
+    // with `ProgramAccountNotFound`.
+    //
+    //   * ZK ElGamal Proof (`ZkE1Gama1Proof11…`): required by Token-2022's
+    //     ConfidentialTransfer / ConfidentialMintBurn extensions.
+    //   * AddressLookupTable (`AddressLookupTab1e…`): required by every v0
+    //     transaction. Hit by /launch/create, /validators init_subsidy,
+    //     /claim proof-buffer flow, and every confidential transfer chain
+    //     once they trip the 1232-byte legacy ceiling.
+    // ZK ElGamal Proof IS still a native processor in agave 2.3 (gated by
+    // feature `zk_elgamal_proof_program_enabled`). Both registrations needed.
+    // AddressLookupTable, by contrast, has been migrated to core-BPF — it
+    // enters via `canonical_slots()` further down, NOT here.
+    let (zk_name, zk_id) = zk_elgamal_proof_native_processor();
+    config.add_native_instruction_processor(zk_name.clone(), zk_id);
+    config.add_account(zk_id, native_program_account(&zk_name));
+    let native_programs_installed = vec![(zk_name, zk_id)];
 
     // ---- Bridge asset Token-22 mints (wsol/stsol/ssusdc) ----
     //
@@ -341,6 +401,8 @@ mod tests {
             spl_token_2022_so: None,
             spl_associated_token_so: None,
             spl_memo_so: None,
+            address_lookup_table_so: None,
+            staccana_program_upgrade_authority: None,
         }
     }
 

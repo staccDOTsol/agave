@@ -43,26 +43,52 @@ pub fn build_feature_account(gate_pubkey: Pubkey) -> (Pubkey, AccountSharedData)
     (gate_pubkey, account)
 }
 
-/// Build the full set of CTE feature accounts — one per entry in
-/// [`CTE_FEATURE_GATES_AT_GENESIS`].
+/// Build the full set of feature accounts to activate at slot 0.
 ///
-/// The composed-genesis `active_feature_gates` is taken as the canonical input (the
-/// JSON is what the operator has on disk and is the source of truth at deploy time);
-/// we cross-validate that every gate it lists is also present in the static
-/// `CTE_FEATURE_GATES_AT_GENESIS` constant from `staccana-genesis`, and vice versa, so
-/// neither side can drift unnoticed.
+/// Two layers:
+///
+///   1. The CTE feature gates from `composed-genesis.json` (cross-validated
+///      against the compile-time `CTE_FEATURE_GATES_AT_GENESIS` constant).
+///      These are the load-bearing CTE / ZK-proof gates the staccana programs
+///      depend on at boot.
+///
+///   2. EVERY feature in `agave_feature_set::FEATURE_NAMES` — the full runtime
+///      feature set that mainnet has accumulated over years. Without this,
+///      core-BPF programs built against current mainnet (AddressLookupTable,
+///      future loader_v4 migrations, etc.) hit `unsupported BPF instruction`
+///      and similar runtime errors because they emit SBPFv3 / use syscalls
+///      gated behind features that haven't been flipped on for our cluster.
+///
+///      `solana-test-validator` activates the same set for the same reason —
+///      it's what makes a fresh dev cluster behave like mainnet from slot 0.
+///      If a future agave SBPFv4 lands and our chain is left behind, we just
+///      bump the agave-feature-set dep here and rebake.
 pub fn build_all_feature_accounts(
     composed_gates: &[ActiveFeatureGate],
 ) -> Result<Vec<(Pubkey, AccountSharedData)>> {
     cross_validate_against_constant(composed_gates)?;
 
-    let mut out = Vec::with_capacity(composed_gates.len());
+    use std::collections::BTreeMap;
+    let mut out: BTreeMap<Pubkey, AccountSharedData> = BTreeMap::new();
+
+    // Layer 1: CTE gates from composed-genesis.json.
     for gate in composed_gates {
         let pk = parse_b58_pubkey(&gate.pubkey_b58)
             .with_context(|| format!("parsing feature gate pubkey {}", gate.pubkey_b58))?;
-        out.push(build_feature_account(pk));
+        let (k, v) = build_feature_account(pk);
+        out.insert(k, v);
     }
-    Ok(out)
+
+    // Layer 2: every feature gate the runtime knows about.
+    for pk in agave_feature_set::FEATURE_NAMES.keys() {
+        // BTreeMap: layer 2 inserts only if not already present (so layer 1
+        // wins for any overlap — same activated_at=0 either way, doesn't
+        // matter, but consistent).
+        out.entry(*pk)
+            .or_insert_with(|| build_feature_account(*pk).1);
+    }
+
+    Ok(out.into_iter().collect())
 }
 
 /// Confirm the JSON-supplied gate set matches the compile-time constant set from
