@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 /// `programs/bridge/src/state.rs::MAX_FEDERATION_MEMBERS`. Changing the on-chain
 /// value without bumping this here would silently truncate / over-allocate the
 /// `federation_members` slot in `RegisterAssetArgs`.
-pub const MAX_FEDERATION_MEMBERS: usize = 32;
+pub const MAX_FEDERATION_MEMBERS: usize = 9;
 
 /// PDA seed for the per-asset `AssetConfig`. Mirrors `b"asset"`.
 pub const ASSET_SEED: &[u8] = b"asset";

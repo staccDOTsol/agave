@@ -16,7 +16,7 @@ use anchor_lang::prelude::*;
 
 /// Hard cap on federation set size. v1 spec is 5-of-9 (§2.3); 32 leaves comfortable
 /// headroom for future rotations and keeps `FederationSet` a fixed-size account.
-pub const MAX_FEDERATION_MEMBERS: usize = 32;
+pub const MAX_FEDERATION_MEMBERS: usize = 9;
 
 /// Static per-asset configuration. Set at `register_asset` time and only governance can
 /// rotate fields (rotate flow not in scope for v1).
