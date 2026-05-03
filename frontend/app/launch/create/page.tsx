@@ -41,6 +41,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
 
+import { PageHeader } from "@/components/page-header";
 import { ImageDropzone } from "@/components/pump/image-dropzone";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -395,15 +396,22 @@ export default function CreatePage(): JSX.Element {
   const submitting = submit.kind === "submitting" || submit.kind === "uploading";
 
   return (
-    <div className="space-y-6">
-      <Link
-        href="/launch"
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Back to launchpad
-      </Link>
-
+    <>
+      <PageHeader
+        eyebrow="pump · create"
+        title="Launch a token"
+        tagline="Mint a Token-2022 with MetadataPointer + TokenMetadata, seed the bonding curve PDA + vault, and optionally snipe the first lot in the same transaction."
+        actions={
+          <Link
+            href="/launch"
+            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to launchpad
+          </Link>
+        }
+      />
+      <div className="container space-y-8 py-8">
       <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
         <div className="space-y-6">
           <Card>
@@ -579,7 +587,8 @@ export default function CreatePage(): JSX.Element {
           </Card>
         </aside>
       </div>
-    </div>
+      </div>
+    </>
   );
 }
 

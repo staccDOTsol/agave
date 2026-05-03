@@ -31,7 +31,7 @@ export function PageHeader({
   actions?: ReactNode;
 }): JSX.Element {
   return (
-    <div className="border-b border-border/40 bg-secondary/10">
+    <div className="border-b border-border/40 bg-gradient-to-b from-primary/5 to-transparent">
       <div className="container py-8 sm:py-12">
         <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-2 sm:max-w-2xl">

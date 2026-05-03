@@ -2,8 +2,10 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 
 import { ClusterBanner } from "@/components/cluster-banner";
+import { MobileBalanceSheet } from "@/components/mobile-balance-sheet";
 import { NetworkStatusBanner } from "@/components/network-status-banner";
 import { SecretBalancePanel } from "@/components/SecretBalancePanel";
+import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/use-toast";
@@ -59,6 +61,7 @@ export default function RootLayout({
                   doesn't reserve flow space. */}
               <div className="xl:pr-[336px]">{children}</div>
             </main>
+            <SiteFooter />
 
             {/* Right-rail Secret Balance dock — visible xl+ only. The panel
                 handles its own collapsed/expanded state via sessionStorage
@@ -72,14 +75,10 @@ export default function RootLayout({
               </div>
             </aside>
 
-            {/* Mobile + tablet (<xl): floating pill version, fixed-bottom-right
-                so it doesn't interfere with normal flow + can never overlap
-                tap targets up top. */}
-            <div className="pointer-events-none fixed bottom-4 right-4 z-20 xl:hidden">
-              <div className="pointer-events-auto">
-                <SecretBalancePanel className="max-w-sm" />
-              </div>
-            </div>
+            {/* Mobile + tablet (<xl): pill triggers a bottom-sheet drawer
+                rather than expanding the full panel inline. Pill-only here,
+                drawer + panel mount internally. */}
+            <MobileBalanceSheet />
           </WalletContextProviders>
         </ThemeProvider>
         <Toaster />

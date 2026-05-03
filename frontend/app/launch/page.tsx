@@ -24,7 +24,9 @@ import { Plus, Search, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { EmptyState as SharedEmptyState } from "@/components/empty-state";
 import { MarketChart } from "@/components/MarketChart";
+import { PageHeader } from "@/components/page-header";
 import { KingOfTheHill, type KothCandidate } from "@/components/pump/king-of-the-hill";
 import { TokenCard, TokenCardSkeleton } from "@/components/pump/token-card";
 import { TradeTicker } from "@/components/pump/trade-ticker";
@@ -239,27 +241,21 @@ export default function PumpPage(): JSX.Element {
   );
 
   return (
-    <div className="space-y-8">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div className="space-y-2">
-          <p className="font-mono text-xs uppercase tracking-widest text-primary">pump</p>
-          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-            Confidential launchpad
-          </h1>
-          <p className="max-w-2xl text-muted-foreground">
-            Bonding-curve token launches on staccana. Token-2022 with the Confidential
-            Transfer extension active by default — token amounts on subsequent transfers are
-            encrypted, structurally defeating sniper bots and copy-trading.
-          </p>
-        </div>
-        <Link href="/launch/create">
-          <Button size="lg" className="gap-2">
-            <Plus className="h-4 w-4" />
-            Launch a token
-          </Button>
-        </Link>
-      </header>
-
+    <>
+      <PageHeader
+        eyebrow="pump"
+        title="Confidential launchpad"
+        tagline="Bonding-curve token launches on staccana. Token-2022 with the Confidential Transfer extension active by default — token amounts on subsequent transfers are encrypted, structurally defeating sniper bots and copy-trading."
+        actions={
+          <Link href="/launch/create">
+            <Button size="lg" className="gap-2">
+              <Plus className="h-4 w-4" />
+              Launch a token
+            </Button>
+          </Link>
+        }
+      />
+      <div className="container space-y-8 py-8">
       <ConfidentialityExplainer />
 
       <MarketChart
@@ -337,40 +333,36 @@ export default function PumpPage(): JSX.Element {
       ) : (
         <EmptyState query={query} sort={sort} />
       )}
-    </div>
+      </div>
+    </>
   );
 }
 
 function EmptyState({ query, sort }: { query: string; sort: Sort }): JSX.Element {
   const isFiltered = query.trim().length > 0 || sort === "graduating";
+  if (isFiltered) {
+    return (
+      <SharedEmptyState
+        icon={<Sparkles className="h-10 w-10" />}
+        title="No matching tokens yet"
+        description="Try clearing your filters or switching back to Trending. New launches show up here as soon as the create tx confirms."
+      />
+    );
+  }
   return (
-    <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-border bg-card/40 p-12 text-center">
-      <Sparkles className="h-10 w-10 text-primary/70" />
-      {isFiltered ? (
-        <>
-          <h3 className="text-lg font-semibold">No matching tokens yet</h3>
-          <p className="max-w-md text-sm text-muted-foreground">
-            Try clearing your filters or switching back to Trending. New launches show up here
-            as soon as the create tx confirms.
-          </p>
-        </>
-      ) : (
-        <>
-          <h3 className="text-lg font-semibold">No tokens have launched yet</h3>
-          <p className="max-w-md text-sm text-muted-foreground">
-            Be the first. Spinning up a curve costs only the rent for the mint, vault, and
-            curve PDA — and you get the entire virtual allocation seeded into the AMM
-            automatically.
-          </p>
-          <Link href="/launch/create">
-            <Button className="gap-2">
-              <Plus className="h-4 w-4" />
-              Launch the first token
-            </Button>
-          </Link>
-        </>
-      )}
-    </div>
+    <SharedEmptyState
+      icon={<Sparkles className="h-10 w-10" />}
+      title="No tokens have launched yet"
+      description="Be the first. Spinning up a curve costs only the rent for the mint, vault, and curve PDA — and you get the entire virtual allocation seeded into the AMM automatically."
+      action={
+        <Link href="/launch/create">
+          <Button className="gap-2">
+            <Plus className="h-4 w-4" />
+            Launch the first token
+          </Button>
+        </Link>
+      }
+    />
   );
 }
 
