@@ -37,6 +37,21 @@
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "rlig" 1, "calt" 1;
   }
+
+  /* The wrong-network/wallet-help banner is `position: fixed; top: 0` so it
+     stays put while the page scrolls. Reserve space for it via padding-top
+     when the banner is mounted. The `WalletHelp` component sets
+     `data-staccana-banner="1"` on `<body>` while the banner is visible. The
+     mobile bar is a single line (~28px); on sm+ the longer URL fits and the
+     bar wraps to up to two lines, so we reserve more there. */
+  body[data-staccana-banner="1"] {
+    padding-top: 32px;
+  }
+  @media (min-width: 640px) {
+    body[data-staccana-banner="1"] {
+      padding-top: 36px;
+    }
+  }
 }
 
 /* Bring the wallet-adapter button colors a little closer to our theme without

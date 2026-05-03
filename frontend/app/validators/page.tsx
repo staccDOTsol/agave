@@ -214,7 +214,10 @@ export default function ValidatorsPage(): JSX.Element {
       // Defaults — single-signer federation = the connecting wallet. Productive
       // vault left as PublicKey.default until the bridge `register_asset` ix
       // has been run for pSYRUP; governance can rotate this later.
-      const federationMembers = padFederationMembers([publicKey]);
+      // Wire format is now Vec<Pubkey> (length-prefixed) — no padding to 32.
+      // Send exactly N members; the on-chain handler zero-pads into the
+      // fixed-size SubsidyConfig.federation_members array.
+      const federationMembers = [publicKey];
       const ix = buildInitSubsidyInstruction(publicKey, {
         governance: publicKey,
         bridgeProgramId: PublicKey.default,

@@ -505,24 +505,28 @@ export interface InitSubsidyArgs {
   treasuryTotal: bigint;
   federationM: number;
   federationN: number;
-  /** Exactly `MAX_FEDERATION_MEMBERS` entries; pad unused slots with `PublicKey.default`. */
+  /**
+   * Exactly `federationN` entries on the wire (length-prefixed Vec). The
+   * program enforces `federation_members.len() == federation_n`. Storage on
+   * chain is still a fixed `[Pubkey; MAX_FEDERATION_MEMBERS]` array,
+   * zero-padded internally — the wire-side change just keeps the ix data
+   * under the 1232-byte legacy tx ceiling for any sane N.
+   */
   federationMembers: PublicKey[];
 }
 
 /**
- * Encode `InitSubsidyArgs` as Borsh.
+ * Encode `InitSubsidyArgs` as Borsh (Anchor wire format).
  *
  * Layout: `[disc:8 | governance:32 | bridge_program_id:32 | productive_vault:32
  *  | productive_asset_id:4 LE | treasury_total:8 LE | federation_m:1
- *  | federation_n:1 | federation_members:[u8;32]*32]` = 8+32+32+32+4+8+1+1+1024
- *  = 1142 bytes.
+ *  | federation_n:1 | members_len:4 LE | members:[u8;32]*N]`
+ *  = 118 + 4 + 32×N bytes.
+ *
+ * For 1-of-1: 154 bytes. For 5-of-9: 410 bytes. Both well under the 1232-byte
+ * legacy tx ceiling — no LUT needed for init_subsidy anymore.
  */
 export function encodeInitSubsidyArgs(args: InitSubsidyArgs): Uint8Array {
-  if (args.federationMembers.length !== MAX_FEDERATION_MEMBERS) {
-    throw new Error(
-      `federationMembers must be exactly ${MAX_FEDERATION_MEMBERS} entries (got ${args.federationMembers.length})`,
-    );
-  }
   if (args.federationN > MAX_FEDERATION_MEMBERS) {
     throw new RangeError(`federationN out of range: ${args.federationN}`);
   }
@@ -531,8 +535,20 @@ export function encodeInitSubsidyArgs(args: InitSubsidyArgs): Uint8Array {
       `federationM must be in [1, federationN]; got M=${args.federationM} N=${args.federationN}`,
     );
   }
-  const membersBytes = new Uint8Array(32 * MAX_FEDERATION_MEMBERS);
-  for (let i = 0; i < MAX_FEDERATION_MEMBERS; i++) {
+  if (args.federationMembers.length !== args.federationN) {
+    throw new RangeError(
+      `federationMembers length (${args.federationMembers.length}) must equal federationN (${args.federationN})`,
+    );
+  }
+  // Vec<Pubkey> — Anchor/Borsh prefixes with `len: u32 LE`, then N × 32 bytes.
+  const lenLe = new Uint8Array(4);
+  const n = args.federationMembers.length;
+  lenLe[0] = n & 0xff;
+  lenLe[1] = (n >>> 8) & 0xff;
+  lenLe[2] = (n >>> 16) & 0xff;
+  lenLe[3] = (n >>> 24) & 0xff;
+  const membersBytes = new Uint8Array(32 * n);
+  for (let i = 0; i < n; i++) {
     membersBytes.set(args.federationMembers[i].toBytes(), i * 32);
   }
   const assetIdLe = new Uint8Array(4);
@@ -548,6 +564,7 @@ export function encodeInitSubsidyArgs(args: InitSubsidyArgs): Uint8Array {
     assetIdLe,
     u64LeBytes(args.treasuryTotal),
     new Uint8Array([args.federationM, args.federationN]),
+    lenLe,
     membersBytes,
   );
 }

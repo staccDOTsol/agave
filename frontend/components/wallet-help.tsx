@@ -178,7 +178,7 @@ export function WalletHelp(): JSX.Element {
         // taller than the viewport; the backdrop scrolls past it. Sticky
         // title bar inside keeps the header pinned while the user reads.
         <div
-          className="fixed inset-0 z-40 overflow-y-auto bg-background/80 px-4 py-6 backdrop-blur sm:py-12"
+          className="fixed inset-0 z-40 overflow-y-auto bg-background/95 px-4 py-6 backdrop-blur-md sm:py-12"
           onClick={() => setOpen(false)}
           role="presentation"
         >
@@ -237,46 +237,39 @@ export function WalletHelp(): JSX.Element {
                 </p>
               )}
 
+              <p className="mb-3 text-xs text-muted-foreground">
+                Wallets simulate transactions against their default RPC. If yours points at Solana
+                mainnet, your buy/claim/bridge calls will preflight-reject because the staccana
+                programs don&apos;t exist there. Add staccana as a custom cluster in your wallet:
+              </p>
+
               <div className="mb-4 space-y-3 text-sm">
-                <Section title="If you've never connected — add staccana">
-                  <Tabs
-                    tabs={[
-                      {
-                        label: "Backpack",
-                        body: (
-                          <ol className="ml-5 list-decimal space-y-0.5 text-xs text-muted-foreground">
-                            <li>Click your avatar (top-left) → gear icon</li>
-                            <li>
-                              <span className="text-foreground">Solana</span> →{" "}
-                              <span className="text-foreground">RPC Connection</span> → toggle to{" "}
-                              <span className="text-foreground">Custom</span>
-                            </li>
-                            <li>Paste the URL below, hit Save</li>
-                            <li>Re-open this site & click "Test" above — should turn green</li>
-                          </ol>
-                        ),
-                      },
-                      {
-                        label: "Phantom",
-                        body: (
-                          <ol className="ml-5 list-decimal space-y-0.5 text-xs text-muted-foreground">
-                            <li>Settings (gear) → Developer Settings → enable Testnet Mode</li>
-                            <li>Change Network → Add Custom RPC → paste URL below</li>
-                            <li>Set as default for this site</li>
-                          </ol>
-                        ),
-                      },
-                      {
-                        label: "Solflare",
-                        body: (
-                          <ol className="ml-5 list-decimal space-y-0.5 text-xs text-muted-foreground">
-                            <li>Settings → Network → Add custom node</li>
-                            <li>Paste URL below, set as active</li>
-                          </ol>
-                        ),
-                      },
-                    ]}
-                  />
+                <Section title="Backpack (recommended)">
+                  <ol className="ml-5 list-decimal space-y-0.5 text-xs text-muted-foreground">
+                    <li>Click your avatar (top-left) → gear icon</li>
+                    <li>
+                      <span className="text-foreground">Solana</span> →{" "}
+                      <span className="text-foreground">RPC Connection</span> → toggle to{" "}
+                      <span className="text-foreground">Custom</span>
+                    </li>
+                    <li>Paste the URL below, hit Save</li>
+                    <li>Re-open this site &amp; click &quot;Test&quot; above — should turn green</li>
+                  </ol>
+                </Section>
+
+                <Section title="Phantom">
+                  <ol className="ml-5 list-decimal space-y-0.5 text-xs text-muted-foreground">
+                    <li>Settings (gear) → Developer Settings → enable Testnet Mode</li>
+                    <li>Change Network → Add Custom RPC → paste URL below</li>
+                    <li>Set as default for this site</li>
+                  </ol>
+                </Section>
+
+                <Section title="Solflare">
+                  <ol className="ml-5 list-decimal space-y-0.5 text-xs text-muted-foreground">
+                    <li>Settings → Network → Add custom node</li>
+                    <li>Paste URL below, set as active</li>
+                  </ol>
                 </Section>
 
                 <Section title='If txs fail with "Blockhash not found" — wallet cache is stale'>

@@ -459,21 +459,24 @@ function ConfidentialityExplainer(): JSX.Element {
               {" "}via `/api/confidential/proof`; if anything in that chain fails the page
               falls back to a plain public buy so the user never gets stuck.
             </p>
-            <p>
-              <strong className="text-foreground">Sells decrypt automatically</strong>{" "}
-              before submitting — the curve trade size remains public, but post-trade
-              your balance returns to encrypted-by-default on the next buy. The sell
-              chain is{" "}
-              <span className="font-mono text-xs">
+            <p className="text-xs italic">
+              <strong className="not-italic text-foreground">Coming soon:</strong>{" "}
+              <em>encrypted sells</em> (the{" "}
+              <span className="font-mono not-italic">
                 [VerifyEq, VerifyRange, Withdraw, ApplyPendingBalance, Sell]
               </span>{" "}
-              compiled as a v0 transaction against a per-mint Address Lookup Table
-              (the legacy 1232-byte cap can&apos;t fit it).
-            </p>
-            <p className="text-xs italic">
-              The Send dialog still falls back to public `TransferChecked` until the
-              lo/hi commitments TODO lands — see{" "}
-              <span className="font-mono text-xs">lib/confidential.ts</span>.
+              v0+LUT chain that decrypts your post-trade balance back into{" "}
+              <span className="font-mono not-italic">available_balance</span> on the
+              next buy) and a <em>send-to-anyone</em> hack flow that creates a
+              pre-funded confidential account on behalf of recipients who haven&apos;t
+              run <span className="font-mono not-italic">ConfigureAccount</span> yet.
+              Until those land, sells go through the program&apos;s plain{" "}
+              <span className="font-mono not-italic">Sell</span> ix and the Send
+              dialog falls back to public{" "}
+              <span className="font-mono not-italic">TransferChecked</span> when the
+              recipient ATA has no CT extension. See{" "}
+              <span className="font-mono not-italic">lib/confidential.ts</span> and{" "}
+              <span className="font-mono not-italic">programs/secret-pump/</span>.
             </p>
           </div>
         </div>

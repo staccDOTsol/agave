@@ -112,6 +112,38 @@ export const ED25519_PROGRAM_ID = new PublicKey("Ed25519SigVerify111111111111111
 /** Sysvar Instructions ID. Used at account index 2 of the claim ix. */
 export const SYSVAR_INSTRUCTIONS_ID = new PublicKey("Sysvar1nstructions1111111111111111111111111");
 
+/**
+ * Cluster-wide MASTER LUT containing every staccana program ID, every SPL
+ * program ID, and the common sysvars used across pages. Pre-deployed +
+ * extended once on the cluster (see `infra/scripts/45-bootstrap-master-lut.sh`
+ * for the build steps); every v0 transaction we ship references THIS LUT
+ * instead of bootstrapping its own. Killed the per-flow LUT bootstrap mess
+ * (each had its own localStorage cache that went stale on every rebake).
+ *
+ * Addresses currently in the LUT (index → pubkey):
+ *   0  System program
+ *   1  SPL Token v3
+ *   2  SPL Token-2022
+ *   3  SPL ATA
+ *   4  SPL Memo
+ *   5  Ed25519 precompile
+ *   6  ZK ElGamal Proof
+ *   7  Sysvar Rent
+ *   8  Sysvar Clock
+ *   9  Sysvar Instructions
+ *   10 Sysvar StakeHistory
+ *   11 lazy-claim
+ *   12 secret-pump
+ *   13 megadrop
+ *   14 validator-subsidy
+ *   15 bridge
+ *
+ * Override via `NEXT_PUBLIC_MASTER_LUT` for local dev / re-bake testing.
+ */
+export const STACCANA_MASTER_LUT = new PublicKey(
+  process.env.NEXT_PUBLIC_MASTER_LUT ?? "7bGgc4SxQzkkBJabk8mcXfoceoon3Lv55Gkds8453vun",
+);
+
 // --- Endpoint and URL Configuration ---
 
 /** Default megadrop allocations URL. Override via NEXT_PUBLIC_MEGADROP_URL. */
@@ -174,7 +206,7 @@ export const CLUSTER_NAME = process.env.NEXT_PUBLIC_CLUSTER_NAME ?? DEFAULT_CLUS
  * via `NEXT_PUBLIC_GENESIS_HASH`).
  */
 export const GENESIS_HASH =
-  process.env.NEXT_PUBLIC_GENESIS_HASH ?? "5B4McgxXGHjUNQAqnzxf8ZDnVenXAoe4dNJyp7ystWri";
+  process.env.NEXT_PUBLIC_GENESIS_HASH ?? "FFwiB5Dq3HshrfzPeQTCWAzVUFgw6r4kJLAmCYdLXLep";
 
 // --- URL Builders and PDA Helpers ---
 
@@ -196,29 +228,42 @@ export function claimedMarkerPda(pubkey: PublicKey): PublicKey {
 }
 
 /**
- * Derive the lazy-claim program-state PDA at `["state"]`.
+ * Derive the lazy-claim program-state (LazyClaimConfig) PDA at `["config"]`.
  *
- * The CLI defaults to this when --program-state is not passed.
+ * MUST stay in sync with `tools/genesis-bake/src/pdas.rs::LAZY_CLAIM_CONFIG_SEED`
+ * — the bake pre-creates this account at genesis with the canonical
+ * `claimable_root` + `treasury_pda` payload, and the on-chain processor
+ * reads it via `LazyClaimConfig::unpack(config_ai.data)` per
+ * `programs/lazy-claim/src/processor.rs::process_claim`. An earlier
+ * version of this file used `["state"]` which derived a DIFFERENT PDA
+ * that has no account → every claim hit
+ * `LazyClaimError::BadConfigAccount = 0x2` because the supplied account
+ * had no owner / was not the program's.
  */
 export function programStatePda(): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("state")],
+    [Buffer.from("config")],
     LAZY_CLAIM_PROGRAM_ID,
   );
   return pda;
 }
 
 /**
- * Derive the treasury PDA at `["treasury"]` against the lazy-claim program.
+ * Derive the treasury PDA at `["treasury"]` against the validator-subsidy
+ * program ID. Matches `tools/genesis-bake/src/pdas.rs::treasury_pda()` which
+ * the bake uses to pre-credit 485M SOL into the treasury at slot 0. The
+ * lazy-claim `LazyClaimConfig.treasury_pda` field stores THIS address, and
+ * `process_claim` debits lamports out of it to materialize claim payouts.
  *
- * TODO(prod): swap to TREASURY_PROGRAM_ID once SPEC §2.1 fills it in. The CLI
- * currently uses the lazy-claim program ID as the placeholder seed authority;
- * we mirror that to stay consistent.
+ * Earlier this used `LAZY_CLAIM_PROGRAM_ID` as the seed authority — that
+ * derived a different (un-credited, non-existent) PDA, so every claim hit
+ * `LazyClaimError::BadTreasuryAccount = 0xc` because the supplied account
+ * didn't match `LazyClaimConfig.treasury_pda`.
  */
 export function treasuryPda(): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
     [Buffer.from("treasury")],
-    LAZY_CLAIM_PROGRAM_ID,
+    VALIDATOR_SUBSIDY_PROGRAM_ID,
   );
   return pda;
 }
