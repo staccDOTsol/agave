@@ -155,25 +155,69 @@ export default function TokenDetailPage(): JSX.Element {
     };
   }, [mint, connection, refreshNonce]);
 
-  // Try to load metadata. The on-chain BondingCurve PDA doesn't store the
-  // URI, but if the user supplied an image / socials at create time the
-  // launchpad would have packed them into the Token-2022 MetadataPointer.
-  // TODO(metadata): wire MetadataPointer → JSON URI dereferencing. For now we
-  // don't have a way to discover the URI from this page alone; metadata
-  // remains null and we render placeholder identity.
+  // Load metadata from the Token-22 mint's TokenMetadata extension. The
+  // launchpad stores name/symbol on the mint itself (extension TLV), and
+  // optionally a `uri` pointing at a Vercel-Blob-hosted JSON document with
+  // image + socials. We:
+  //   1. getAccountInfo(mint) → parse the TokenMetadata extension via
+  //      @solana/spl-token-metadata's `unpack()` to get {name, symbol, uri}.
+  //   2. If `uri` is set, fetch that JSON and merge in image + socials.
   useEffect(() => {
     let cancelled = false;
     if (!mint) return;
-    // Cheap probe: try the data: URI we'd derive from a default-named token.
-    // No-op for now; intentionally left as a stub so the call site is wired.
     (async () => {
-      const meta = await fetchPumpMetadata(""); // returns null
-      if (!cancelled) setMetadata(meta);
+      try {
+        const { getMint, getTokenMetadata } = await import("@solana/spl-token");
+        const { TOKEN_2022_PROGRAM_ID } = await import("@/lib/staccana");
+        // getTokenMetadata wraps mint fetch + extension unpack.
+        const onchain = await getTokenMetadata(connection, mint, "confirmed", TOKEN_2022_PROGRAM_ID);
+        if (cancelled) return;
+        if (!onchain) {
+          // No metadata extension on this mint — render placeholder identity.
+          setMetadata(null);
+          return;
+        }
+        // Start from the on-mint fields. Then overlay JSON if uri is set.
+        const merged: PumpTokenMetadata = {
+          name: onchain.name || undefined,
+          symbol: onchain.symbol || undefined,
+        };
+        // Pull additionalMetadata pairs (description / socials) into the merged
+        // object for fields the launchpad packs there.
+        for (const [k, v] of onchain.additionalMetadata ?? []) {
+          if (k === "description") merged.description = v;
+          if (k === "twitter") merged.twitter = v;
+          if (k === "telegram") merged.telegram = v;
+          if (k === "website") merged.website = v;
+          if (k === "image") merged.image = v;
+        }
+        if (onchain.uri && /^https?:\/\//.test(onchain.uri)) {
+          try {
+            const jsonRes = await fetch(onchain.uri, { cache: "force-cache" });
+            if (jsonRes.ok) {
+              const j = (await jsonRes.json()) as Partial<PumpTokenMetadata>;
+              if (j.image) merged.image = j.image;
+              if (j.description && !merged.description) merged.description = j.description;
+              if (j.twitter && !merged.twitter) merged.twitter = j.twitter;
+              if (j.telegram && !merged.telegram) merged.telegram = j.telegram;
+              if (j.website && !merged.website) merged.website = j.website;
+            }
+          } catch {
+            // Non-fatal — keep on-mint fields as-is.
+          }
+        }
+        if (!cancelled) setMetadata(merged);
+        // Suppress unused-import warning when getMint not directly used.
+        void getMint;
+      } catch (err) {
+        console.warn("[launch/mint] metadata load failed", err);
+        if (!cancelled) setMetadata(null);
+      }
     })();
     return () => {
       cancelled = true;
     };
-  }, [mint]);
+  }, [mint, connection]);
 
   if (!mint) {
     return (
