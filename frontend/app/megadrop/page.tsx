@@ -36,6 +36,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
+import { PageHeader } from "@/components/page-header";
 import { buildEd25519PrecompileInstruction } from "@/lib/claim";
 import { recomputeRoot, toHex, type InclusionProof } from "@/lib/merkle";
 import {
@@ -470,19 +471,13 @@ export default function MegadropPage(): JSX.Element {
   ]);
 
   return (
-    <div className="space-y-8">
-      <header className="space-y-2">
-        <p className="font-mono text-xs uppercase tracking-widest text-primary">megadrop</p>
-        <h1 className="text-3xl font-semibold tracking-tight">
-          Holder claim — based_stacc_0 + proofv3
-        </h1>
-        <p className="max-w-2xl text-muted-foreground">
-          Snapshotted holders of two Solana mainnet collections — `based_stacc_0` (Metaplex
-          NFT collection) and `proofv3` (Token-22 SPL fungible mint) — pull their per-holder
-          allocation out of the staccana treasury in 10 equal monthly tranches starting at
-          mainnet-sigma launch. Vesting and claim mechanics live in `docs/MEGADROP.md`.
-        </p>
-      </header>
+    <>
+      <PageHeader
+        eyebrow="megadrop"
+        title="Holder claim — based_stacc_0 + proofv3"
+        tagline="Snapshotted holders of two Solana mainnet collections pull their per-holder allocation out of the staccana treasury in 10 equal monthly tranches starting at mainnet-sigma launch."
+      />
+      <div className="container space-y-8 py-8">
 
       <Card>
         <CardHeader>
@@ -606,7 +601,8 @@ export default function MegadropPage(): JSX.Element {
           </CardContent>
         </Card>
       ) : null}
-    </div>
+      </div>
+    </>
   );
 }
 

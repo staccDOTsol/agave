@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
+import { PageHeader } from "@/components/page-header";
 import {
   buildClaimFromBufferIx,
   buildClaimMessage,
@@ -51,7 +52,7 @@ import { formatSol, truncatePubkey } from "@/lib/utils";
 type EligibilityState =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "eligible"; proof: InclusionProof }
+  | { kind: "eligible"; proof: InclusionProof; leafIndex: number }
   | { kind: "not_in_set" }
   | { kind: "pending_index" }
   | { kind: "error"; message: string };
@@ -139,7 +140,7 @@ export default function ClaimPage(): JSX.Element {
         };
         const root = await recomputeRoot(partial);
         const proof: InclusionProof = { ...partial, root };
-        setEligibility({ kind: "eligible", proof });
+        setEligibility({ kind: "eligible", proof, leafIndex: raw.leafIndex });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -152,6 +153,7 @@ export default function ClaimPage(): JSX.Element {
   }, [connected, publicKey]);
 
   const proof = eligibility.kind === "eligible" ? eligibility.proof : null;
+  const leafIndex = eligibility.kind === "eligible" ? eligibility.leafIndex : null;
 
   const eligibilitySummary = useMemo(() => {
     if (!connected || !publicKey) return "Connect your wallet to check eligibility.";
@@ -192,20 +194,34 @@ export default function ClaimPage(): JSX.Element {
       // levels = 864 bytes of siblings) we MUST stage the proof in a PDA across
       // multiple txs to stay under the 1232-byte tx ceiling.
       if (proof.proof.length <= PROOF_BUFFER_THRESHOLD) {
-        const tx = await buildClaimTransaction({
-          proof,
-          signature,
-          signerPubkey: publicKey,
-          message,
-          payer: publicKey,
-          connection,
-        });
+        // Server-side relayer pays the tx fee — claim is fee-exempt for the
+        // user (SPEC §4.4). Wallet only signs the SPEC §4.2 message; the
+        // /api/claim/relay endpoint constructs + sponsor-signs + submits.
+        // User doesn't need any staccana SOL to claim.
         setClaim({ kind: "submitting" });
-        const txSig = await sendTransaction(tx, connection, { skipPreflight: true });
+        const relayResp = await fetch("/api/claim/relay", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            pubkey: publicKey.toBase58(),
+            lamports: proof.lamports.toString(),
+            leafIndex,
+            proof: proof.proof.map((b) => toHex(b)),
+            signature: btoa(String.fromCharCode(...signature)),
+            message: btoa(String.fromCharCode(...message)),
+          }),
+        });
+        if (!relayResp.ok) {
+          const errBody = await relayResp.json().catch(() => ({}));
+          throw new Error(
+            `relayer rejected: ${errBody.error ?? relayResp.statusText}${errBody.detail ? ` — ${errBody.detail}` : ""}`,
+          );
+        }
+        const { signature: txSig } = (await relayResp.json()) as { signature: string };
         setClaim({ kind: "success", signature: txSig });
         toast({
           variant: "success",
-          title: "Claim submitted",
+          title: "Claim submitted (fee-sponsored)",
           description: (
             <a
               className="font-mono text-xs underline underline-offset-2"
@@ -226,69 +242,39 @@ export default function ClaimPage(): JSX.Element {
       // 2. Tx B: more write ixs until the buffer is full
       // 3. Tx C: ed25519 precompile + claim_from_buffer
       //
-      // We cache the inferred buffer PDA in this closure so a transient failure
-      // on Tx C can retry without re-staging — the on-chain handler tolerates
-      // re-writes at the same offset and rejects re-init. (A future refactor
-      // can lift this into useState if we want cross-render persistence.)
-      const plan = planProofBufferWrites({
-        claimPubkey: publicKey,
-        payer: publicKey,
-        proof: proof.proof,
-      });
-
-      // Group write-ixs into transactions, leaving one slot for init_proof_buffer
-      // in the first tx. Each write-ix carries ~7-byte ix overhead + the chunk.
-      const writeIxs = plan.chunks.map((c) =>
-        buildWriteProofBufferIx({
-          claimPubkey: publicKey,
-          payer: publicKey,
-          offset: c.offset,
-          chunk: c.bytes,
+      // Server-side relayer pays for ALL three. User signed only the §4.2
+      // message earlier; the relayer constructs each tx with the sponsor as
+      // fee payer and submits in sequence (each confirmed before the next).
+      // Claim is fully fee-exempt — no staccana SOL needed on the user's
+      // wallet at any point.
+      setClaim({ kind: "staging", current: 1, total: 3 });
+      const relayResp = await fetch("/api/claim/relay-buffered", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pubkey: publicKey.toBase58(),
+          lamports: proof.lamports.toString(),
+          leafIndex,
+          proof: proof.proof.map((b) => toHex(b)),
+          signature: btoa(String.fromCharCode(...signature)),
+          message: btoa(String.fromCharCode(...message)),
         }),
-      );
-      const initIx = buildInitProofBufferIx({
-        claimPubkey: publicKey,
-        totalLen: plan.totalLen,
-        payer: publicKey,
       });
-
-      // Stage as: [init + write[0]], [write[1]], [write[2]], … one tx each.
-      // Conservative — 800-byte chunks easily fit one per tx. (A future opt
-      // could pack 2 small writes per tx; doesn't matter for correctness.)
-      const stagingTxs: Transaction[] = [];
-      const firstTx = new Transaction();
-      firstTx.add(initIx);
-      if (writeIxs.length > 0) firstTx.add(writeIxs[0]);
-      stagingTxs.push(firstTx);
-      for (let i = 1; i < writeIxs.length; i++) {
-        const t = new Transaction();
-        t.add(writeIxs[i]);
-        stagingTxs.push(t);
+      if (!relayResp.ok) {
+        const errBody = (await relayResp.json().catch(() => ({}))) as {
+          error?: string;
+          detail?: string;
+        };
+        throw new Error(
+          `relayer rejected: ${errBody.error ?? relayResp.statusText}${errBody.detail ? ` — ${errBody.detail}` : ""}`,
+        );
       }
-
-      const stagingTotal = stagingTxs.length;
-      for (let i = 0; i < stagingTotal; i++) {
-        setClaim({ kind: "staging", current: i + 1, total: stagingTotal });
-        const t = stagingTxs[i];
-        t.feePayer = publicKey;
-        t.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
-        const sig = await sendTransaction(t, connection, { skipPreflight: true });
-        await connection.confirmTransaction(sig, "confirmed");
-      }
-
-      // Tx C — ed25519 precompile + claim_from_buffer. The new ix carries only
-      // the proof_flags bytes (~4 bytes for a 27-deep tree) plus pubkey,
-      // lamports, proof_len; the proof itself comes from the staged PDA.
-      const ed25519Ix = buildEd25519PrecompileInstruction(publicKey, signature, message);
-      const claimIx = buildClaimFromBufferIx({ proof, payer: publicKey });
-      const finalTx = new Transaction();
-      finalTx.add(ed25519Ix);
-      finalTx.add(claimIx);
-      finalTx.feePayer = publicKey;
-      finalTx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
-
-      setClaim({ kind: "submitting" });
-      const txSig = await sendTransaction(finalTx, connection, { skipPreflight: true });
+      const relayResult = (await relayResp.json()) as {
+        init_signature: string;
+        write_signatures: string[];
+        claim_signature: string;
+      };
+      const txSig = relayResult.claim_signature;
       setClaim({ kind: "success", signature: txSig });
       toast({
         variant: "success",
@@ -327,17 +313,13 @@ export default function ClaimPage(): JSX.Element {
     claim.kind === "submitting";
 
   return (
-    <div className="space-y-8">
-      <header className="space-y-2">
-        <p className="font-mono text-xs uppercase tracking-widest text-primary">claim</p>
-        <h1 className="text-3xl font-semibold tracking-tight">Claim your mainnet SOL on staccana</h1>
-        <p className="max-w-2xl text-muted-foreground">
-          Connect the wallet that holds your mainnet SOL. We build a Merkle inclusion proof
-          against the genesis snapshot, you sign the claim message with your existing keypair,
-          and the lazy-claim program credits your balance on staccana. Per SPEC §4.4 the claim
-          transaction is fee-exempt — you do not need any staccana SOL.
-        </p>
-      </header>
+    <>
+      <PageHeader
+        eyebrow="claim"
+        title="Claim your devnet SOL on staccana"
+        tagline="Connect the wallet that holds your devnet SOL. We build a merkle inclusion proof against the snapshot, you sign with your existing keypair, and lazy-claim credits your balance — fee-exempt, no staccana SOL needed."
+      />
+      <div className="container space-y-8 py-8">
 
       <Card>
         <CardHeader>
@@ -408,6 +390,7 @@ export default function ClaimPage(): JSX.Element {
           ) : null}
         </CardContent>
       </Card>
-    </div>
+      </div>
+    </>
   );
 }

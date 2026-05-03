@@ -36,6 +36,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/components/page-header";
 import { useToast } from "@/components/ui/use-toast";
 import {
   bootstrapLookupTable,
@@ -326,15 +327,14 @@ export default function ValidatorsPage(): JSX.Element {
   }, [connected, connection, publicKey, sendTransaction, toast]);
 
   return (
-    <div className="space-y-8">
+    <>
+      <PageHeader
+        eyebrow="validators"
+        title="Validator subsidy dashboard"
+        tagline="The validator-subsidy program disburses SOL from the genesis treasury (485M SOL pre-credited) to registered validators each epoch — weighted by uptime, delegated stake, and votes cast."
+      />
+      <div className="container space-y-8 py-8">
       <header className="space-y-2">
-        <p className="font-mono text-xs uppercase tracking-widest text-primary">validators</p>
-        <h1 className="text-3xl font-semibold tracking-tight">Validator subsidy dashboard</h1>
-        <p className="max-w-2xl text-muted-foreground">
-          The validator-subsidy program disburses SOL from the genesis treasury
-          (485M SOL pre-credited) to registered validators each epoch, weighted
-          by uptime, delegated stake, and votes cast. SPEC §7.2 / §7.3.
-        </p>
         <p className="text-xs text-muted-foreground">
           Program ID:{" "}
           <span className="font-mono" title={VALIDATOR_SUBSIDY_PROGRAM_ID.toBase58()}>
@@ -358,7 +358,8 @@ export default function ValidatorsPage(): JSX.Element {
         totalStake={totalStake}
         totalDisbursed={totalDisbursed}
       />
-    </div>
+      </div>
+    </>
   );
 }
 

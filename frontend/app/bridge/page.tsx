@@ -32,6 +32,8 @@ import bs58 from "bs58";
 import { Loader2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { PageHeader } from "@/components/page-header";
+
 import { TokenMetaBadge, TokenSelector, type TokenOption } from "@/components/token-selector";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -388,17 +390,13 @@ export default function BridgePage(): JSX.Element {
   }, [depositPayloadBs58, toast]);
 
   return (
-    <div className="space-y-8">
-      <header className="space-y-2">
-        <p className="font-mono text-xs uppercase tracking-widest text-primary">bridge</p>
-        <h1 className="text-3xl font-semibold tracking-tight">Bridge SOL or USDC into staccana</h1>
-        <p className="max-w-2xl text-muted-foreground">
-          Deposit SOL on mainnet to mint stSOL on staccana (pSYRUP-backed, ratio R drifts upward
-          over time). Burn stSOL or ssUSDC to redeem the underlying back on mainnet via the
-          5-of-9 federation. Both bridge mints are Token-22 with the Confidential Transfer
-          extension active by default.
-        </p>
-      </header>
+    <>
+      <PageHeader
+        eyebrow="bridge"
+        title="Bridge SOL or USDC into staccana"
+        tagline="Deposit on mainnet to mint stSOL or ssUSDC on staccana (5-of-9 federation, Token-22 with Confidential Transfer active by default). Burn to redeem the underlying back."
+      />
+      <div className="container space-y-8 py-8">
 
       {BRIDGE_IS_DEVNET ? (
         <div
@@ -565,7 +563,8 @@ export default function BridgePage(): JSX.Element {
           />
         </MainnetWalletContextProviders>
       )}
-    </div>
+      </div>
+    </>
   );
 }
 

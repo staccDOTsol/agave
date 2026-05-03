@@ -801,6 +801,36 @@ function SendPanelInner({
       tx.recentBlockhash = (
         await connection.getLatestBlockhash("confirmed")
       ).blockhash;
+
+      // Pre-flight serialize. The wallet adapter's `Index out of range`
+      // surfaces from inside the wallet's own minified bundle with no
+      // useful stack — but the bug is in OUR Transaction. Calling
+      // `serialize()` here forces the SAME bounds check to run with
+      // requireAllSignatures=false (we haven't signed yet), so any
+      // malformed AccountMeta / oversized account list throws here with
+      // a stack pointing at our code. We log the ix breakdown to the
+      // console + rethrow so the toast still fires the broader catch
+      // and the user gets a clean fallback.
+      try {
+        tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(
+          "[send] tx serialization rejected before reaching wallet",
+          {
+            error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+            ixCount: tx.instructions.length,
+            ixSummary: tx.instructions.map((ix, i) => ({
+              i,
+              programId: ix.programId.toBase58(),
+              accountCount: ix.keys.length,
+              dataLen: ix.data.length,
+              accountsHaveUndef: ix.keys.some((k) => !k.pubkey),
+            })),
+          },
+        );
+        throw err;
+      }
       const sig = await sendTransaction(tx, connection, {
         skipPreflight: true,
       });
