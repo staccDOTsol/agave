@@ -26,6 +26,7 @@ import {
 
 import {
   BRIDGE_BURN_DISCRIMINATOR,
+  BRIDGE_VAULT_DEPOSIT_DISCRIMINATOR,
   RATIO_STATE_DISCRIMINATOR,
   concatBytes,
   readU128Le,
@@ -34,7 +35,19 @@ import {
   u32LeBytes,
 } from "./anchor";
 import { u64LeBytes } from "./merkle";
-import { BRIDGE_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "./staccana";
+import {
+  BRIDGE_PROGRAM_ID,
+  BRIDGE_VAULT_PROGRAM_ID,
+  SYSTEM_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+} from "./staccana";
+
+// SPL Token v3 mainnet program ID (canonical Solana mainnet/devnet). The
+// bridge-vault on mainnet talks to the standard SPL token program for
+// stSOL/ssUSDC, NOT to staccana's address-shifted Token-22 — that one only
+// exists on the staccana fork.
+const MAINNET_SPL_TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const MAINNET_SYSTEM_PROGRAM_ID = SYSTEM_PROGRAM_ID;
 
 // ---------------------------------------------------------------------------
 // Asset registry
@@ -44,6 +57,7 @@ import { BRIDGE_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "./staccana";
 export enum BridgeAsset {
   StSol = 0,
   SsUsdc = 1,
+  WSol = 2,
 }
 
 /** Static per-asset metadata. */
@@ -55,12 +69,21 @@ export interface BridgeAssetMeta {
   underlying: string;
   /** Decimals of the staccana mint. Matches `AssetConfig.decimals`. */
   decimals: number;
+  /**
+   * If true, the mainnet vault holds NATIVE SOL in the VaultConfig PDA's
+   * lamports rather than an SPL token account. The deposit ix takes the
+   * `system_program::transfer` path and skips `underlying_mint` /
+   * `vault_token_account` / `user_token_account`. Mirrors
+   * `bridge-vault::AssetFlag::NATIVE_SOL`.
+   */
+  isNativeSol: boolean;
 }
 
 /** Static asset registry. Mirrors `AssetId::from_label` / `default_decimals`. */
 export const BRIDGE_ASSETS: BridgeAssetMeta[] = [
-  { id: BridgeAsset.StSol, label: "stSOL", underlying: "SOL (mainnet pSYRUP)", decimals: 9 },
-  { id: BridgeAsset.SsUsdc, label: "ssUSDC", underlying: "USDC (mainnet)", decimals: 6 },
+  { id: BridgeAsset.StSol, label: "stSOL", underlying: "SOL (mainnet pSYRUP)", decimals: 9, isNativeSol: false },
+  { id: BridgeAsset.SsUsdc, label: "ssUSDC", underlying: "USDC (mainnet)", decimals: 6, isNativeSol: false },
+  { id: BridgeAsset.WSol, label: "wSOL", underlying: "SOL (native)", decimals: 9, isNativeSol: true },
 ];
 
 /** Look up asset metadata by numeric id. */
@@ -273,6 +296,150 @@ export function encodeMainnetDepositArgs(
     u64LeBytes(amount),
     destOnStaccana.toBytes(),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Mainnet bridge-vault deposit ix (live wallet path)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the per-asset `VaultConfig` PDA on the mainnet bridge-vault program.
+ * Mirrors `programs/bridge-vault/src/state.rs` — seeds: `["vault", asset_id_le]`.
+ */
+export function vaultConfigPda(asset: BridgeAsset): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("vault"), Buffer.from(u32LeBytes(asset))],
+    BRIDGE_VAULT_PROGRAM_ID,
+  );
+  return pda;
+}
+
+/**
+ * Derive the per-asset inbound nonce counter PDA on the mainnet bridge-vault.
+ * Seeds: `["nonce_in", asset_id_le]`.
+ */
+export function nonceInPda(asset: BridgeAsset): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("nonce_in"), Buffer.from(u32LeBytes(asset))],
+    BRIDGE_VAULT_PROGRAM_ID,
+  );
+  return pda;
+}
+
+/**
+ * Encode the Anchor `deposit` ix args for the bridge-vault program.
+ *
+ * Layout (52 bytes): `[disc:8 | asset_id:u32 LE | amount:u64 LE | dest_on_staccana:[u8;32]]`.
+ * The discriminator is `sha256("global:deposit")[..8]` (NOT the legacy
+ * single-byte `0` discriminator from the wire-only `tools/bridge-cli`; the
+ * production program is Anchor and uses the standard 8-byte prefix).
+ */
+export function encodeVaultDepositArgs(
+  asset: BridgeAsset,
+  amount: bigint,
+  destOnStaccana: PublicKey,
+): Uint8Array {
+  return concatBytes(
+    BRIDGE_VAULT_DEPOSIT_DISCRIMINATOR,
+    u32LeBytes(asset),
+    u64LeBytes(amount),
+    destOnStaccana.toBytes(),
+  );
+}
+
+/** Inputs needed to build the mainnet `deposit` ix. */
+export interface VaultDepositIxArgs {
+  asset: BridgeAsset;
+  /** Gross amount in base units of the underlying. */
+  amount: bigint;
+  /** Mainnet wallet (signer / payer). */
+  user: PublicKey;
+  /** Recipient pubkey on staccana — typically the user's staccana wallet. */
+  destOnStaccana: PublicKey;
+  /**
+   * SPL underlying mint (REQUIRED for stSOL / ssUSDC). For wSOL pass `null`
+   * — the on-chain handler skips the SPL branch entirely (see
+   * `programs/bridge-vault/src/instructions/deposit.rs`).
+   */
+  underlyingMint: PublicKey | null;
+  /**
+   * User's source SPL token account (REQUIRED for stSOL / ssUSDC). For wSOL
+   * pass `null`; the handler ignores this slot.
+   */
+  userTokenAccount: PublicKey | null;
+  /**
+   * Vault PDA-owned ATA for the underlying (REQUIRED for stSOL / ssUSDC).
+   * Read from `VaultConfig.vault_token_account` on-chain. For wSOL pass
+   * `null`.
+   */
+  vaultTokenAccount: PublicKey | null;
+}
+
+/**
+ * Build the mainnet bridge-vault `deposit` instruction.
+ *
+ * Account order matches `Deposit<'info>` in
+ * `programs/bridge-vault/src/instructions/deposit.rs`:
+ *
+ * 0. user                 [signer, writable]
+ * 1. vault_config         [writable PDA]
+ * 2. nonce_in             [writable PDA]
+ * 3. underlying_mint      [readonly]            (system_program for wSOL — handler ignores)
+ * 4. user_token_account   [writable]            (system_program for wSOL — handler ignores)
+ * 5. vault_token_account  [writable]            (system_program for wSOL — handler ignores)
+ * 6. token_program        [readonly]            (mainnet SPL token v3)
+ * 7. system_program       [readonly]
+ *
+ * The handler enforces `is_native_sol()` to decide which branch runs; for
+ * wSOL we still have to supply SOMETHING in the SPL slots (Anchor needs a
+ * concrete `AccountMeta` per the IDL), so we pass the system program as a
+ * harmless filler exactly as `tools/bridge-cli` does.
+ */
+export function buildVaultDepositInstruction(args: VaultDepositIxArgs): TransactionInstruction {
+  if (args.amount <= 0n) {
+    throw new Error("deposit amount must be > 0");
+  }
+  const meta = bridgeAssetById(args.asset);
+  if (!meta.isNativeSol) {
+    if (!args.underlyingMint || !args.userTokenAccount || !args.vaultTokenAccount) {
+      throw new Error(
+        `Asset ${meta.label} requires underlyingMint, userTokenAccount, and vaultTokenAccount`,
+      );
+    }
+  }
+
+  const data = encodeVaultDepositArgs(args.asset, args.amount, args.destOnStaccana);
+
+  // Filler for unused SPL slots on the wSOL path. The on-chain handler skips
+  // them entirely; we just need PDA-typed `AccountMeta`s present.
+  const filler = MAINNET_SYSTEM_PROGRAM_ID;
+
+  return new TransactionInstruction({
+    programId: BRIDGE_VAULT_PROGRAM_ID,
+    keys: [
+      { pubkey: args.user, isWritable: true, isSigner: true },
+      { pubkey: vaultConfigPda(args.asset), isWritable: true, isSigner: false },
+      { pubkey: nonceInPda(args.asset), isWritable: true, isSigner: false },
+      {
+        pubkey: meta.isNativeSol ? filler : (args.underlyingMint as PublicKey),
+        isWritable: false,
+        isSigner: false,
+      },
+      {
+        pubkey: meta.isNativeSol ? filler : (args.userTokenAccount as PublicKey),
+        isWritable: !meta.isNativeSol,
+        isSigner: false,
+      },
+      {
+        pubkey: meta.isNativeSol ? filler : (args.vaultTokenAccount as PublicKey),
+        isWritable: !meta.isNativeSol,
+        isSigner: false,
+      },
+      { pubkey: MAINNET_SPL_TOKEN_PROGRAM_ID, isWritable: false, isSigner: false },
+      { pubkey: MAINNET_SYSTEM_PROGRAM_ID, isWritable: false, isSigner: false },
+    ],
+    data: Buffer.from(data),
+  });
 }
 
 // ---------------------------------------------------------------------------

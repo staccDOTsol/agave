@@ -25,6 +25,18 @@ export const LAZY_CLAIM_PROGRAM_ID = new PublicKey("ERadtJ7EHLJtMLqj3ar4Y6QriMpt
 /** Bridge program ID. */
 export const BRIDGE_PROGRAM_ID = new PublicKey("DkjhevtY54Sr5CPRvFE8Rr6CEaQni28BojKY2pBygzDc");
 
+/**
+ * Mainnet (or devnet — for tonight's bring-up) bridge-vault program ID.
+ *
+ * This program lives on the OTHER chain (Solana mainnet/devnet), not staccana.
+ * The deposit leg of the bridge calls `deposit` on this program; the mainnet
+ * wallet adapter (see `MainnetWalletContextProviders` in lib/wallet.tsx) signs
+ * + submits.
+ */
+export const BRIDGE_VAULT_PROGRAM_ID = new PublicKey(
+  process.env.NEXT_PUBLIC_BRIDGE_VAULT_PROGRAM_ID ?? "F2AypZ8FDWnR5bdyLHzo4idof9YrBpdBmbgLwLBjLfVU",
+);
+
 /** Secret-pump program ID. */
 export const SECRET_PUMP_PROGRAM_ID = new PublicKey("7LVzPiRVdcgZUpwwgUxx1wJrNKqYWts6WRKPqgbb94We");
 
@@ -94,6 +106,33 @@ export const MEGADROP_URL = process.env.NEXT_PUBLIC_MEGADROP_URL ?? DEFAULT_MEGA
 const DEFAULT_RPC_URL = "https://rpc.mp.fun/";
 /** Resolved staccana RPC endpoint. */
 export const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL ?? DEFAULT_RPC_URL;
+
+/**
+ * Mainnet (or devnet) Solana RPC endpoint used by the SECOND wallet adapter
+ * for the bridge deposit leg.
+ *
+ * For tonight's bring-up the bridge-vault program (`F2Ayp…`) lives on Solana
+ * devnet, so the default points at devnet. Override via
+ * `NEXT_PUBLIC_MAINNET_RPC_URL` once the vault is redeployed to mainnet.
+ */
+const DEFAULT_MAINNET_RPC_URL = "https://api.devnet.solana.com";
+/** Resolved mainnet (or devnet) RPC endpoint for the deposit leg. */
+export const MAINNET_RPC_URL =
+  process.env.NEXT_PUBLIC_MAINNET_RPC_URL ?? DEFAULT_MAINNET_RPC_URL;
+
+/** Optional explorer base URL for mainnet (or devnet). */
+const DEFAULT_MAINNET_EXPLORER_URL = "https://explorer.solana.com";
+/** Cluster query suffix for the mainnet explorer (e.g. `?cluster=devnet`). */
+const DEFAULT_MAINNET_EXPLORER_CLUSTER = "?cluster=devnet";
+export const MAINNET_EXPLORER_URL =
+  process.env.NEXT_PUBLIC_MAINNET_EXPLORER_URL ?? DEFAULT_MAINNET_EXPLORER_URL;
+export const MAINNET_EXPLORER_CLUSTER =
+  process.env.NEXT_PUBLIC_MAINNET_EXPLORER_CLUSTER ?? DEFAULT_MAINNET_EXPLORER_CLUSTER;
+
+/** Format a tx signature into the mainnet/devnet explorer URL. */
+export function mainnetExplorerTxUrl(signature: string): string {
+  return `${MAINNET_EXPLORER_URL.replace(/\/$/, "")}/tx/${signature}${MAINNET_EXPLORER_CLUSTER}`;
+}
 
 /** Default snapshot URL when NEXT_PUBLIC_SNAPSHOT_URL is unset. */
 const DEFAULT_SNAPSHOT_URL = "/snapshot/genesis-output.json";

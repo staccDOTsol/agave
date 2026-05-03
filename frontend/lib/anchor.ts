@@ -23,6 +23,15 @@ export const RATIO_STATE_DISCRIMINATOR = new Uint8Array([
   0xc9, 0x6c, 0x35, 0xe7, 0xd2, 0x03, 0xae, 0x05,
 ]);
 
+// Mainnet bridge-vault program (`#[program] mod staccana_bridge_vault`).
+//
+// `sha256("global:deposit")[0..8]` — verified via:
+//   python3 -c "import hashlib; print(hashlib.sha256(b'global:deposit').hexdigest()[:16])"
+// produces `f223c68952e1f2b6`.
+export const BRIDGE_VAULT_DEPOSIT_DISCRIMINATOR = new Uint8Array([
+  0xf2, 0x23, 0xc6, 0x89, 0x52, 0xe1, 0xf2, 0xb6,
+]);
+
 // Secret-pump program (`#[program] mod staccana_secret_pump`).
 //
 // `sha256("global:create")[0..8]`.

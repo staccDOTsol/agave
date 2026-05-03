@@ -23,6 +23,7 @@
  */
 
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { PublicKey, Transaction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Loader2 } from "lucide-react";
@@ -38,6 +39,7 @@ import {
   assetConfigPda,
   bridgeAssetById,
   buildBurnInstruction,
+  buildVaultDepositInstruction,
   decodeRatioState,
   encodeMainnetDepositArgs,
   mintAmountForValue,
@@ -45,10 +47,16 @@ import {
   q64ToFloat,
   ratioStatePda,
   releaseAmountForBurn,
+  vaultConfigPda,
   type RatioState,
 } from "@/lib/bridge";
-import { explorerTxUrl } from "@/lib/staccana";
+import {
+  BRIDGE_VAULT_PROGRAM_ID,
+  explorerTxUrl,
+  mainnetExplorerTxUrl,
+} from "@/lib/staccana";
 import { truncatePubkey } from "@/lib/utils";
+import { MainnetWalletContextProviders, useStaccanaWallet } from "@/lib/wallet";
 
 type RatioFetchState =
   | { kind: "idle" }
@@ -411,52 +419,337 @@ export default function BridgePage(): JSX.Element {
           </CardContent>
         </Card>
       ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle>Deposit on mainnet → mint on staccana</CardTitle>
-            <CardDescription>
-              For v1 we generate the mainnet vault `Deposit` ix payload bytes here and you
-              paste them into a mainnet-side wallet/tool. After the federation publishes the
-              attestation, anyone can submit the staccana-side `mint` ix to credit your ATA.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
+        <MainnetWalletContextProviders>
+          <DepositPanel
+            asset={asset}
+            amountStr={amountStr}
+            setAmountStr={setAmountStr}
+            staccanaDestStr={staccanaDestStr}
+            setStaccanaDestStr={setStaccanaDestStr}
+            previewLine={previewLine}
+            depositPayloadBs58={depositPayloadBs58}
+            onCopyDepositPayload={onCopyDepositPayload}
+          />
+        </MainnetWalletContextProviders>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Deposit panel — lives inside <MainnetWalletContextProviders>.
+//
+// Inside this subtree, `useWallet()` resolves to the SECOND (mainnet) wallet
+// adapter and `useConnection()` resolves to the mainnet RPC `Connection`. The
+// outer staccana wallet stays reachable via `useStaccanaWallet()` so we can
+// auto-fill `dest_pubkey_on_staccana` from the user's staccana pubkey.
+// ---------------------------------------------------------------------------
+
+interface DepositPanelProps {
+  asset: BridgeAsset;
+  amountStr: string;
+  setAmountStr: (v: string) => void;
+  staccanaDestStr: string;
+  setStaccanaDestStr: (v: string) => void;
+  previewLine: string;
+  depositPayloadBs58: string | null;
+  onCopyDepositPayload: () => void;
+}
+
+function DepositPanel(props: DepositPanelProps): JSX.Element {
+  const {
+    asset,
+    amountStr,
+    setAmountStr,
+    staccanaDestStr,
+    setStaccanaDestStr,
+    previewLine,
+    depositPayloadBs58,
+    onCopyDepositPayload,
+  } = props;
+
+  const meta = useMemo(() => bridgeAssetById(asset), [asset]);
+  const { publicKey: mainnetPubkey, sendTransaction, connected: mainnetConnected } = useWallet();
+  const { connection: mainnetConnection } = useConnection();
+  const { publicKey: staccanaPubkey } = useStaccanaWallet();
+  const { toast } = useToast();
+
+  const [underlyingMintStr, setUnderlyingMintStr] = useState("");
+  const [userAtaStr, setUserAtaStr] = useState("");
+  const [vaultAtaStr, setVaultAtaStr] = useState("");
+  const [submit, setSubmit] = useState<SubmitState>({ kind: "idle" });
+
+  // Auto-fill the staccana destination from the connected staccana wallet so
+  // the user almost never has to touch this input.
+  useEffect(() => {
+    if (staccanaPubkey && !staccanaDestStr) {
+      setStaccanaDestStr(staccanaPubkey.toBase58());
+    }
+  }, [staccanaPubkey, staccanaDestStr, setStaccanaDestStr]);
+
+  const baseAmount = useMemo<bigint | null>(
+    () => parseToBaseUnits(amountStr, meta.decimals),
+    [amountStr, meta.decimals],
+  );
+
+  const onDeposit = useCallback(async () => {
+    setSubmit({ kind: "idle" });
+    if (!mainnetPubkey || !mainnetConnected) {
+      setSubmit({ kind: "error", message: "Mainnet wallet not connected" });
+      return;
+    }
+    if (!baseAmount || baseAmount <= 0n) {
+      setSubmit({ kind: "error", message: "Enter a positive amount" });
+      return;
+    }
+    if (!staccanaDestStr) {
+      setSubmit({ kind: "error", message: "Staccana recipient pubkey is required" });
+      return;
+    }
+    let dest: PublicKey;
+    try {
+      dest = new PublicKey(staccanaDestStr.trim());
+    } catch (err) {
+      setSubmit({
+        kind: "error",
+        message: `Invalid staccana recipient: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+
+    let underlyingMint: PublicKey | null = null;
+    let userTokenAccount: PublicKey | null = null;
+    let vaultTokenAccount: PublicKey | null = null;
+    if (!meta.isNativeSol) {
+      if (!underlyingMintStr || !userAtaStr || !vaultAtaStr) {
+        setSubmit({
+          kind: "error",
+          message: `${meta.label} requires underlying mint, your token account, and the vault token account`,
+        });
+        return;
+      }
+      try {
+        underlyingMint = new PublicKey(underlyingMintStr.trim());
+        userTokenAccount = new PublicKey(userAtaStr.trim());
+        vaultTokenAccount = new PublicKey(vaultAtaStr.trim());
+      } catch (err) {
+        setSubmit({
+          kind: "error",
+          message: `Invalid pubkey: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        return;
+      }
+    }
+
+    try {
+      const ix = buildVaultDepositInstruction({
+        asset,
+        amount: baseAmount,
+        user: mainnetPubkey,
+        destOnStaccana: dest,
+        underlyingMint,
+        userTokenAccount,
+        vaultTokenAccount,
+      });
+      const tx = new Transaction();
+      tx.add(ix);
+      tx.feePayer = mainnetPubkey;
+      const blockhash = (await mainnetConnection.getLatestBlockhash("confirmed")).blockhash;
+      tx.recentBlockhash = blockhash;
+
+      setSubmit({ kind: "submitting" });
+      const sig = await sendTransaction(tx, mainnetConnection);
+      setSubmit({ kind: "success", signature: sig });
+      toast({
+        variant: "success",
+        title: `Deposited ${meta.label} on mainnet`,
+        description: (
+          <a
+            className="font-mono text-xs underline underline-offset-2"
+            href={mainnetExplorerTxUrl(sig)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {truncatePubkey(sig, 8, 8)}
+          </a>
+        ),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setSubmit({ kind: "error", message });
+      toast({ variant: "destructive", title: "Deposit failed", description: message });
+    }
+  }, [
+    asset,
+    baseAmount,
+    mainnetConnected,
+    mainnetConnection,
+    mainnetPubkey,
+    meta.isNativeSol,
+    meta.label,
+    sendTransaction,
+    staccanaDestStr,
+    toast,
+    underlyingMintStr,
+    userAtaStr,
+    vaultAtaStr,
+  ]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Deposit on mainnet → mint on staccana</CardTitle>
+        <CardDescription>
+          Submits the bridge-vault `deposit` ix on Solana mainnet (devnet for tonight) using a
+          SECOND wallet adapter. After the federation observes the `Deposit` event and signs
+          the mint attestation (~30s), the staccana-side `mint` ix credits your ATA.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <WalletBadges
+          staccanaPubkey={staccanaPubkey ? staccanaPubkey.toBase58() : null}
+          mainnetPubkey={mainnetPubkey ? mainnetPubkey.toBase58() : null}
+        />
+        <Field
+          label={`Underlying amount to deposit (decimals=${meta.decimals})`}
+          value={amountStr}
+          onChange={setAmountStr}
+          placeholder={meta.decimals === 6 ? "100" : "1.5"}
+        />
+        <Field
+          label="Staccana recipient (auto-filled from your staccana wallet)"
+          value={staccanaDestStr}
+          onChange={setStaccanaDestStr}
+          placeholder="staccana pubkey to credit"
+          mono
+        />
+        {!meta.isNativeSol ? (
+          <>
             <Field
-              label={`Underlying amount to deposit (decimals=${meta.decimals})`}
-              value={amountStr}
-              onChange={setAmountStr}
-              placeholder={meta.decimals === 6 ? "100" : "1.5"}
+              label={`Mainnet underlying mint for ${meta.label}`}
+              value={underlyingMintStr}
+              onChange={setUnderlyingMintStr}
+              placeholder={`e.g. pSYRUP / USDC mint on mainnet`}
+              mono
+              help={
+                <span>
+                  Required for SPL-backed assets. Read from{" "}
+                  <span className="font-mono">VaultConfig.underlying_mint</span>.
+                </span>
+              }
             />
             <Field
-              label="Staccana destination (your wallet)"
-              value={staccanaDestStr}
-              onChange={setStaccanaDestStr}
-              placeholder="staccana pubkey to credit"
+              label="Your mainnet token account (ATA holding the asset)"
+              value={userAtaStr}
+              onChange={setUserAtaStr}
+              placeholder="your ATA on mainnet"
               mono
             />
-            <p className="text-sm text-muted-foreground">{previewLine}</p>
-            {depositPayloadBs58 ? (
-              <div className="space-y-2 rounded-md border bg-secondary/20 p-3">
-                <p className="text-xs font-medium text-muted-foreground">
-                  Deposit ix payload (45 bytes, base58 — paste into your mainnet vault tool):
-                </p>
-                <p className="break-all font-mono text-xs">{depositPayloadBs58}</p>
-                <Button size="sm" variant="outline" onClick={onCopyDepositPayload}>
-                  Copy payload
-                </Button>
-              </div>
+            <Field
+              label="Vault token account (PDA-owned ATA)"
+              value={vaultAtaStr}
+              onChange={setVaultAtaStr}
+              placeholder="VaultConfig.vault_token_account"
+              mono
+            />
+          </>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            wSOL deposits transfer native SOL into the vault PDA — no SPL token account required.
+          </p>
+        )}
+        <p className="text-sm text-muted-foreground">{previewLine}</p>
+        <p className="text-xs text-muted-foreground">
+          Vault program:{" "}
+          <span className="font-mono" title={BRIDGE_VAULT_PROGRAM_ID.toBase58()}>
+            {truncatePubkey(BRIDGE_VAULT_PROGRAM_ID.toBase58())}
+          </span>
+          {" · "}
+          VaultConfig PDA:{" "}
+          <span className="font-mono" title={vaultConfigPda(asset).toBase58()}>
+            {truncatePubkey(vaultConfigPda(asset).toBase58())}
+          </span>
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            onClick={onDeposit}
+            disabled={submit.kind === "submitting" || !mainnetConnected}
+            className="w-full sm:w-auto"
+          >
+            {submit.kind === "submitting" ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Submitting on mainnet
+              </>
             ) : (
-              <p className="text-sm text-muted-foreground">
-                Enter an amount and a destination to generate the payload.
-              </p>
+              "Deposit (sign with mainnet wallet)"
             )}
-            <p className="text-xs text-muted-foreground">
-              TODO(prod): wire a mainnet wallet adapter to submit this directly. For v1 the
-              user runs the deposit step manually on mainnet.
+          </Button>
+          {!mainnetConnected ? (
+            <span className="text-xs text-muted-foreground">
+              Connect a mainnet wallet to enable deposit →
+            </span>
+          ) : null}
+        </div>
+        {submit.kind === "success" ? (
+          <p className="text-sm text-emerald-400">
+            Deposit submitted on mainnet.{" "}
+            <a
+              className="underline underline-offset-2"
+              href={mainnetExplorerTxUrl(submit.signature)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View on explorer
+            </a>{" "}
+            — federation will sign and the staccana mint will land in ~30s.
+          </p>
+        ) : null}
+        {submit.kind === "error" ? (
+          <p className="text-sm text-destructive">{submit.message}</p>
+        ) : null}
+        <details className="rounded-md border bg-secondary/20 p-3">
+          <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+            Manual fallback — base58 ix payload (legacy paste-into-tool flow)
+          </summary>
+          {depositPayloadBs58 ? (
+            <div className="mt-2 space-y-2">
+              <p className="break-all font-mono text-xs">{depositPayloadBs58}</p>
+              <Button size="sm" variant="outline" onClick={onCopyDepositPayload}>
+                Copy payload
+              </Button>
+            </div>
+          ) : (
+            <p className="mt-2 text-sm text-muted-foreground">
+              Enter an amount and a destination to generate the payload.
             </p>
-          </CardContent>
-        </Card>
-      )}
+          )}
+        </details>
+      </CardContent>
+    </Card>
+  );
+}
+
+function WalletBadges({
+  staccanaPubkey,
+  mainnetPubkey,
+}: {
+  staccanaPubkey: string | null;
+  mainnetPubkey: string | null;
+}): JSX.Element {
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-secondary/30 px-3 py-2 text-xs">
+      <span className="rounded-sm bg-primary/20 px-2 py-0.5 font-mono text-primary">
+        Staccana:{" "}
+        {staccanaPubkey ? truncatePubkey(staccanaPubkey) : <span className="text-muted-foreground">not connected</span>}
+      </span>
+      <span className="rounded-sm bg-amber-500/20 px-2 py-0.5 font-mono text-amber-300">
+        Mainnet:{" "}
+        {mainnetPubkey ? truncatePubkey(mainnetPubkey) : <span className="text-muted-foreground">not connected</span>}
+      </span>
+      <div className="ml-auto">
+        <WalletMultiButton style={{ height: 32, fontSize: 12, padding: "0 12px" }} />
+      </div>
     </div>
   );
 }

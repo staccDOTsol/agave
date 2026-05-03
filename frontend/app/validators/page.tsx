@@ -25,14 +25,27 @@
  */
 
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { LAMPORTS_PER_SOL, PublicKey, Transaction } from "@solana/web3.js";
+import {
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
 import { Loader2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
-import { explorerTxUrl, VALIDATOR_SUBSIDY_PROGRAM_ID } from "@/lib/staccana";
+import {
+  bootstrapLookupTable,
+  buildLutAddressList,
+  clearCachedLut,
+  loadUsableLut,
+  readCachedLut,
+  writeCachedLut,
+} from "@/lib/lut";
+import { explorerTxUrl, RPC_URL, VALIDATOR_SUBSIDY_PROGRAM_ID } from "@/lib/staccana";
 import {
   buildInitSubsidyInstruction,
   computeBootstrapReserve,
@@ -191,6 +204,8 @@ export default function ValidatorsPage(): JSX.Element {
       return;
     }
     try {
+      setSubmit({ kind: "submitting" });
+
       // Read live treasury balance to size the bootstrap reserve correctly.
       const treasuryLamports = BigInt(
         await connection.getBalance(subsidyTreasuryPda(), "confirmed"),
@@ -199,6 +214,7 @@ export default function ValidatorsPage(): JSX.Element {
       // Defaults — single-signer federation = the connecting wallet. Productive
       // vault left as PublicKey.default until the bridge `register_asset` ix
       // has been run for pSYRUP; governance can rotate this later.
+      const federationMembers = padFederationMembers([publicKey]);
       const ix = buildInitSubsidyInstruction(publicKey, {
         governance: publicKey,
         bridgeProgramId: PublicKey.default,
@@ -207,15 +223,81 @@ export default function ValidatorsPage(): JSX.Element {
         treasuryTotal: treasuryLamports,
         federationM: 1,
         federationN: 1,
-        federationMembers: padFederationMembers([publicKey]),
+        federationMembers,
       });
 
-      const tx = new Transaction().add(ix);
-      tx.feePayer = publicKey;
-      tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
+      // Build the LUT seed list. The init_subsidy ix message references the
+      // SubsidyConfig + ValidatorRegistry PDAs, the system program, and every
+      // padded federation member — that's the 1412-byte legacy payload. By
+      // indexing the read-only entries through an Address Lookup Table we
+      // shrink the v0 message to ~700-900 bytes.
+      const lutAddresses = buildLutAddressList({
+        subsidyConfig: subsidyConfigPda(),
+        validatorRegistry: validatorRegistryPda(),
+        federationMembers,
+      });
 
-      setSubmit({ kind: "submitting" });
-      const sig = await sendTransaction(tx, connection);
+      // Try to reuse a cached LUT for this RPC; fall back to bootstrap.
+      let lutPubkey = readCachedLut(RPC_URL);
+      let lutAccount = lutPubkey
+        ? await loadUsableLut(connection, lutPubkey, lutAddresses)
+        : null;
+      if (!lutAccount) {
+        if (lutPubkey) clearCachedLut(RPC_URL);
+        lutPubkey = await bootstrapLookupTable({
+          connection,
+          payer: publicKey,
+          authority: publicKey,
+          addresses: lutAddresses,
+          sendTransaction,
+        });
+        writeCachedLut(RPC_URL, lutPubkey);
+        lutAccount = await loadUsableLut(connection, lutPubkey, lutAddresses);
+        if (!lutAccount) {
+          throw new Error(
+            "Lookup table created but not yet visible on-chain — retry in a moment.",
+          );
+        }
+      }
+
+      // Compile the v0 message with the LUT — this is what shrinks the wire
+      // payload below the 1232-byte legacy cap.
+      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+      const messageV0 = new TransactionMessage({
+        payerKey: publicKey,
+        recentBlockhash: blockhash,
+        instructions: [ix],
+      }).compileToV0Message([lutAccount]);
+      const versionedTx = new VersionedTransaction(messageV0);
+
+      // Diagnostic: log the serialized size so a regression past 1232 bytes
+      // is immediately visible in the browser console.
+      try {
+        // eslint-disable-next-line no-console
+        console.info(
+          "[init_subsidy] v0 tx bytes =",
+          versionedTx.serialize().length,
+          "lut =",
+          lutPubkey.toBase58(),
+        );
+      } catch {
+        // serialize() throws if signatures are missing — irrelevant pre-sign.
+      }
+
+      // Simulate before asking the wallet to sign — surfaces program errors
+      // (e.g. SubsidyConfig already exists) without burning fees.
+      const sim = await connection.simulateTransaction(versionedTx, {
+        sigVerify: false,
+        replaceRecentBlockhash: true,
+      });
+      if (sim.value.err) {
+        const logs = sim.value.logs?.join("\n") ?? "";
+        throw new Error(
+          `simulateTransaction failed: ${JSON.stringify(sim.value.err)}\n${logs}`,
+        );
+      }
+
+      const sig = await sendTransaction(versionedTx, connection);
       setSubmit({ kind: "success", signature: sig });
       toast({
         variant: "success",
