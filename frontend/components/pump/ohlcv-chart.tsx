@@ -8,9 +8,16 @@
  *   - Bottom 30%: volume bars (matched to candle x-position)
  *   - Hover tooltip showing o/h/l/c/vol for the candle under the cursor
  *
- * Refetches `/api/launch/[mint]/ohlcv?bucket=...` every 10s. Empty state
- * (no candles yet) shows the existing `CurveSparkline` synthetic preview as
- * a fallback, with a "Synthetic" badge instead of "Live".
+ * Refetches `/api/launch/[mint]/ohlcv?bucket=...` every 10s. The badge
+ * surfaces four distinct fetch states so the user can tell apart "the
+ * indexer hasn't seen anything yet" from "we couldn't reach the indexer":
+ *
+ *   - "Loading" : the very first poll is in flight (skeleton placeholder)
+ *   - "Awaiting first trade" : 200 OK with `candles: []` — show a dim
+ *     synthetic preview of the bonding-curve trajectory as a hint
+ *   - "Live" : 200 OK with at least one candle — render the SVG
+ *   - "Offline" : last poll threw or returned non-2xx — show last good
+ *     candles (if any) + an inline retry button
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -36,6 +43,8 @@ type ApiResponse = {
   candles: Candle[];
 };
 
+type FetchState = "loading" | "ok" | "error";
+
 type BucketChoice = 60 | 300 | 3600;
 const BUCKETS: ReadonlyArray<{ value: BucketChoice; label: string }> = [
   { value: 60, label: "1m" },
@@ -52,38 +61,58 @@ export function OhlcvChart({
 }: {
   mint: string;
   bucketSec?: BucketChoice;
-  /** Reserves used to render the synthetic fallback before any candles arrive. */
+  /** Reserves used to render the synthetic preview before any candles arrive. */
   fallbackReserves?: Reserves;
 }): JSX.Element {
   const [bucketSec, setBucketSec] = useState<BucketChoice>(initialBucket);
   const [candles, setCandles] = useState<Candle[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Distinguish "we haven't received anything yet" from "we got an empty
+  // response" — both yield candles.length === 0 but the user-visible
+  // affordance differs (skeleton vs "awaiting first trade").
+  const [fetchState, setFetchState] = useState<FetchState>("loading");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  // Bumping this nonce kicks the polling effect into a fresh fetch — used by
+  // the retry button on the "Offline" badge.
+  const [retryNonce, setRetryNonce] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
   const fetchCandles = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal): Promise<void> => {
       try {
         const r = await fetch(`/api/launch/${mint}/ohlcv?bucket=${bucketSec}`, {
           signal,
           cache: "no-store",
         });
-        if (!r.ok) return;
+        if (!r.ok) {
+          // Surface the HTTP failure to the badge instead of silently
+          // pretending we have no data.
+          setFetchState("error");
+          setErrorMsg(`HTTP ${r.status}`);
+          return;
+        }
         const json = (await r.json()) as ApiResponse;
         setCandles(json.candles ?? []);
+        setFetchState("ok");
+        setErrorMsg(null);
       } catch (err) {
-        // AbortError on bucket switch / unmount is expected.
+        // AbortError on bucket switch / unmount is expected — leave the
+        // current state alone so we don't flash "Offline" while remounting.
         if ((err as { name?: string } | null)?.name === "AbortError") return;
-      } finally {
-        setLoading(false);
+        setFetchState("error");
+        setErrorMsg(err instanceof Error ? err.message : String(err));
       }
     },
     [mint, bucketSec],
   );
 
   useEffect(() => {
-    setLoading(true);
+    // Reset on bucket change. We keep last-known candles only across retries
+    // (so the user doesn't lose context on a transient blip), not across
+    // bucket changes (which would mix 1m + 5m candles in the SVG).
+    setFetchState("loading");
     setCandles([]);
+    setErrorMsg(null);
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -95,9 +124,31 @@ export function OhlcvChart({
       window.clearInterval(t);
       ctrl.abort();
     };
-  }, [fetchCandles]);
+  }, [fetchCandles, retryNonce]);
 
   const hasCandles = candles.length > 0;
+
+  // Resolve the badge label + colour from the orthogonal fetchState/has-data
+  // matrix. Keeping this colocated (vs. four parallel ternaries inline) makes
+  // the state space obvious to a reader.
+  const badge = (() => {
+    if (fetchState === "loading") {
+      return {
+        label: "Loading…",
+        cls: "bg-secondary/40 text-muted-foreground animate-pulse",
+      };
+    }
+    if (fetchState === "error") {
+      return { label: "Offline", cls: "bg-rose-500/15 text-rose-300" };
+    }
+    if (hasCandles) {
+      return { label: "Live", cls: "bg-emerald-500/15 text-emerald-400" };
+    }
+    return {
+      label: "Awaiting first trade",
+      cls: "bg-secondary/40 text-muted-foreground",
+    };
+  })();
 
   return (
     <div className="space-y-2">
@@ -119,34 +170,63 @@ export function OhlcvChart({
             </button>
           ))}
         </div>
-        <span
-          className={
-            "rounded px-2 py-1 text-[10px] font-mono uppercase " +
-            (hasCandles
-              ? "bg-emerald-500/15 text-emerald-400"
-              : "bg-secondary/40 text-muted-foreground")
-          }
-        >
-          {hasCandles ? "Live" : "Synthetic"}
-        </span>
+        <div className="flex items-center gap-2">
+          {fetchState === "error" ? (
+            <button
+              type="button"
+              onClick={() => setRetryNonce((n) => n + 1)}
+              className="rounded bg-rose-500/10 px-2 py-1 text-[10px] font-mono uppercase text-rose-300 hover:bg-rose-500/20"
+            >
+              Retry
+            </button>
+          ) : null}
+          <span
+            className={
+              "rounded px-2 py-1 text-[10px] font-mono uppercase " + badge.cls
+            }
+          >
+            {badge.label}
+          </span>
+        </div>
       </div>
 
-      {hasCandles ? (
+      {fetchState === "loading" ? (
+        <ChartSkeleton />
+      ) : hasCandles ? (
         <CandlesSvg
           candles={candles}
           hoverIdx={hoverIdx}
           onHover={setHoverIdx}
         />
       ) : (
-        <div className="h-32 w-full">
+        // 200 OK + zero candles, OR error with no prior data — render the
+        // bonding-curve synthetic preview, dimmed in the "awaiting" case so
+        // it's visually distinct from real candles.
+        <div className="h-32 w-full opacity-50">
           <CurveSparkline reserves={fallbackReserves ?? makeInitialReserves()} />
         </div>
       )}
 
-      {!loading && hasCandles && hoverIdx !== null && candles[hoverIdx] ? (
+      {fetchState === "error" && errorMsg ? (
+        <p className="font-mono text-[10px] text-rose-300/80">
+          Indexer error: {errorMsg}. Retrying every {POLL_MS / 1000}s.
+        </p>
+      ) : null}
+
+      {fetchState === "ok" && hasCandles && hoverIdx !== null && candles[hoverIdx] ? (
         <CandleTooltip c={candles[hoverIdx]} bucketSec={bucketSec} />
       ) : null}
     </div>
+  );
+}
+
+function ChartSkeleton(): JSX.Element {
+  return (
+    <div
+      className="h-48 w-full animate-pulse rounded-md bg-secondary/30"
+      role="status"
+      aria-label="Loading chart"
+    />
   );
 }
 
@@ -208,7 +288,24 @@ function CandlesSvg({
       lo = 0;
       hi = 1;
     }
-    if (hi === lo) hi = lo + lo * 1e-6 + 1e-12;
+    // Pad the price domain by ~5% on each side. This keeps the highest wick
+    // off the top edge AND — critically for the 1e-8 SOL/token regime —
+    // gives a flat single-candle history a visible band to render in. The
+    // old `hi = lo + lo * 1e-6 + 1e-12` shim was numerically tiny (1e-14
+    // at lo=1e-8) which collapsed the body to a hairline.
+    const span = hi - lo;
+    if (span <= 0) {
+      // Single value or all-equal: scale the band to ~10% of the value
+      // itself so the candle body sits at vertical mid-screen with breathing
+      // room. Falls back to a tiny absolute pad if lo is near zero.
+      const pad = Math.max(Math.abs(lo) * 0.05, 1e-18);
+      lo = lo - pad;
+      hi = hi + pad;
+    } else {
+      const pad = span * 0.05;
+      lo = lo - pad;
+      hi = hi + pad;
+    }
     return { yMin: lo, yMax: hi, vMax: v || 1 };
   }, [candles]);
 
