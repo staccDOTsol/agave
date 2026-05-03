@@ -5,10 +5,11 @@
 import Link from "next/link";
 
 import { WalletButton } from "./wallet-button";
+import { WalletHelp } from "./wallet-help";
 
 export function SiteHeader(): JSX.Element {
   return (
-    <header className="border-b border-border/60 bg-background/95 backdrop-blur">
+    <header className="relative border-b border-border/60 bg-background/95 backdrop-blur">
       <div className="container flex h-14 items-center justify-between gap-4">
         <div className="flex items-center gap-6">
           <Link href="/" className="font-mono text-base font-semibold tracking-tight">
@@ -32,7 +33,10 @@ export function SiteHeader(): JSX.Element {
             </Link>
           </nav>
         </div>
-        <WalletButton />
+        <div className="flex items-center gap-2">
+          <WalletHelp />
+          <WalletButton />
+        </div>
       </div>
     </header>
   );
