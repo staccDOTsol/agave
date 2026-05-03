@@ -81,10 +81,20 @@ export default function PumpPage(): JSX.Element {
           },
         ],
       });
+      // Blacklist of mints we don't want to surface on the public launchpad.
+      // Curves whose `mint` matches any entry here are silently dropped at the
+      // decode step. Add a mint pubkey here to hide it from KOTH + the grid +
+      // search results (the curve PDA itself stays on-chain — this is purely a
+      // frontend filter).
+      const MINT_BLACKLIST = new Set<string>([
+        // First test launch — public TransferChecked, no real metadata.
+        "DBvLnV4obSfjcmZczJhxYZWSzdj7su9rxiFijPmBD9Bf",
+      ]);
       const decoded: CurveRow[] = [];
       for (const r of raw.slice(0, 100)) {
         try {
           const curve = decodeBondingCurve(new Uint8Array(r.account.data));
+          if (MINT_BLACKLIST.has(curve.mint.toBase58())) continue;
           decoded.push({
             pubkey: r.pubkey.toBase58(),
             curve,
