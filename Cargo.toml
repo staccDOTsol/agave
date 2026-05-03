@@ -14,6 +14,8 @@ members = [
     "tools/genesis-bake",
     "tools/claim-cli",
     "tools/bridge-cli",
+    "tools/bridge-init",
+    "tools/bridge-vault-init",
     "tools/megadrop-init",
     "tools/federation-attestor",
     "tools/megadrop-snapshot",

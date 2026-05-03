@@ -2487,6 +2487,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "histogram"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9772,6 +9778,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "staccana-bridge-init"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borsh 1.6.1",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-client",
+ "solana-program",
+ "solana-sdk",
+]
+
+[[package]]
 name = "staccana-bridge-vault"
 version = "0.1.0"
 dependencies = [
@@ -9780,6 +9802,22 @@ dependencies = [
  "solana-instructions-sysvar 3.0.0",
  "solana-sdk-ids 3.1.0",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "staccana-bridge-vault-init"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borsh 1.6.1",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-client",
+ "solana-program",
+ "solana-sdk",
 ]
 
 [[package]]
@@ -9940,6 +9978,20 @@ dependencies = [
  "solana-program",
  "solana-sdk-ids 3.1.0",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "staccana-megadrop-init"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borsh 1.6.1",
+ "clap",
+ "hex",
+ "sha2 0.10.9",
+ "solana-client",
+ "solana-program",
+ "solana-sdk",
 ]
 
 [[package]]
