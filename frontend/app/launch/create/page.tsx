@@ -185,7 +185,7 @@ export default function CreatePage(): JSX.Element {
       });
 
       // Whisk the user to the token detail page so they can see their fresh launch.
-      setTimeout(() => router.push(`/pump/${mintKp.publicKey.toBase58()}`), 1200);
+      setTimeout(() => router.push(`/launch/${mintKp.publicKey.toBase58()}`), 1200);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setSubmit({ kind: "error", message });
