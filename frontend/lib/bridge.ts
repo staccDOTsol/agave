@@ -73,6 +73,16 @@ export enum BridgeAsset {
   StSol = 0,
   SsUsdc = 1,
   WSol = 2,
+  /**
+   * `Staccana` (id=3) is the v9-launch culture asset: a pump.fun-launched
+   * Token-22 SPL fungible mint at
+   * `73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump` on mainnet (decimals=6,
+   * symbol=Staccana, name="Solana Fork Staccana"). The /bridge page only
+   * surfaces THIS asset to users right now — the older stSol/ssUsdc/wSol
+   * variants stay in the registry for backward-compat with already-init'd
+   * AssetConfig PDAs but aren't selectable in the UI.
+   */
+  Staccana = 3,
 }
 
 /** Static per-asset metadata. */
@@ -94,16 +104,49 @@ export interface BridgeAssetMeta {
   isNativeSol: boolean;
 }
 
-/** Static asset registry. Mirrors `AssetId::from_label` / `default_decimals`. */
+/**
+ * Static asset registry. Currently a single entry — the v9-launch
+ * culture asset. Older stSol/ssUsdc/wSol metadata is preserved in
+ * `BRIDGE_ASSETS_LEGACY` below so any in-flight code paths that
+ * dereference asset_id 0/1/2 (older AssetConfig PDAs) still resolve,
+ * but the user-facing /bridge page only shows `Staccana`.
+ *
+ * Bridging direction:
+ *   user holds `73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump` on mainnet
+ *   → deposit to mainnet bridge-vault
+ *   → federation attests
+ *   → mint mirror Token-22 on staccana with CT extension
+ *   → user holds the staccana mirror, can transfer confidentially
+ *   → burn the mirror to redeem the underlying back on mainnet
+ */
 export const BRIDGE_ASSETS: BridgeAssetMeta[] = [
+  {
+    id: BridgeAsset.Staccana,
+    label: "Staccana",
+    underlying:
+      "Staccana token on mainnet (Token-22 SPL, decimals=6, mint 73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump)",
+    decimals: 6,
+    isNativeSol: false,
+  },
+];
+
+/** Backward-compat entries — referenced by `bridgeAssetById` only. NOT shown in UI. */
+export const BRIDGE_ASSETS_LEGACY: BridgeAssetMeta[] = [
   { id: BridgeAsset.StSol, label: "stSOL", underlying: "SOL (mainnet pSYRUP)", decimals: 9, isNativeSol: false },
   { id: BridgeAsset.SsUsdc, label: "ssUSDC", underlying: "USDC (mainnet)", decimals: 6, isNativeSol: false },
   { id: BridgeAsset.WSol, label: "wSOL", underlying: "SOL (native)", decimals: 9, isNativeSol: true },
 ];
 
-/** Look up asset metadata by numeric id. */
+/** Mainnet underlying mint for the Staccana culture asset. Frozen constant. */
+export const STACCANA_MAINNET_MINT = "73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump";
+
+/** Look up asset metadata by numeric id. Falls through to the legacy
+ *  registry so already-init'd AssetConfig PDAs (id 0/1/2) still resolve
+ *  for any read-only code paths that might encounter them. */
 export function bridgeAssetById(id: BridgeAsset): BridgeAssetMeta {
-  const meta = BRIDGE_ASSETS.find((a) => a.id === id);
+  const meta =
+    BRIDGE_ASSETS.find((a) => a.id === id) ??
+    BRIDGE_ASSETS_LEGACY.find((a) => a.id === id);
   if (!meta) throw new Error(`unknown bridge asset id: ${id}`);
   return meta;
 }

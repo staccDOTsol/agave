@@ -138,7 +138,7 @@ export default function BridgePage(): JSX.Element {
   const { toast } = useToast();
 
   const [tab, setTab] = useState<Tab>("withdraw");
-  const [asset, setAsset] = useState<BridgeAsset>(BridgeAsset.StSol);
+  const [asset, setAsset] = useState<BridgeAsset>(BridgeAsset.Staccana);
   const [amountStr, setAmountStr] = useState("");
   const [mainnetDestStr, setMainnetDestStr] = useState("");
   const [staccanaDestStr, setStaccanaDestStr] = useState("");
@@ -392,9 +392,9 @@ export default function BridgePage(): JSX.Element {
   return (
     <>
       <PageHeader
-        eyebrow="bridge"
-        title="Bridge SOL or USDC into staccana"
-        tagline="Deposit on mainnet to mint stSOL or ssUSDC on staccana (5-of-9 federation, Token-22 with Confidential Transfer active by default). Burn to redeem the underlying back."
+        eyebrow="bridge · staccana"
+        title="Bridge $Staccana between mainnet and staccana"
+        tagline="The Staccana token (mainnet mint 73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump) is the only asset on this bridge. Deposit on mainnet, mint a confidential mirror on staccana (Token-22 + CT extension active by default), burn to redeem. For the culture."
       />
       <div className="container space-y-8 py-8">
 

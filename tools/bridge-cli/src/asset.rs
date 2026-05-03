@@ -48,6 +48,12 @@ pub enum AssetId {
     StSol = 0,
     /// Backed by USDC on mainnet. v0 launch asset.
     SsUsdc = 1,
+    /// Native SOL ↔ wSOL on staccana, R-locked.
+    WSol = 2,
+    /// `Staccana` — the v9 culture asset. Mainnet mint
+    /// `73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump` (Token-22 SPL,
+    /// decimals=6, name="Solana Fork Staccana", symbol="Staccana").
+    Staccana = 3,
 }
 
 impl AssetId {
@@ -61,8 +67,10 @@ impl AssetId {
         match label.to_ascii_lowercase().as_str() {
             "stsol" => Ok(Self::StSol),
             "ssusdc" => Ok(Self::SsUsdc),
+            "wsol" => Ok(Self::WSol),
+            "staccana" => Ok(Self::Staccana),
             other => Err(anyhow!(
-                "unknown asset label: {other:?} (known: stSOL, ssUSDC)"
+                "unknown asset label: {other:?} (known: stSOL, ssUSDC, wSOL, Staccana)"
             )),
         }
     }
@@ -72,6 +80,8 @@ impl AssetId {
         match self {
             Self::StSol => "stSOL",
             Self::SsUsdc => "ssUSDC",
+            Self::WSol => "wSOL",
+            Self::Staccana => "Staccana",
         }
     }
 
@@ -91,6 +101,11 @@ impl AssetId {
             Self::StSol => 9,
             // USDC is 6 decimals on mainnet.
             Self::SsUsdc => 6,
+            // wSOL mirrors native SOL.
+            Self::WSol => 9,
+            // Staccana token (mainnet 73edX6...pump) is decimals=6 — verified
+            // via mainnet `getAccountInfo` parsed-JSON (extension TokenMetadata).
+            Self::Staccana => 6,
         }
     }
 
