@@ -278,7 +278,7 @@ export default function ValidatorsPage(): JSX.Element {
           "[init_subsidy] v0 tx bytes =",
           versionedTx.serialize().length,
           "lut =",
-          lutPubkey.toBase58(),
+          lutPubkey?.toBase58(),
         );
       } catch {
         // serialize() throws if signatures are missing — irrelevant pre-sign.

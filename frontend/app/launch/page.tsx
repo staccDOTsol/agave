@@ -18,6 +18,7 @@
  * and the create flow's data: URI metadata blob (TODO: wire MetadataPointer).
  */
 
+import { getTokenMetadata } from "@solana/spl-token";
 import { useConnection } from "@solana/wallet-adapter-react";
 import { Plus, Search, Sparkles } from "lucide-react";
 import Link from "next/link";
@@ -38,7 +39,7 @@ import {
   type ParsedTrade,
   type PumpTokenMetadata,
 } from "@/lib/pump-extra";
-import { SECRET_PUMP_PROGRAM_ID } from "@/lib/staccana";
+import { SECRET_PUMP_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "@/lib/staccana";
 import { cn } from "@/lib/utils";
 
 interface CurveRow {
@@ -155,7 +156,9 @@ export default function PumpPage(): JSX.Element {
         );
         const byPubkey = new Map(enrichedEntries);
         setRows((prev) =>
-          prev.map((r) => ({ ...r, metadata: byPubkey.get(r.pubkey) ?? r.metadata })),
+          prev
+            ? prev.map((r) => ({ ...r, metadata: byPubkey.get(r.pubkey) ?? r.metadata }))
+            : prev,
         );
       } catch (err) {
         console.warn("[launch] metadata bulk-enrich failed", err);
@@ -255,6 +258,8 @@ export default function PumpPage(): JSX.Element {
           </Button>
         </Link>
       </header>
+
+      <ConfidentialityExplainer />
 
       <TradeTicker onTrade={onTickerTrade} />
 
@@ -360,5 +365,113 @@ function EmptyState({ query, sort }: { query: string; sort: Sort }): JSX.Element
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Big-banner explainer rendered just below the launchpad hero.
+ *
+ * Confidentiality on staccana is partial-by-design right now and the wallet
+ * ecosystem hasn't caught up to Token-22 ConfidentialTransfer yet — users
+ * deserve a frank explanation up front instead of finding out from etherscan
+ * (well, the staccana explorer) that their "secret" buy is in plaintext. See
+ * the chat thread "secret-pump → ConfidentialMintBurn rewrite" for the
+ * architectural backstory: PDA-as-ElGamal-keypair is unsound, so the curve
+ * itself can't run ConfidentialMintBurn — confidentiality lives one hop later
+ * in the user's own ATA via deposit/transfer.
+ */
+function ConfidentialityExplainer(): JSX.Element {
+  return (
+    <section
+      aria-labelledby="confidentiality-explainer-title"
+      className="rounded-xl border border-amber-500/30 bg-gradient-to-br from-amber-500/5 via-card/40 to-emerald-500/5 p-5 sm:p-6"
+    >
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider text-amber-300">
+            heads-up
+          </span>
+          <h2
+            id="confidentiality-explainer-title"
+            className="text-lg font-semibold tracking-tight sm:text-xl"
+          >
+            What is and isn&apos;t confidential here
+          </h2>
+        </div>
+
+        <div className="grid gap-4 text-sm text-muted-foreground sm:grid-cols-3">
+          <div className="space-y-1.5">
+            <p className="text-xs font-mono uppercase tracking-wider text-amber-300/80">
+              the curve is public
+            </p>
+            <p>
+              Mints (buys) and burns (sells) against the bonding curve are
+              <strong className="text-foreground"> not encrypted</strong>. The
+              `secret_pump` program runs plaintext `mint_to` / `transfer_checked`
+              ixs the same as any other Solana AMM, so a chain-watcher can see
+              the wallet, the size, and the price every time.
+            </p>
+            <p className="text-xs">
+              Why: Token-22&apos;s `ConfidentialMintBurn` extension requires the
+              supply authority to hold an ElGamal secret scalar to generate the
+              mint proof. Our supply authority is a PDA — PDAs have no scalar.
+              Trying to derive one from `H(curve_pda)` produces a pubkey nobody
+              can prove against; the program literally cannot sign the mint.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <p className="text-xs font-mono uppercase tracking-wider text-emerald-300/80">
+              what comes after IS the novel part
+            </p>
+            <p>
+              Once the curve mints into your ATA, you can flip those tokens into
+              the <strong className="text-foreground">encrypted available_balance</strong> via{" "}
+              <span className="font-mono text-xs">deposit + apply_pending_balance</span>. From
+              that point on, every <strong className="text-foreground">peer-to-peer transfer</strong>
+              {" "}between users is amount-encrypted via Token-22&apos;s `ConfidentialTransfer`:
+              snipers can&apos;t read your size, copy-traders can&apos;t mirror you, and the only
+              public events are &quot;some balance moved&quot;. Sniper bot economics break.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <p className="text-xs font-mono uppercase tracking-wider text-rose-300/80">
+              auto-encrypts your tokens on first buy
+            </p>
+            <p>
+              Your very first buy on a given mint also{" "}
+              <strong className="text-foreground">auto-prepends `ConfigureAccount`</strong> —
+              the page reads your ATA, sees no `ConfidentialTransferAccount` extension
+              yet, and bundles{" "}
+              <span className="font-mono text-xs">[VerifyPubkeyValidity, ConfigureAccount]</span>
+              {" "}ahead of the `Buy + Deposit` chain so the deposit lands in encrypted
+              pending_balance the moment the trade settles. Subsequent buys against the
+              same mint skip the configure step (the page caches the result) and ship
+              the slim two-ix path. Proofs come from{" "}
+              <span className="font-mono text-xs">@staccoverflow/zk-proofs-wasm</span>
+              {" "}via `/api/confidential/proof`; if anything in that chain fails the page
+              falls back to a plain public buy so the user never gets stuck.
+            </p>
+            <p>
+              <strong className="text-foreground">Sells decrypt automatically</strong>{" "}
+              before submitting — the curve trade size remains public, but post-trade
+              your balance returns to encrypted-by-default on the next buy. The sell
+              chain is{" "}
+              <span className="font-mono text-xs">
+                [VerifyEq, VerifyRange, Withdraw, ApplyPendingBalance, Sell]
+              </span>{" "}
+              compiled as a v0 transaction against a per-mint Address Lookup Table
+              (the legacy 1232-byte cap can&apos;t fit it).
+            </p>
+            <p className="text-xs italic">
+              The Send dialog still falls back to public `TransferChecked` until the
+              lo/hi commitments TODO lands — see{" "}
+              <span className="font-mono text-xs">lib/confidential.ts</span>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }

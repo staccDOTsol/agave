@@ -13,13 +13,17 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "@radix-ui/react-slot": "1.1.0",
     "@radix-ui/react-toast": "1.2.2",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/spl-token-metadata": "0.1.6",
     "@solana/wallet-adapter-base": "0.9.23",
     "@solana/wallet-adapter-react": "0.15.39",
     "@solana/wallet-adapter-react-ui": "0.9.35",
     "@solana/wallet-adapter-wallets": "0.19.32",
     "@solana/web3.js": "1.95.4",
+    "@staccoverflow/zk-proofs-wasm": "^0.3.0",
     "@vercel/blob": "^2.3.3",
     "bs58": "6.0.0",
     "class-variance-authority": "0.7.0",

@@ -19,6 +19,7 @@
  */
 
 import {
+  Connection,
   PublicKey,
   TransactionInstruction,
   type AccountInfo as Web3AccountInfo,
@@ -41,6 +42,20 @@ import {
   SYSTEM_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
 } from "./staccana";
+
+// Mainnet canonical SPL Associated Token Account program. Used to derive a
+// user's mainnet ATA for the bridge-vault `deposit` ix. NOT the staccana fork
+// ATA program ID exported from `./staccana` — that one only resolves on the
+// staccana cluster.
+const MAINNET_ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+);
+
+/** Canonical mainnet Token-2022 program ID. Used when a mainnet underlying
+ * mint is owned by Token-2022 instead of SPL Token v3. */
+const MAINNET_TOKEN_2022_PROGRAM_ID = new PublicKey(
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+);
 
 // SPL Token v3 mainnet program ID (canonical Solana mainnet/devnet). The
 // bridge-vault on mainnet talks to the standard SPL token program for
@@ -456,4 +471,265 @@ export function accountDataAsUint8(account: Web3AccountInfo<Buffer> | null): Uin
   // Buffer is a Uint8Array subtype; `Uint8Array.from` copies it into a plain
   // typed array.
   return new Uint8Array(account.data);
+}
+
+// ---------------------------------------------------------------------------
+// AssetConfig / VaultConfig readers
+// ---------------------------------------------------------------------------
+
+/**
+ * Decoded view of the on-chain `AssetConfig` PDA. Mirrors
+ * `programs/bridge/src/state.rs::AssetConfig`. We only surface the fields the
+ * UI currently needs — extend as needed.
+ *
+ * Field byte offsets (after Anchor 8-byte discriminator):
+ * - 8..12   asset_id (u32 LE)
+ * - 12..44  underlying_label ([u8; 32])
+ * - 44..76  mainnet_vault_program (Pubkey)
+ * - 76..108 staccana_mint (Pubkey)
+ * - 108     decimals (u8)
+ * - 109..111 mint_fee_bps (u16 LE)
+ * - 111..113 burn_fee_bps (u16 LE)
+ * - 113     bump (u8)
+ * - 114     flags (u8)
+ *
+ * Total size: 115 bytes (matches `AssetConfig::SPACE` in Rust).
+ */
+export interface AssetConfigData {
+  assetId: number;
+  underlyingLabel: Uint8Array;
+  mainnetVaultProgram: PublicKey;
+  staccanaMint: PublicKey;
+  decimals: number;
+  mintFeeBps: number;
+  burnFeeBps: number;
+  bump: number;
+  flags: number;
+}
+
+/** Encoded length of `AssetConfig` per `AssetConfig::SPACE`. */
+export const ASSET_CONFIG_LEN = 115;
+
+/** Decode an `AssetConfig` from the canonical Anchor account layout. */
+export function decodeAssetConfig(bytes: Uint8Array): AssetConfigData {
+  if (bytes.length < ASSET_CONFIG_LEN) {
+    throw new Error(
+      `AssetConfig must be >= ${ASSET_CONFIG_LEN} bytes (got ${bytes.length})`,
+    );
+  }
+  // We don't pin the discriminator here — it isn't a constant we already
+  // export, and the seed-derived PDA already authenticates the account. If we
+  // care later, compute `sha256("account:AssetConfig")[..8]` and check.
+  return {
+    assetId: readU32Le(bytes, 8),
+    underlyingLabel: bytes.slice(12, 44),
+    mainnetVaultProgram: new PublicKey(bytes.slice(44, 76)),
+    staccanaMint: new PublicKey(bytes.slice(76, 108)),
+    decimals: bytes[108],
+    mintFeeBps: bytes[109] | (bytes[110] << 8),
+    burnFeeBps: bytes[111] | (bytes[112] << 8),
+    bump: bytes[113],
+    flags: bytes[114],
+  };
+}
+
+/** Fetch and decode the per-asset `AssetConfig` PDA. */
+export async function fetchAssetConfig(
+  connection: Connection,
+  asset: BridgeAsset,
+): Promise<AssetConfigData | null> {
+  const acct = await connection.getAccountInfo(assetConfigPda(asset), "confirmed");
+  if (!acct) return null;
+  return decodeAssetConfig(new Uint8Array(acct.data));
+}
+
+/**
+ * Decoded view of the mainnet `VaultConfig` PDA. Mirrors
+ * `programs/bridge-vault/src/state.rs::VaultConfig`.
+ *
+ * Field byte offsets (after Anchor 8-byte discriminator):
+ * - 8..12   asset_id (u32 LE)
+ * - 12..44  underlying_label ([u8; 32])
+ * - 44..76  underlying_mint (Pubkey)
+ * - 76..108 vault_token_account (Pubkey)
+ * - 108     decimals (u8)
+ * - 109..111 deposit_fee_bps (u16 LE)
+ * - 111..113 release_fee_bps (u16 LE)
+ * - 113     bump (u8)
+ * - 114     flags (u8)
+ * - 115..123 total_locked (u64 LE)
+ *
+ * Total size: 123 bytes (matches `VaultConfig::SPACE`).
+ */
+export interface VaultConfigData {
+  assetId: number;
+  underlyingLabel: Uint8Array;
+  underlyingMint: PublicKey;
+  vaultTokenAccount: PublicKey;
+  decimals: number;
+  depositFeeBps: number;
+  releaseFeeBps: number;
+  bump: number;
+  flags: number;
+  totalLocked: bigint;
+}
+
+/** Encoded length of `VaultConfig` per `VaultConfig::SPACE`. */
+export const VAULT_CONFIG_LEN = 123;
+
+/** Decode a `VaultConfig` from the canonical Anchor account layout. */
+export function decodeVaultConfig(bytes: Uint8Array): VaultConfigData {
+  if (bytes.length < VAULT_CONFIG_LEN) {
+    throw new Error(
+      `VaultConfig must be >= ${VAULT_CONFIG_LEN} bytes (got ${bytes.length})`,
+    );
+  }
+  return {
+    assetId: readU32Le(bytes, 8),
+    underlyingLabel: bytes.slice(12, 44),
+    underlyingMint: new PublicKey(bytes.slice(44, 76)),
+    vaultTokenAccount: new PublicKey(bytes.slice(76, 108)),
+    decimals: bytes[108],
+    depositFeeBps: bytes[109] | (bytes[110] << 8),
+    releaseFeeBps: bytes[111] | (bytes[112] << 8),
+    bump: bytes[113],
+    flags: bytes[114],
+    totalLocked: readU64Le(bytes, 115),
+  };
+}
+
+/** Fetch and decode the per-asset mainnet `VaultConfig` PDA. */
+export async function fetchVaultConfig(
+  mainnetConnection: Connection,
+  asset: BridgeAsset,
+): Promise<VaultConfigData | null> {
+  const acct = await mainnetConnection.getAccountInfo(
+    vaultConfigPda(asset),
+    "confirmed",
+  );
+  if (!acct) return null;
+  return decodeVaultConfig(new Uint8Array(acct.data));
+}
+
+// ---------------------------------------------------------------------------
+// Deposit account derivation
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive an associated token account on mainnet for an arbitrary mint + owner
+ * + token-program triple. We re-implement the derivation here rather than
+ * pulling in `getAssociatedTokenAddressSync` from `@solana/spl-token` because
+ * that function bakes in the staccana-fork ATA program ID via the package's
+ * default arg, and on mainnet we always want the canonical ATA program.
+ */
+export function deriveMainnetAta(
+  mint: PublicKey,
+  owner: PublicKey,
+  tokenProgram: PublicKey = MAINNET_SPL_TOKEN_PROGRAM_ID,
+): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), tokenProgram.toBuffer(), mint.toBuffer()],
+    MAINNET_ASSOCIATED_TOKEN_PROGRAM_ID,
+  );
+  return pda;
+}
+
+/** Bundle of derived addresses + metadata needed to build a deposit ix. */
+export interface DerivedDepositAccounts {
+  /** Read-back `VaultConfig` data (cached on the result so callers can inspect). */
+  vaultConfig: VaultConfigData;
+  /** SPL underlying mint on mainnet (Pubkey::default for wSOL). */
+  underlyingMint: PublicKey;
+  /** Vault PDA-owned ATA for the underlying (Pubkey::default for wSOL). */
+  vaultTokenAccount: PublicKey;
+  /**
+   * User's mainnet ATA holding the underlying. `null` for the wSOL path
+   * because that path skips SPL accounts entirely.
+   */
+  userTokenAccount: PublicKey | null;
+  /**
+   * Token program that owns the underlying mint. Used both for the user-ATA
+   * derivation and to pick the right SPL Token program ID in the deposit ix.
+   * `null` for wSOL.
+   */
+  tokenProgram: PublicKey | null;
+  /**
+   * True if the user's ATA does not yet exist on mainnet and the deposit tx
+   * should prepend a `createAssociatedTokenAccountIdempotent` ix. `null` for
+   * the wSOL path.
+   */
+  userAtaMissing: boolean | null;
+}
+
+/**
+ * Derive every account the deposit panel needs from on-chain state + the
+ * connected mainnet wallet, with no user paste required:
+ *
+ * 1. Read `VaultConfig` to learn the underlying mint + vault ATA.
+ * 2. For SPL-backed assets, read the mint owner so we know whether to use
+ *    SPL Token v3 or Token-2022 for the user-ATA derivation.
+ * 3. Derive the user's mainnet ATA via the canonical derivation.
+ * 4. Probe the user's ATA so the UI can decide whether to prepend a
+ *    create-idempotent ix.
+ *
+ * For the wSOL path the user-ATA / token-program / probe slots return null —
+ * the on-chain handler skips the SPL branch entirely, so the deposit panel
+ * doesn't need them.
+ */
+export async function deriveDepositAccounts(
+  mainnetConnection: Connection,
+  asset: BridgeAsset,
+  mainnetUser: PublicKey,
+): Promise<DerivedDepositAccounts | null> {
+  const vaultConfig = await fetchVaultConfig(mainnetConnection, asset);
+  if (!vaultConfig) return null;
+
+  const meta = bridgeAssetById(asset);
+  if (meta.isNativeSol) {
+    return {
+      vaultConfig,
+      underlyingMint: vaultConfig.underlyingMint,
+      vaultTokenAccount: vaultConfig.vaultTokenAccount,
+      userTokenAccount: null,
+      tokenProgram: null,
+      userAtaMissing: null,
+    };
+  }
+
+  // Resolve the token program owning the mint so we derive the right ATA.
+  // Default to SPL v3 if the mint account doesn't exist on this RPC (devnet
+  // bring-up may have asymmetric state); the canonical SPL token program is
+  // the safe fallback because the bridge-vault ix passes it explicitly.
+  let tokenProgram: PublicKey = MAINNET_SPL_TOKEN_PROGRAM_ID;
+  try {
+    const mintAcct = await mainnetConnection.getAccountInfo(
+      vaultConfig.underlyingMint,
+      "confirmed",
+    );
+    if (mintAcct && mintAcct.owner.equals(MAINNET_TOKEN_2022_PROGRAM_ID)) {
+      tokenProgram = MAINNET_TOKEN_2022_PROGRAM_ID;
+    }
+  } catch {
+    // RPC hiccup — keep the SPL v3 default. Deposit will fail loudly if wrong.
+  }
+
+  const userAta = deriveMainnetAta(vaultConfig.underlyingMint, mainnetUser, tokenProgram);
+  let userAtaMissing = true;
+  try {
+    const ataInfo = await mainnetConnection.getAccountInfo(userAta, "confirmed");
+    userAtaMissing = ataInfo === null;
+  } catch {
+    // Treat probe failure as "missing" so we prepend the create ix; the
+    // idempotent variant is a no-op if it already exists.
+    userAtaMissing = true;
+  }
+
+  return {
+    vaultConfig,
+    underlyingMint: vaultConfig.underlyingMint,
+    vaultTokenAccount: vaultConfig.vaultTokenAccount,
+    userTokenAccount: userAta,
+    tokenProgram,
+    userAtaMissing,
+  };
 }

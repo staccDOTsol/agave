@@ -28,7 +28,14 @@
 
 import { upload } from "@vercel/blob/client";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
+import {
+  Keypair,
+  PublicKey,
+  Transaction,
+  TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
 import { ArrowLeft, Loader2, Rocket } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -39,6 +46,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
 import {
+  bootstrapLookupTable,
+  buildLaunchCreateLutAddresses,
+  clearCachedLaunchCreateLut,
+  loadUsableLut,
+  readCachedLaunchCreateLut,
+  writeCachedLaunchCreateLut,
+} from "@/lib/lut";
+import {
   buildBuyInstruction,
   buildCreateAtaIdempotentInstruction,
   buildCreateInstruction,
@@ -48,7 +63,15 @@ import {
 } from "@/lib/pump";
 import { fmtSol, type PumpTokenMetadata } from "@/lib/pump-extra";
 import { buildMintInitInstructions, type MintMetadataFields } from "@/lib/pump-mint";
-import { explorerTxUrl } from "@/lib/staccana";
+import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  RPC_URL,
+  SECRET_PUMP_PROGRAM_ID,
+  SECRET_PUMP_TREASURY,
+  SYSTEM_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  explorerTxUrl,
+} from "@/lib/staccana";
 import { truncatePubkey } from "@/lib/utils";
 
 const RENT_ESTIMATE_SOL = 0.025; // empirical: mint + curve PDA + vault PDA rent on Solana ≈ 0.02–0.03
@@ -185,9 +208,9 @@ export default function CreatePage(): JSX.Element {
       });
 
       // ---- 4. Append `secret_pump::create` to wire up the bonding curve ----
-      const tx = new Transaction();
-      for (const ix of mintInit.instructions) tx.add(ix);
-      tx.add(
+      const ixs: TransactionInstruction[] = [];
+      for (const ix of mintInit.instructions) ixs.push(ix);
+      ixs.push(
         buildCreateInstruction({
           mint: mintKp.publicKey,
           creator: publicKey,
@@ -196,14 +219,14 @@ export default function CreatePage(): JSX.Element {
 
       // ---- 5. Optional seed buy ----
       if (seedBuyLamports && seedBuyLamports > 0n) {
-        tx.add(
+        ixs.push(
           buildCreateAtaIdempotentInstruction({
             payer: publicKey,
             owner: publicKey,
             mint: mintKp.publicKey,
           }),
         );
-        tx.add(
+        ixs.push(
           buildBuyInstruction({
             mint: mintKp.publicKey,
             buyerTokenAccount: token22Ata(publicKey, mintKp.publicKey),
@@ -214,13 +237,107 @@ export default function CreatePage(): JSX.Element {
         );
       }
 
-      tx.feePayer = publicKey;
-      tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
-      tx.partialSign(mintKp);
+      // ---- 5a. Resolve a shared /launch/create LUT (one-shot per cluster) ----
+      // Cache key is rpc-scoped; bootstrapping is rare. The LUT bakes only the
+      // static program/sysvar pubkeys (system, sysvars, Token-2022, ATA,
+      // secret-pump program + treasury). The new mint keypair, the user's
+      // wallet, the curve PDA + curve vault PDA, and the buyer ATA must stay
+      // in static keys (they're per-launch / per-user).
+      const lutSeed = buildLaunchCreateLutAddresses({
+        systemProgram: SYSTEM_PROGRAM_ID,
+        tokenProgram: TOKEN_2022_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        secretPumpProgram: SECRET_PUMP_PROGRAM_ID,
+        secretPumpTreasury: SECRET_PUMP_TREASURY,
+      });
+      let lutAccount = null as Awaited<ReturnType<typeof loadUsableLut>>;
+      try {
+        const cached = readCachedLaunchCreateLut(RPC_URL);
+        if (cached) {
+          lutAccount = await loadUsableLut(connection, cached, lutSeed);
+          if (!lutAccount) {
+            // Stale cache (deactivated table or mismatched contents): drop and
+            // fall through to bootstrap.
+            clearCachedLaunchCreateLut(RPC_URL);
+          }
+        }
+        if (!lutAccount) {
+          setSubmit({ kind: "uploading", step: "Bootstrapping shared LUT (one-time)…" });
+          const lutPubkey = await bootstrapLookupTable({
+            connection,
+            payer: publicKey,
+            addresses: lutSeed,
+            sendTransaction,
+          });
+          writeCachedLaunchCreateLut(RPC_URL, lutPubkey);
+          lutAccount = await loadUsableLut(connection, lutPubkey, lutSeed);
+        }
+      } catch (lutErr) {
+        // LUT bootstrap failed — common cause is the user being out of SOL
+        // for the table-rent. Fall back to legacy path with a clear toast.
+        // eslint-disable-next-line no-console
+        console.warn("[launch/create] LUT bootstrap failed; falling back to legacy", lutErr);
+        clearCachedLaunchCreateLut(RPC_URL);
+        lutAccount = null;
+      }
 
-      // ---- 6. Send ----
+      // ---- 6. Build + send tx (v0 if LUT available, legacy fallback) ----
+      const blockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
+
       setSubmit({ kind: "submitting" });
-      const sig = await sendTransaction(tx, connection, { signers: [mintKp], skipPreflight: true });
+      let sig: string;
+      if (lutAccount) {
+        const message = new TransactionMessage({
+          payerKey: publicKey,
+          recentBlockhash: blockhash,
+          instructions: ixs,
+        }).compileToV0Message([lutAccount]);
+        const v0 = new VersionedTransaction(message);
+        // The new mint keypair is the only non-wallet signer.
+        v0.sign([mintKp]);
+        try {
+          // eslint-disable-next-line no-console
+          console.info(
+            "[launch/create] v0 tx serialized size",
+            v0.serialize().length,
+            "bytes (legacy cap = 1232)",
+          );
+        } catch {
+          // ignore
+        }
+        sig = await sendTransaction(v0, connection, { skipPreflight: true });
+      } else {
+        // Legacy fallback. If we land here the user is most likely out of SOL
+        // (LUT bootstrap step failed); the legacy 1232 cap may still bite at
+        // full social fields + seed buy, but it's the best we can do.
+        const tx = new Transaction();
+        for (const ix of ixs) tx.add(ix);
+        tx.feePayer = publicKey;
+        tx.recentBlockhash = blockhash;
+        tx.partialSign(mintKp);
+        try {
+          const wireSize = tx.serialize({
+            requireAllSignatures: false,
+            verifySignatures: false,
+          }).length;
+          // eslint-disable-next-line no-console
+          console.info("[launch/create] legacy tx serialized size", wireSize, "bytes");
+          if (wireSize > 1232) {
+            throw new Error(
+              "Launch failed: too many fields. Drop one social link and retry.",
+            );
+          }
+        } catch (sizeErr) {
+          if (sizeErr instanceof Error && sizeErr.message.startsWith("Launch failed")) {
+            throw sizeErr;
+          }
+          // serialize() can throw before signatures are present; ignore
+        }
+        sig = await sendTransaction(tx, connection, {
+          signers: [mintKp],
+          skipPreflight: true,
+        });
+      }
       setSubmit({ kind: "success", signature: sig, mint: mintKp.publicKey });
       toast({
         variant: "success",

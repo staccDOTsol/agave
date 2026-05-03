@@ -24,10 +24,14 @@ import {
 import {
   CLAIMED_MEGADROP_DISCRIMINATOR,
   MEGADROP_CLAIM_DISCRIMINATOR,
+  MEGADROP_CLAIM_FROM_BUFFER_DISCRIMINATOR,
   MEGADROP_CONFIG_DISCRIMINATOR,
+  MEGADROP_INIT_PROOF_BUFFER_DISCRIMINATOR,
+  MEGADROP_WRITE_PROOF_BUFFER_DISCRIMINATOR,
   concatBytes,
   readU32Le,
   readU64Le,
+  u32LeBytes,
 } from "./anchor";
 import { type ClaimableLeaf, packBits, type InclusionProof } from "./merkle";
 import {
@@ -35,6 +39,7 @@ import {
   MEGADROP_URL,
   SYSTEM_PROGRAM_ID,
   SYSVAR_INSTRUCTIONS_ID,
+  megadropProofBufferPda,
 } from "./staccana";
 import { u64LeBytes } from "./merkle";
 
@@ -549,3 +554,186 @@ export async function fetchMegadropConfig(
 // Re-export for callers that want to pack their own arbitrary bitmap before
 // constructing an ix payload.
 export { packBits };
+
+// ---------------------------------------------------------------------------
+// Megadrop proof-buffer 2-tx flow
+//
+// Mirror of the lazy-claim shape — see `lib/claim.ts` for the architectural
+// notes. Three ixs:
+//
+//   1. `buildInitMegadropProofBufferIx`  — allocate the staging PDA.
+//   2. `buildWriteMegadropProofBufferIx` — write a chunk at `offset`.
+//   3. `buildClaimMegadropFromBufferIx`  — final claim, closes the buffer.
+//
+// All three are Anchor ixs (8-byte discriminator, Borsh-encoded args).
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the `init_megadrop_proof_buffer` ix. Allocates the per-(holder, payer)
+ * PDA at `["megadrop_proof_buffer", holder, payer]`.
+ *
+ * Anchor args layout: `[disc:8][holder:32][total_len:u32 LE]`.
+ *
+ * Accounts (mirror `InitMegadropProofBuffer`):
+ * 0. payer            [signer, writable]
+ * 1. proof_buffer PDA [writable]
+ * 2. system_program
+ */
+export function buildInitMegadropProofBufferIx(args: {
+  holder: PublicKey;
+  totalLen: number;
+  payer: PublicKey;
+}): TransactionInstruction {
+  const data = concatBytes(
+    MEGADROP_INIT_PROOF_BUFFER_DISCRIMINATOR,
+    args.holder.toBytes(),
+    u32LeBytes(args.totalLen),
+  );
+  return new TransactionInstruction({
+    programId: MEGADROP_PROGRAM_ID,
+    keys: [
+      { pubkey: args.payer, isWritable: true, isSigner: true },
+      {
+        pubkey: megadropProofBufferPda(args.holder, args.payer),
+        isWritable: true,
+        isSigner: false,
+      },
+      { pubkey: SYSTEM_PROGRAM_ID, isWritable: false, isSigner: false },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+/**
+ * Build a `write_megadrop_proof_buffer` ix. Anchor args:
+ * `[disc:8][offset:u32 LE][bytes:vec<u8>]` — vec<u8> is `len:u32 LE | bytes...`.
+ *
+ * Accounts:
+ * 0. proof_buffer PDA [writable]
+ */
+export function buildWriteMegadropProofBufferIx(args: {
+  holder: PublicKey;
+  payer: PublicKey;
+  offset: number;
+  chunk: Uint8Array;
+}): TransactionInstruction {
+  // vec<u8> Borsh encoding: len:u32 LE then raw bytes.
+  const bytesVec = new Uint8Array(4 + args.chunk.length);
+  bytesVec.set(u32LeBytes(args.chunk.length), 0);
+  bytesVec.set(args.chunk, 4);
+
+  const data = concatBytes(
+    MEGADROP_WRITE_PROOF_BUFFER_DISCRIMINATOR,
+    u32LeBytes(args.offset),
+    bytesVec,
+  );
+  return new TransactionInstruction({
+    programId: MEGADROP_PROGRAM_ID,
+    keys: [
+      {
+        pubkey: megadropProofBufferPda(args.holder, args.payer),
+        isWritable: true,
+        isSigner: false,
+      },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+/** Inputs for the `claim_megadrop_from_buffer` ix. */
+export interface ClaimMegadropFromBufferIxArgs {
+  holder: PublicKey;
+  totalAllocation: bigint;
+  trancheIndices: number[];
+  /** Sibling count. Total proof bytes = `proofLen * 32`; read from buffer PDA. */
+  proofLen: number;
+  proofFlags: Uint8Array;
+  treasuryAuthority: PublicKey;
+  /** Pays for first-claim PDA + buffer rent recipient. Must equal the buffer-init payer. */
+  relayer: PublicKey;
+}
+
+/**
+ * Build the `claim_megadrop_from_buffer` ix. Same accounts as `claim_megadrop`
+ * plus the proof-buffer PDA appended at the end. The on-chain handler reads
+ * proof siblings from the buffer; only `proof_len` + `proof_flags` travel in
+ * ix data.
+ *
+ * Anchor args layout:
+ * `[disc:8][holder:32][total_allocation:u64 LE][tranche_indices:vec<u8>]
+ *  [proof_len:u16 LE][proof_flags:vec<u8>]`
+ */
+export function buildClaimMegadropFromBufferIx(
+  args: ClaimMegadropFromBufferIxArgs,
+): TransactionInstruction {
+  // tranche_indices: vec<u8>.
+  const trancheVec = new Uint8Array(4 + args.trancheIndices.length);
+  trancheVec.set(u32LeBytes(args.trancheIndices.length), 0);
+  for (let i = 0; i < args.trancheIndices.length; i++) {
+    const v = args.trancheIndices[i];
+    if (v < 1 || v > NUM_TRANCHES) {
+      throw new RangeError(`tranche idx ${v} not in [1, ${NUM_TRANCHES}]`);
+    }
+    trancheVec[4 + i] = v;
+  }
+  // proof_flags: vec<u8>.
+  const flagsVec = new Uint8Array(4 + args.proofFlags.length);
+  flagsVec.set(u32LeBytes(args.proofFlags.length), 0);
+  flagsVec.set(args.proofFlags, 4);
+
+  const proofLenBytes = new Uint8Array(2);
+  proofLenBytes[0] = args.proofLen & 0xff;
+  proofLenBytes[1] = (args.proofLen >>> 8) & 0xff;
+
+  const data = concatBytes(
+    MEGADROP_CLAIM_FROM_BUFFER_DISCRIMINATOR,
+    args.holder.toBytes(),
+    u64LeBytes(args.totalAllocation),
+    trancheVec,
+    proofLenBytes,
+    flagsVec,
+  );
+
+  return new TransactionInstruction({
+    programId: MEGADROP_PROGRAM_ID,
+    keys: [
+      { pubkey: args.relayer, isWritable: true, isSigner: true },
+      { pubkey: megadropConfigPda(), isWritable: false, isSigner: false },
+      { pubkey: claimedMegadropPda(args.holder), isWritable: true, isSigner: false },
+      { pubkey: args.treasuryAuthority, isWritable: true, isSigner: false },
+      { pubkey: args.holder, isWritable: true, isSigner: false },
+      { pubkey: SYSVAR_INSTRUCTIONS_ID, isWritable: false, isSigner: false },
+      { pubkey: SYSTEM_PROGRAM_ID, isWritable: false, isSigner: false },
+      {
+        pubkey: megadropProofBufferPda(args.holder, args.relayer),
+        isWritable: true,
+        isSigner: false,
+      },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+/**
+ * Plan a sequence of `write_megadrop_proof_buffer` ixs that together cover the
+ * full proof payload. Mirror of `planProofBufferWrites` in `lib/claim.ts`.
+ */
+export function planMegadropProofBufferWrites(args: {
+  proof: Uint8Array[];
+  chunkSizeBytes?: number;
+}): { totalLen: number; chunks: Array<{ offset: number; bytes: Uint8Array }> } {
+  const chunkSize = args.chunkSizeBytes ?? 800;
+  const flat = new Uint8Array(args.proof.length * 32);
+  for (let i = 0; i < args.proof.length; i++) {
+    if (args.proof[i].length !== 32) {
+      throw new Error(`sibling ${i} is not 32 bytes (got ${args.proof[i].length})`);
+    }
+    flat.set(args.proof[i], i * 32);
+  }
+  const chunks: Array<{ offset: number; bytes: Uint8Array }> = [];
+  for (let off = 0; off < flat.length; off += chunkSize) {
+    const end = Math.min(off + chunkSize, flat.length);
+    chunks.push({ offset: off, bytes: flat.slice(off, end) });
+  }
+  return { totalLen: flat.length, chunks };
+}

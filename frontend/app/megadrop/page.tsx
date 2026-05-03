@@ -6,9 +6,9 @@
  * Flow:
  *
  * 1. Wallet connect.
- * 2. Fetch the snapshot tool's `allocations.json` (the file
- *    `tools/megadrop-snapshot/src/output.rs` writes). Find the connected
- *    wallet's row.
+ * 2. Hit the `/api/megadrop/<pubkey>` edge function — it returns just this
+ *    wallet's allocation + Merkle inclusion proof (or 404). We don't pull the
+ *    full `allocations.json` to the client. Mirrors the `/claim` flow.
  * 3. Read the holder's `ClaimedMegadrop` PDA on chain to know which tranche
  *    bits have already been claimed.
  * 4. Read the singleton `MegadropConfig` PDA to know the genesis month and
@@ -23,7 +23,7 @@
  */
 
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { Transaction } from "@solana/web3.js";
+import { PublicKey, Transaction } from "@solana/web3.js";
 import { Loader2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -39,17 +39,18 @@ import { useToast } from "@/components/ui/use-toast";
 import { buildEd25519PrecompileInstruction } from "@/lib/claim";
 import { recomputeRoot, toHex, type InclusionProof } from "@/lib/merkle";
 import {
+  buildClaimMegadropFromBufferIx,
   buildClaimMegadropInstruction,
+  buildInitMegadropProofBufferIx,
   buildMegadropClaimMessage,
-  buildMegadropProof,
+  buildWriteMegadropProofBufferIx,
   fetchClaimedMegadrop,
-  fetchMegadropAllocations,
   fetchMegadropConfig,
-  findAllocation,
   isTrancheClaimed,
   isTrancheUnlocked,
   monthFromUnixTimestamp,
   NUM_TRANCHES,
+  planMegadropProofBufferWrites,
   trancheAmount,
   trancheUnlockMonth,
   validateAndPackTranches,
@@ -64,11 +65,59 @@ import { formatSol, truncatePubkey } from "@/lib/utils";
 // State
 // ---------------------------------------------------------------------------
 
-type AllocationsState =
+/**
+ * Eligibility state — single edge-function lookup keyed on the connected
+ * wallet's pubkey. Mirrors the `/claim` page: we deliberately don't fetch the
+ * full `allocations.json` (which carries every snapshotted holder); the
+ * `/api/megadrop/<pubkey>` edge fn returns just this wallet's allocation +
+ * Merkle proof, or 404 if not in the set.
+ */
+type EligibilityState =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "ready"; rows: MegadropAllocation[] }
+  | {
+      kind: "eligible";
+      allocation: MegadropAllocation;
+      proof: InclusionProof;
+    }
+  | { kind: "not_in_set" }
   | { kind: "error"; message: string };
+
+/** JSON shape returned by `app/api/megadrop/[pubkey]/route.ts` on hit. */
+interface MegadropEdgeHit {
+  pubkey: string;
+  // u64 lamports — JSON serializes as number or string depending on size.
+  lamports: number | string | bigint;
+  // Optional metadata mirrored from the snapshot row.
+  basedStacc0Count?: number | string | bigint;
+  proofv3Balance?: number | string | bigint;
+  totalWeight?: number | string | bigint;
+  // Inclusion proof fields. Hex-encoded (no "0x" prefix); each sibling is 32 B.
+  leafIndex?: number;
+  proof?: string[];
+  proofFlags?: string;
+  root?: string;
+}
+
+/** Decode a hex string (no "0x" prefix) into a Uint8Array. */
+function fromHex(hex: string): Uint8Array {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0) {
+    throw new Error(`hex string has odd length: ${clean.length}`);
+  }
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/** Coerce the JSON-serialized lamports/weight field back to bigint. */
+function toBig(v: number | string | bigint | undefined): bigint {
+  if (v === undefined || v === null) return 0n;
+  if (typeof v === "bigint") return v;
+  return BigInt(v);
+}
 
 type ConfigState =
   | { kind: "idle" }
@@ -81,9 +130,17 @@ type ClaimSubmit =
   | { kind: "idle" }
   | { kind: "preparing" }
   | { kind: "signing" }
+  | { kind: "staging"; current: number; total: number }
   | { kind: "submitting" }
   | { kind: "success"; signature: string }
   | { kind: "error"; message: string };
+
+/**
+ * Same threshold as `app/claim/page.tsx` — at depth 17 the inline proof + ix
+ * envelope blows past the 1232-byte tx ceiling, so deeper proofs go through
+ * the proof-buffer 2-tx flow.
+ */
+const PROOF_BUFFER_THRESHOLD = 16;
 
 // ---------------------------------------------------------------------------
 // Page
@@ -94,34 +151,67 @@ export default function MegadropPage(): JSX.Element {
   const { connection } = useConnection();
   const { toast } = useToast();
 
-  const [allocations, setAllocations] = useState<AllocationsState>({ kind: "idle" });
+  const [eligibility, setEligibility] = useState<EligibilityState>({ kind: "idle" });
   const [config, setConfig] = useState<ConfigState>({ kind: "idle" });
   const [claimedState, setClaimedState] = useState<ClaimedMegadropState | null>(null);
-  const [proof, setProof] = useState<InclusionProof | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [submit, setSubmit] = useState<ClaimSubmit>({ kind: "idle" });
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // Load allocations once on mount.
+  // Look up this wallet's allocation + inclusion proof via the edge fn whenever
+  // the connected pubkey changes. One round-trip, ~few-hundred-byte response —
+  // mirrors `app/claim/page.tsx`.
   useEffect(() => {
+    if (!connected || !publicKey) {
+      setEligibility({ kind: "idle" });
+      return;
+    }
     let cancelled = false;
-    setAllocations({ kind: "loading" });
-    fetchMegadropAllocations()
-      .then((rows) => {
-        if (!cancelled) setAllocations({ kind: "ready", rows });
+    setEligibility({ kind: "loading" });
+    fetch(`/api/megadrop/${publicKey.toBase58()}`)
+      .then(async (r) => {
+        if (cancelled) return;
+        if (r.status === 404) {
+          // Edge fn returns 404 with `error: "not in megadrop set"` for
+          // wallets outside the snapshot.
+          setEligibility({ kind: "not_in_set" });
+          return;
+        }
+        if (!r.ok) {
+          throw new Error(`/api/megadrop returned ${r.status}`);
+        }
+        const raw = (await r.json()) as MegadropEdgeHit;
+        // Coerce all numeric/u64/u128 fields back to bigint at parse time so
+        // downstream bigint math (trancheAmount, claimAmountPreview, message
+        // construction) doesn't throw "Cannot mix BigInt and other types".
+        const allocation: MegadropAllocation = {
+          holder: new PublicKey(raw.pubkey),
+          basedStacc0Count: toBig(raw.basedStacc0Count),
+          proofv3Balance: toBig(raw.proofv3Balance),
+          totalWeight: toBig(raw.totalWeight),
+          allocationLamports: toBig(raw.lamports),
+        };
+        const proof: InclusionProof = {
+          pubkey: new PublicKey(raw.pubkey),
+          lamports: toBig(raw.lamports),
+          proof: (raw.proof ?? []).map(fromHex),
+          proofFlags: raw.proofFlags ? fromHex(raw.proofFlags) : new Uint8Array(),
+          root: raw.root ? fromHex(raw.root) : new Uint8Array(32),
+        };
+        setEligibility({ kind: "eligible", allocation, proof });
       })
       .catch((err: unknown) => {
-        if (!cancelled) {
-          setAllocations({
-            kind: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setEligibility({ kind: "error", message });
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [connected, publicKey]);
+
+  const myAllocation = eligibility.kind === "eligible" ? eligibility.allocation : null;
+  const proof = eligibility.kind === "eligible" ? eligibility.proof : null;
 
   // Load on-chain config (genesis_month, treasury_authority, claimable_root).
   useEffect(() => {
@@ -145,31 +235,6 @@ export default function MegadropPage(): JSX.Element {
       cancelled = true;
     };
   }, [connection, refreshKey]);
-
-  // Compute the user's allocation row.
-  const myAllocation = useMemo<MegadropAllocation | null>(() => {
-    if (allocations.kind !== "ready" || !publicKey) return null;
-    return findAllocation(allocations.rows, publicKey);
-  }, [allocations, publicKey]);
-
-  // Build the inclusion proof for the user's row.
-  useEffect(() => {
-    if (allocations.kind !== "ready" || !publicKey || !myAllocation) {
-      setProof(null);
-      return;
-    }
-    let cancelled = false;
-    buildMegadropProof(allocations.rows, publicKey)
-      .then((p) => {
-        if (!cancelled) setProof(p);
-      })
-      .catch(() => {
-        if (!cancelled) setProof(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [allocations, publicKey, myAllocation]);
 
   // Read on-chain ClaimedMegadrop PDA so we know which tranches are spent.
   useEffect(() => {
@@ -288,26 +353,87 @@ export default function MegadropPage(): JSX.Element {
         throw new Error(`unexpected signature length: ${signature.length}`);
       }
 
-      // Two-instruction tx: ed25519 precompile (sysvar Instructions reads it
-      // back), then claim_megadrop.
+      // For shallow proofs the inline single-tx flow works as before. For deep
+      // proofs (~27 levels = 864 bytes of siblings) we MUST stage the proof in
+      // a PDA across 2-3 txs to stay under the 1232-byte tx ceiling.
       const ed25519Ix = buildEd25519PrecompileInstruction(publicKey, signature, message);
-      const claimIx = buildClaimMegadropInstruction({
-        holder: publicKey,
-        totalAllocation: myAllocation.allocationLamports,
-        trancheIndices: requested,
-        proof: proof.proof,
-        proofFlags: proof.proofFlags,
-        treasuryAuthority: config.cfg.treasuryAuthority,
-        relayer: publicKey,
-      });
-      const tx = new Transaction();
-      tx.add(ed25519Ix);
-      tx.add(claimIx);
-      tx.feePayer = publicKey;
-      tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
 
-      setSubmit({ kind: "submitting" });
-      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
+      let sig: string;
+      if (proof.proof.length <= PROOF_BUFFER_THRESHOLD) {
+        const claimIx = buildClaimMegadropInstruction({
+          holder: publicKey,
+          totalAllocation: myAllocation.allocationLamports,
+          trancheIndices: requested,
+          proof: proof.proof,
+          proofFlags: proof.proofFlags,
+          treasuryAuthority: config.cfg.treasuryAuthority,
+          relayer: publicKey,
+        });
+        const tx = new Transaction();
+        tx.add(ed25519Ix);
+        tx.add(claimIx);
+        tx.feePayer = publicKey;
+        tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
+
+        setSubmit({ kind: "submitting" });
+        sig = await sendTransaction(tx, connection, { skipPreflight: true });
+      } else {
+        // ---- Proof-buffer 2-tx flow ------------------------------------
+        const plan = planMegadropProofBufferWrites({ proof: proof.proof });
+        const initIx = buildInitMegadropProofBufferIx({
+          holder: publicKey,
+          totalLen: plan.totalLen,
+          payer: publicKey,
+        });
+        const writeIxs = plan.chunks.map((c) =>
+          buildWriteMegadropProofBufferIx({
+            holder: publicKey,
+            payer: publicKey,
+            offset: c.offset,
+            chunk: c.bytes,
+          }),
+        );
+
+        const stagingTxs: Transaction[] = [];
+        const firstTx = new Transaction();
+        firstTx.add(initIx);
+        if (writeIxs.length > 0) firstTx.add(writeIxs[0]);
+        stagingTxs.push(firstTx);
+        for (let i = 1; i < writeIxs.length; i++) {
+          const t = new Transaction();
+          t.add(writeIxs[i]);
+          stagingTxs.push(t);
+        }
+
+        const stagingTotal = stagingTxs.length;
+        for (let i = 0; i < stagingTotal; i++) {
+          setSubmit({ kind: "staging", current: i + 1, total: stagingTotal });
+          const t = stagingTxs[i];
+          t.feePayer = publicKey;
+          t.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
+          const stagingSig = await sendTransaction(t, connection, { skipPreflight: true });
+          await connection.confirmTransaction(stagingSig, "confirmed");
+        }
+
+        const claimIx = buildClaimMegadropFromBufferIx({
+          holder: publicKey,
+          totalAllocation: myAllocation.allocationLamports,
+          trancheIndices: requested,
+          proofLen: proof.proof.length,
+          proofFlags: proof.proofFlags,
+          treasuryAuthority: config.cfg.treasuryAuthority,
+          relayer: publicKey,
+        });
+        const finalTx = new Transaction();
+        finalTx.add(ed25519Ix);
+        finalTx.add(claimIx);
+        finalTx.feePayer = publicKey;
+        finalTx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
+
+        setSubmit({ kind: "submitting" });
+        sig = await sendTransaction(finalTx, connection, { skipPreflight: true });
+      }
+
       setSubmit({ kind: "success", signature: sig });
       toast({
         variant: "success",
@@ -362,7 +488,7 @@ export default function MegadropPage(): JSX.Element {
         <CardHeader>
           <CardTitle>Allocation</CardTitle>
           <CardDescription>
-            Snapshot URL:{" "}
+            View full allocations:{" "}
             <a
               className="underline underline-offset-2"
               href={MEGADROP_URL}
@@ -375,9 +501,8 @@ export default function MegadropPage(): JSX.Element {
         </CardHeader>
         <CardContent className="space-y-4">
           <AllocationReadout
-            allocations={allocations}
+            eligibility={eligibility}
             connected={connected}
-            myAllocation={myAllocation}
             publicKey={publicKey?.toBase58() ?? null}
           />
           <ConfigReadout config={config} currentMonth={currentMonth} />
@@ -437,19 +562,25 @@ export default function MegadropPage(): JSX.Element {
                 selected.size === 0 ||
                 submit.kind === "preparing" ||
                 submit.kind === "signing" ||
+                submit.kind === "staging" ||
                 submit.kind === "submitting" ||
                 config.kind !== "ready"
               }
               className="w-full sm:w-auto"
             >
-              {submit.kind === "preparing" || submit.kind === "signing" || submit.kind === "submitting" ? (
+              {submit.kind === "preparing" ||
+              submit.kind === "signing" ||
+              submit.kind === "staging" ||
+              submit.kind === "submitting" ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
                   {submit.kind === "preparing"
                     ? "Building proof"
                     : submit.kind === "signing"
                       ? "Awaiting signature"
-                      : "Submitting"}
+                      : submit.kind === "staging"
+                        ? `Staging proof (${submit.current}/${submit.total})…`
+                        : "Submitting claim"}
                 </>
               ) : (
                 `Claim ${selected.size} tranche${selected.size === 1 ? "" : "s"}`
@@ -484,14 +615,12 @@ export default function MegadropPage(): JSX.Element {
 // ---------------------------------------------------------------------------
 
 function AllocationReadout({
-  allocations,
+  eligibility,
   connected,
-  myAllocation,
   publicKey,
 }: {
-  allocations: AllocationsState;
+  eligibility: EligibilityState;
   connected: boolean;
-  myAllocation: MegadropAllocation | null;
   publicKey: string | null;
 }): JSX.Element {
   if (!connected) {
@@ -501,13 +630,13 @@ function AllocationReadout({
       </p>
     );
   }
-  if (allocations.kind === "loading") {
-    return <p className="text-sm text-muted-foreground">Loading allocations…</p>;
+  if (eligibility.kind === "loading") {
+    return <p className="text-sm text-muted-foreground">Looking up allocation…</p>;
   }
-  if (allocations.kind === "error") {
-    return <p className="text-sm text-destructive">Allocations error: {allocations.message}</p>;
+  if (eligibility.kind === "error") {
+    return <p className="text-sm text-destructive">Allocation lookup error: {eligibility.message}</p>;
   }
-  if (!myAllocation) {
+  if (eligibility.kind === "not_in_set" || eligibility.kind === "idle") {
     return (
       <p className="text-sm text-muted-foreground">
         No allocation for{" "}
@@ -516,18 +645,19 @@ function AllocationReadout({
       </p>
     );
   }
+  const allocation = eligibility.allocation;
   return (
     <dl className="grid grid-cols-2 gap-2 text-sm">
       <dt className="text-muted-foreground">Holder</dt>
-      <dd className="font-mono" title={myAllocation.holder.toBase58()}>
-        {truncatePubkey(myAllocation.holder.toBase58())}
+      <dd className="font-mono" title={allocation.holder.toBase58()}>
+        {truncatePubkey(allocation.holder.toBase58())}
       </dd>
       <dt className="text-muted-foreground">based_stacc_0 NFTs held</dt>
-      <dd className="font-mono">{myAllocation.basedStacc0Count.toString()}</dd>
+      <dd className="font-mono">{allocation.basedStacc0Count.toString()}</dd>
       <dt className="text-muted-foreground">proofv3 balance</dt>
-      <dd className="font-mono">{myAllocation.proofv3Balance.toString()}</dd>
+      <dd className="font-mono">{allocation.proofv3Balance.toString()}</dd>
       <dt className="text-muted-foreground">Total allocation</dt>
-      <dd className="font-mono">{formatSol(myAllocation.allocationLamports)} SOL</dd>
+      <dd className="font-mono">{formatSol(allocation.allocationLamports)} SOL</dd>
     </dl>
   );
 }

@@ -39,6 +39,8 @@ import { useToast } from "@/components/ui/use-toast";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   BRIDGE_VAULT_PROGRAM_ID,
+  MAINNET_EXPLORER_CLUSTER,
+  MAINNET_RPC_URL,
   TOKEN_2022_PROGRAM_ID,
   explorerTxUrl,
   mainnetExplorerTxUrl,
@@ -107,6 +109,26 @@ type Tab = "withdraw" | "deposit";
  */
 
 const DEFAULT_FEE_BPS = 10;
+
+/**
+ * The bridge-vault program (the OTHER chain's leg) currently lives on Solana
+ * **devnet** for tonight's bring-up — see `lib/staccana.ts::MAINNET_RPC_URL`.
+ * Until the vault redeploys to mainnet, ANY tx submitted from this page would
+ * either fail (against mainnet) or move devnet-fake tokens (against devnet)
+ * while looking visually identical to a real bridge — i.e. perfect scam
+ * surface.
+ *
+ * Hard-disable the action buttons and surface a banner explaining why. We
+ * detect "devnet mode" by checking the configured mainnet RPC / explorer
+ * cluster strings — flip back to functional automatically once the env vars
+ * point at mainnet.
+ */
+const BRIDGE_IS_DEVNET =
+  MAINNET_RPC_URL.includes("devnet") ||
+  MAINNET_EXPLORER_CLUSTER.includes("devnet");
+const BRIDGE_DISABLED_TITLE = BRIDGE_IS_DEVNET
+  ? "Disabled: bridge-vault is on Solana devnet for tonight's bring-up. Switching to mainnet flips this back on automatically."
+  : "";
 
 export default function BridgePage(): JSX.Element {
   const { publicKey, sendTransaction, connected } = useWallet();
@@ -228,6 +250,12 @@ export default function BridgePage(): JSX.Element {
   // ---- Withdraw / burn flow ----
   const onBurn = useCallback(async () => {
     setSubmit({ kind: "idle" });
+    // Belt-and-suspenders: the button is also disabled in this mode, but a
+    // motivated user could re-enable it via devtools — refuse explicitly.
+    if (BRIDGE_IS_DEVNET) {
+      setSubmit({ kind: "error", message: BRIDGE_DISABLED_TITLE });
+      return;
+    }
     if (!publicKey || !connected) {
       setSubmit({ kind: "error", message: "Wallet not connected" });
       return;
@@ -372,6 +400,27 @@ export default function BridgePage(): JSX.Element {
         </p>
       </header>
 
+      {BRIDGE_IS_DEVNET ? (
+        <div
+          role="alert"
+          className="rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-200"
+        >
+          <p className="font-semibold">Bridge is non-functional right now</p>
+          <p className="mt-1 text-amber-200/80">
+            The bridge-vault program is deployed to Solana <span className="font-mono">devnet</span>{" "}
+            for tonight&apos;s bring-up — not mainnet. Submitting a deposit here would either
+            fail outright or move <em>fake devnet tokens</em>, while looking visually identical
+            to the real flow. To protect users, all action buttons on this page are disabled
+            until the vault is redeployed to mainnet.
+          </p>
+          <p className="mt-2 text-xs text-amber-200/60">
+            Detected via <span className="font-mono">NEXT_PUBLIC_MAINNET_RPC_URL</span> /{" "}
+            <span className="font-mono">NEXT_PUBLIC_MAINNET_EXPLORER_CLUSTER</span>. Flip the env
+            vars to mainnet and the page re-enables on next deploy.
+          </p>
+        </div>
+      ) : null}
+
       <Card>
         <CardHeader>
           <CardTitle>Asset</CardTitle>
@@ -443,6 +492,7 @@ export default function BridgePage(): JSX.Element {
               value={amountStr}
               onChange={setAmountStr}
               placeholder={meta.decimals === 6 ? "100" : "1.5"}
+              disabledReason={BRIDGE_IS_DEVNET ? BRIDGE_DISABLED_TITLE : undefined}
             />
             <Field
               label="Mainnet destination pubkey"
@@ -450,18 +500,35 @@ export default function BridgePage(): JSX.Element {
               onChange={setMainnetDestStr}
               placeholder="recipient on mainnet"
               mono
+              disabledReason={BRIDGE_IS_DEVNET ? BRIDGE_DISABLED_TITLE : undefined}
             />
             <p className="text-sm text-muted-foreground">{previewLine}</p>
-            <Button onClick={onBurn} disabled={submit.kind === "submitting"} className="w-full sm:w-auto">
+            <Button
+              onClick={onBurn}
+              disabled={submit.kind === "submitting" || BRIDGE_IS_DEVNET}
+              title={BRIDGE_DISABLED_TITLE}
+              className="w-full sm:w-auto"
+            >
               {submit.kind === "submitting" ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Submitting
                 </>
+              ) : BRIDGE_IS_DEVNET ? (
+                <>Submit burn (disabled — devnet)</>
               ) : (
                 "Submit burn"
               )}
             </Button>
+            {BRIDGE_IS_DEVNET ? (
+              <span
+                className="ml-2 inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full border border-amber-500/40 bg-amber-500/10 text-[10px] font-bold text-amber-300"
+                title={BRIDGE_DISABLED_TITLE}
+                aria-label="Why is this disabled?"
+              >
+                ?
+              </span>
+            ) : null}
             {submit.kind === "success" ? (
               <p className="text-sm text-emerald-400">
                 Submitted.{" "}
@@ -601,6 +668,12 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
 
   const onDeposit = useCallback(async () => {
     setSubmit({ kind: "idle" });
+    // Belt-and-suspenders: button is disabled in devnet mode but refuse here
+    // too in case someone re-enables it via devtools.
+    if (BRIDGE_IS_DEVNET) {
+      setSubmit({ kind: "error", message: BRIDGE_DISABLED_TITLE });
+      return;
+    }
     if (!mainnetPubkey || !mainnetConnected) {
       setSubmit({ kind: "error", message: "Mainnet wallet not connected" });
       return;
@@ -725,11 +798,13 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
           value={amountStr}
           onChange={setAmountStr}
           placeholder={meta.decimals === 6 ? "100" : "1.5"}
+          disabledReason={BRIDGE_IS_DEVNET ? BRIDGE_DISABLED_TITLE : undefined}
         />
         <Field
           label="Staccana recipient (auto-filled from your staccana wallet)"
           value={staccanaDestStr}
           onChange={setStaccanaDestStr}
+          disabledReason={BRIDGE_IS_DEVNET ? BRIDGE_DISABLED_TITLE : undefined}
           placeholder="staccana pubkey to credit"
           mono
         />
@@ -753,7 +828,8 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
         <div className="flex flex-wrap items-center gap-3">
           <Button
             onClick={onDeposit}
-            disabled={submit.kind === "submitting" || !mainnetConnected}
+            disabled={submit.kind === "submitting" || !mainnetConnected || BRIDGE_IS_DEVNET}
+            title={BRIDGE_DISABLED_TITLE}
             className="w-full sm:w-auto"
           >
             {submit.kind === "submitting" ? (
@@ -761,11 +837,22 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
                 <Loader2 className="h-4 w-4 animate-spin" />
                 Submitting on mainnet
               </>
+            ) : BRIDGE_IS_DEVNET ? (
+              <>Deposit (disabled — devnet)</>
             ) : (
               "Deposit (sign with mainnet wallet)"
             )}
           </Button>
-          {!mainnetConnected ? (
+          {BRIDGE_IS_DEVNET ? (
+            <span
+              className="inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full border border-amber-500/40 bg-amber-500/10 text-[10px] font-bold text-amber-300"
+              title={BRIDGE_DISABLED_TITLE}
+              aria-label="Why is this disabled?"
+            >
+              ?
+            </span>
+          ) : null}
+          {!mainnetConnected && !BRIDGE_IS_DEVNET ? (
             <span className="text-xs text-muted-foreground">
               Connect a mainnet wallet to enable deposit →
             </span>
@@ -869,6 +956,7 @@ function Field({
   placeholder,
   mono,
   help,
+  disabledReason,
 }: {
   label: string;
   value: string;
@@ -876,18 +964,34 @@ function Field({
   placeholder?: string;
   mono?: boolean;
   help?: React.ReactNode;
+  /** If set, the input is disabled and a "?" tooltip explaining why is shown next to the label. */
+  disabledReason?: string;
 }): JSX.Element {
+  const disabled = Boolean(disabledReason);
   return (
     <label className="block space-y-1">
-      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        {label}
+        {disabled ? (
+          <span
+            className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-amber-500/40 bg-amber-500/10 text-[9px] font-bold text-amber-300"
+            title={disabledReason}
+            aria-label={disabledReason}
+          >
+            ?
+          </span>
+        ) : null}
+      </span>
       <input
         type="text"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        disabled={disabled}
+        title={disabledReason}
         className={`block w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring ${
           mono ? "font-mono" : ""
-        }`}
+        } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
       />
       {help ? <span className="block text-xs text-muted-foreground">{help}</span> : null}
     </label>

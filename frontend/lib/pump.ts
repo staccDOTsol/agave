@@ -381,47 +381,26 @@ export function bondingCurveReserves(c: BondingCurve): Reserves {
 // Instruction builders
 // ---------------------------------------------------------------------------
 
-/** Args to `create`: name (32), symbol (10), uri (200), all zero-padded. */
+/**
+ * Args to `create`. The on-chain `CreateArgs` struct is now empty — token
+ * metadata (name/symbol/uri) lives on the Token-22 mint itself via the
+ * MetadataPointer + TokenMetadata extensions, which the caller initializes in
+ * earlier ixs of the same tx (see `lib/pump-mint.ts`).
+ */
 export interface CreateIxArgs {
-  /** Caller-supplied display name (UTF-8). Up to 32 bytes; zero-padded. */
-  name: string;
-  /** Display symbol (UTF-8). Up to 10 bytes; zero-padded. */
-  symbol: string;
-  /** Off-chain metadata URI. Up to 200 bytes; zero-padded. */
-  uri: string;
-  /** Mint keypair pubkey — must be a freshly generated keypair signer. */
+  /** Mint pubkey — must be the same keypair signer used in the mint-creation ixs. */
   mint: PublicKey;
-  /** Curve creator (pays rent). */
+  /** Curve creator (pays rent for curve PDA + vault). */
   creator: PublicKey;
-}
-
-/** Pad / truncate a UTF-8 string to a fixed byte length (right-pad with 0s). */
-function utf8Fixed(s: string, len: number): Uint8Array {
-  const enc = new TextEncoder().encode(s);
-  if (enc.length > len) {
-    throw new RangeError(`string ${JSON.stringify(s)} exceeds ${len} bytes`);
-  }
-  const out = new Uint8Array(len);
-  out.set(enc, 0);
-  return out;
 }
 
 /**
  * Encode the `create` ix data per Anchor convention:
  *
- * `[disc:8 | name:32 | symbol:10 | uri:200]`
- *
- * Note: per `programs/secret-pump/src/instructions/create.rs`, the args struct
- * uses fixed-length byte arrays, not Borsh `string` (which is len-prefixed).
- * No length prefix is needed.
+ * `[disc:8]` — `CreateArgs` is now empty (Borsh-encodes to zero bytes).
  */
-export function encodeCreateArgs(name: string, symbol: string, uri: string): Uint8Array {
-  return concatBytes(
-    PUMP_CREATE_DISCRIMINATOR,
-    utf8Fixed(name, 32),
-    utf8Fixed(symbol, 10),
-    utf8Fixed(uri, 200),
-  );
+export function encodeCreateArgs(): Uint8Array {
+  return concatBytes(PUMP_CREATE_DISCRIMINATOR);
 }
 
 /**
@@ -444,7 +423,7 @@ export function encodeCreateArgs(name: string, symbol: string, uri: string): Uin
  * it as a partial signer when sending the tx.
  */
 export function buildCreateInstruction(args: CreateIxArgs): TransactionInstruction {
-  const data = encodeCreateArgs(args.name, args.symbol, args.uri);
+  const data = encodeCreateArgs();
   return new TransactionInstruction({
     programId: SECRET_PUMP_PROGRAM_ID,
     keys: [

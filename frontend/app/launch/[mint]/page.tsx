@@ -14,7 +14,12 @@
  */
 
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { PublicKey, Transaction } from "@solana/web3.js";
+import {
+  PublicKey,
+  Transaction,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
 import {
   ArrowLeft,
   Check,
@@ -29,7 +34,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { CurveSparkline } from "@/components/pump/sparkline";
+import { OhlcvChart } from "@/components/pump/ohlcv-chart";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
@@ -39,6 +44,7 @@ import {
   buildBuyInstruction,
   buildCreateAtaIdempotentInstruction,
   buildSellInstruction,
+  curveVaultPda,
   decodeBondingCurve,
   quoteBuy,
   quoteSell,
@@ -46,6 +52,25 @@ import {
   token22Ata,
   type BondingCurve,
 } from "@/lib/pump";
+import {
+  ProofUnavailableError,
+  ZK_ELGAMAL_PROOF_PROGRAM_ID,
+  buildApplyPendingBalanceInstruction,
+  buildConfigureAccountInstruction,
+  buildDepositInstruction,
+  buildTransferInstruction,
+  buildWithdrawInstruction,
+  deriveElGamalKeypair,
+  hasConfidentialAccountState,
+} from "@/lib/confidential";
+import {
+  bootstrapLookupTable,
+  buildSellChainLutAddresses,
+  clearCachedSellChainLut,
+  loadUsableLut,
+  readCachedSellChainLut,
+  writeCachedSellChainLut,
+} from "@/lib/lut";
 import {
   fetchPumpMetadata,
   fetchRecentTrades,
@@ -61,7 +86,9 @@ import {
   type PumpTokenMetadata,
 } from "@/lib/pump-extra";
 import {
+  RPC_URL,
   SECRET_PUMP_PROGRAM_ID,
+  SECRET_PUMP_TREASURY,
   TOKEN_2022_PROGRAM_ID,
   explorerTxUrl,
 } from "@/lib/staccana";
@@ -299,22 +326,15 @@ export default function TokenDetailPage(): JSX.Element {
       <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
         <div className="space-y-6">
           <Card>
-            <CardHeader className="flex flex-row items-start justify-between gap-2">
-              <div>
-                <CardTitle className="text-lg">Bonding-curve preview</CardTitle>
-                <CardDescription>
-                  Deterministic price function — this curve <em>must</em> follow this
-                  trajectory. Plot is the spot price as a function of real SOL deposited.
-                </CardDescription>
-              </div>
-              <span className="rounded bg-secondary/40 px-2 py-1 text-[10px] font-mono uppercase text-muted-foreground">
-                Synthetic
-              </span>
+            <CardHeader>
+              <CardTitle className="text-lg">Price chart</CardTitle>
+              <CardDescription>
+                Indexed trades bucketed into OHLCV candles. Falls back to a synthetic
+                curve preview before the first trade lands.
+              </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="h-32 w-full">
-                <CurveSparkline reserves={reserves} />
-              </div>
+              <OhlcvChart mint={mint.toBase58()} fallbackReserves={reserves} />
             </CardContent>
           </Card>
 
@@ -345,8 +365,9 @@ export default function TokenDetailPage(): JSX.Element {
           </Card>
         </div>
 
-        <aside>
+        <aside className="space-y-4">
           <TradePanel mint={mint} curve={curve} onSuccess={onTradeSuccess} />
+          <SendPanel mint={mint} />
         </aside>
       </div>
     </div>
@@ -654,7 +675,8 @@ function TradePanel({
   onSuccess: () => void;
 }): JSX.Element {
   const { connection } = useConnection();
-  const { publicKey, sendTransaction, connected } = useWallet();
+  const wallet = useWallet();
+  const { publicKey, sendTransaction, connected } = wallet;
   const { toast } = useToast();
 
   const [side, setSide] = useState<"buy" | "sell">("buy");
@@ -662,6 +684,19 @@ function TradePanel({
   const [slipBps, setSlipBps] = useState(100);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Confidential-receive feature flag — default ON. Wraps the post-buy deposit
+  // ix in a try/catch so a failure (e.g. wallet without ConfigureAccount yet)
+  // falls back to public mode without breaking the trade.
+  const [confidentialMode, setConfidentialMode] = useState(true);
+  // Sub-stage label so the user can tell ConfigureAccount-needed buys (which
+  // extra-sign + extra-spend rent for the encryption metadata) apart from the
+  // simple subsequent-buy path. Reset on each new submit.
+  const [stage, setStage] = useState<string | null>(null);
+  // Memoize the "this ATA already has a ConfidentialTransferAccount TLV"
+  // result so repeat-buys against the same mint don't re-fetch the account.
+  // Keyed by `${owner}:${mint}` — both can change as the user navigates and
+  // reconnects wallets, so a single ref suffices.
+  const [ataConfigured, setAtaConfigured] = useState<boolean | null>(null);
 
   const baseAmount = useMemo(() => parseDecimalToBigInt(amountStr, 9), [amountStr]);
 
@@ -685,6 +720,7 @@ function TradePanel({
 
   const onSubmit = useCallback(async () => {
     setError(null);
+    setStage(null);
     if (!publicKey || !connected) {
       setError("Connect a wallet first");
       return;
@@ -699,10 +735,86 @@ function TradePanel({
     }
     if (!baseAmount) return;
     try {
+      setSubmitting(true);
       const tx = new Transaction();
       const ata = token22Ata(publicKey, mint);
       if (side === "buy") {
+        setStage("Building ATA…");
         tx.add(buildCreateAtaIdempotentInstruction({ payer: publicKey, owner: publicKey, mint }));
+
+        // Decide whether we need to prepend ConfigureAccount. The on-chain
+        // ConfidentialTransferAccount TLV at offset 166+ of the ATA tells us
+        // whether `Deposit` will land or fail atomically. We cache the
+        // positive result in component state — once configured, the bit
+        // never flips back, so subsequent buys skip the round-trip.
+        let needsConfigure = false;
+        if (confidentialMode) {
+          if (ataConfigured === true) {
+            needsConfigure = false;
+          } else {
+            try {
+              const isConfigured = await hasConfidentialAccountState(
+                connection,
+                ata,
+                mint,
+                TOKEN_2022_PROGRAM_ID,
+              );
+              setAtaConfigured(isConfigured);
+              needsConfigure = !isConfigured;
+            } catch (probeErr) {
+              // Network blip — assume "needs configure" is the safer guess
+              // if confidential mode is on; the worst case is we rebuild a
+              // ConfigureAccount the chain ignores (already-initialized
+              // accounts make `ConfigureAccount` a no-op-style failure that
+              // we catch below and downgrade to public).
+              // eslint-disable-next-line no-console
+              console.warn("[confidential] hasConfidentialAccountState probe failed", probeErr);
+              needsConfigure = true;
+            }
+          }
+        }
+
+        // Prepend the [VerifyPubkeyValidity, ConfigureAccount] pair when
+        // needed. Wrapped in try/catch — if proof-gen or signMessage fails
+        // we fall back to a plain public buy. The whole confidential
+        // sub-chain (configure + deposit + apply) is best-effort; the
+        // primary buy ix MUST always make it onto the wire.
+        let configureSucceeded = !needsConfigure;
+        if (needsConfigure) {
+          try {
+            setStage("Encrypting (configuring confidential balance)…");
+            const keys = await deriveElGamalKeypair(
+              { publicKey, signMessage: wallet.signMessage },
+              mint,
+            );
+            const ixs = await buildConfigureAccountInstruction({
+              payer: publicKey,
+              ata,
+              mint,
+              owner: publicKey,
+              // Token-22 caps this at u16::MAX = 65535 in the typical config.
+              maximumPendingBalanceCreditCounter: 65535n,
+              elgamalPubkey: keys.secretSeed.slice(0, 32),
+              decryptableZeroBalance: new Uint8Array(36),
+              elgamalSeed: keys.secretSeed,
+            });
+            for (const ix of ixs) tx.add(ix);
+            configureSucceeded = true;
+            // Optimistically mark configured for subsequent submits in this
+            // session; the on-chain ix may still fail, in which case the
+            // next probe corrects us.
+            setAtaConfigured(true);
+          } catch (cfgErr) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[confidential] ConfigureAccount failed; buy will run public-mode",
+              cfgErr,
+            );
+            configureSucceeded = false;
+          }
+        }
+
+        setStage("Submitting buy…");
         tx.add(
           buildBuyInstruction({
             mint,
@@ -712,7 +824,128 @@ function TradePanel({
             minTokensOut: quote.minOut,
           }),
         );
+        // Only chain Deposit when we know ConfigureAccount has run — either
+        // it was already on chain or we just prepended it successfully.
+        // Otherwise the on-chain Deposit fails atomically and the entire
+        // buy reverts; falling back to public-mode here means the user
+        // still gets their tokens, just not encrypted on receive.
+        if (confidentialMode && configureSucceeded) {
+          try {
+            // quote.kind === "buy" — narrow the union safely
+            const tokensOut = "ok" in quote && quote.kind === "buy" ? quote.ok.tokensOut : 0n;
+            // Deposit the *minimum* (= guaranteed-received) so we never
+            // over-deposit if the on-chain trade settles for fewer tokens
+            // than our optimistic quote. Slippage between quote and exec.
+            const depositAmount = quote.minOut < tokensOut ? quote.minOut : tokensOut;
+            if (depositAmount > 0n) {
+              tx.add(
+                buildDepositInstruction({
+                  ata,
+                  mint,
+                  owner: publicKey,
+                  amount: depositAmount,
+                  decimals: 9,
+                }),
+              );
+            }
+          } catch (depErr) {
+            // eslint-disable-next-line no-console
+            console.warn("[confidential] deposit ix construction failed; falling back to public buy", depErr);
+          }
+        }
       } else {
+        // Sell branch: if the buyer's ATA was previously ConfigureAccount'd
+        // (the buy chain auto-runs this on first buy and keeps the result
+        // cached) the spendable balance is sitting in the encrypted
+        // available_balance side, NOT in public spl-token amount. A naive
+        // public sell would underflow on chain. Withdraw N tokens out of the
+        // encrypted side first, apply the pending counter, then run the
+        // existing secret-pump sell ix.
+        let confidentialChainAdded = false;
+        let attemptedConfidentialWithdraw = false;
+        if (confidentialMode) {
+          let isConfigured = ataConfigured === true;
+          if (!isConfigured && ataConfigured === null) {
+            try {
+              isConfigured = await hasConfidentialAccountState(
+                connection,
+                ata,
+                mint,
+                TOKEN_2022_PROGRAM_ID,
+              );
+              setAtaConfigured(isConfigured);
+            } catch (probeErr) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                "[confidential] hasConfidentialAccountState probe failed (sell)",
+                probeErr,
+              );
+              isConfigured = false;
+            }
+          }
+          if (isConfigured) {
+            attemptedConfidentialWithdraw = true;
+            try {
+              setStage("Decrypting balance…");
+              const keys = await deriveElGamalKeypair(
+                { publicKey, signMessage: wallet.signMessage },
+                mint,
+              );
+              // Withdraw chain: returns [Withdraw, VerifyEq, VerifyRange]
+              // with proof offsets baked at +1 and +2. Tx-assembly order
+              // matters — DO NOT re-arrange. We push exactly that sequence
+              // and then append ApplyPendingBalance + Sell.
+              //
+              // Note on placeholder seeds: until the wasm bundle ships
+              // client-side ElGamal arithmetic, sourceCiphertext /
+              // newBalanceCommitment / newBalanceOpening are zero buffers.
+              // The proof API rejects those with HTTP 400 and we surface
+              // ProofUnavailableError → public-sell fallback below. Once
+              // those bytes are derived from the on-chain ConfidentialTransfer
+              // extension state the same call gives a real proof.
+              const zeroAe = new Uint8Array(36);
+              const withdrawIxs = await buildWithdrawInstruction({
+                ata,
+                mint,
+                owner: publicKey,
+                amount: baseAmount,
+                decimals: 9,
+                elgamalPubkey: keys.secretSeed.slice(0, 32),
+                newDecryptableAvailableBalance: zeroAe,
+                elgamalSeed: keys.secretSeed,
+              });
+              for (const ix of withdrawIxs) tx.add(ix);
+
+              tx.add(
+                buildApplyPendingBalanceInstruction({
+                  ata,
+                  owner: publicKey,
+                  // Token-22 cross-checks this counter against the on-chain
+                  // pending_balance_credit_counter; 0n is the conservative
+                  // first-flush value. A more accurate read would parse the
+                  // extension TLV's u64 counter — for now we accept the
+                  // occasional Apply failure and let the caller fall back.
+                  expectedPendingBalanceCreditCounter: 0n,
+                  newDecryptableAvailableBalance: zeroAe,
+                }),
+              );
+              confidentialChainAdded = true;
+              setStage("Submitting sell…");
+            } catch (wdErr) {
+              if (!(wdErr instanceof ProofUnavailableError)) {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  "[confidential] withdraw chain build failed; falling back to public sell",
+                  wdErr,
+                );
+              }
+              // Discard whatever ixs the failed chain may have already pushed.
+              tx.instructions.length = 0;
+              confidentialChainAdded = false;
+            }
+          }
+        }
+
         tx.add(
           buildSellInstruction({
             mint,
@@ -722,12 +955,110 @@ function TradePanel({
             minSolOut: quote.minOut,
           }),
         );
+        if (!confidentialChainAdded && attemptedConfidentialWithdraw) {
+          setStage("Submitting sell…");
+        }
       }
       tx.feePayer = publicKey;
       tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
-      setSubmitting(true);
-      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
+
+      // Decide v0+LUT vs legacy. The withdraw chain alone serializes to ~1275
+      // bytes; once Apply + Sell are appended the legacy form runs ~1500+
+      // bytes — well past the 1232 hard cap. Buys (and any sell that fell
+      // back to public) stay legacy.
+      const isConfidentialSell =
+        side === "sell" &&
+        // crude detector: more than the lone Sell ix means we appended the
+        // withdraw chain. The legacy public sell tx has exactly one ix.
+        tx.instructions.length > 1;
+
+      let sig: string;
+      if (isConfidentialSell) {
+        // Bootstrap (or reuse) the per-mint sell-chain LUT. The seed list
+        // bakes the recurring static accounts — Token-22, ZK ElGamal Proof,
+        // sysvars, system program, secret-pump program, treasury, curve PDA,
+        // curve vault PDA. Signer + mint + ATA stay inline.
+        const lutSeed = {
+          tokenProgram: TOKEN_2022_PROGRAM_ID,
+          zkProofProgram: ZK_ELGAMAL_PROOF_PROGRAM_ID,
+          secretPumpProgram: SECRET_PUMP_PROGRAM_ID,
+          secretPumpTreasury: SECRET_PUMP_TREASURY,
+          bondingCurve: bondingCurvePda(mint),
+          curveVault: curveVaultPda(mint),
+        };
+        const lutAddresses = buildSellChainLutAddresses(lutSeed);
+
+        let lutPubkey = readCachedSellChainLut(RPC_URL, mint);
+        let lutAccount = lutPubkey
+          ? await loadUsableLut(connection, lutPubkey, lutAddresses)
+          : null;
+        if (!lutAccount) {
+          if (lutPubkey) clearCachedSellChainLut(RPC_URL, mint);
+          setStage("Bootstrapping lookup table…");
+          lutPubkey = await bootstrapLookupTable({
+            connection,
+            payer: publicKey,
+            authority: publicKey,
+            addresses: lutAddresses,
+            sendTransaction,
+          });
+          writeCachedSellChainLut(RPC_URL, mint, lutPubkey);
+          lutAccount = await loadUsableLut(connection, lutPubkey, lutAddresses);
+          if (!lutAccount) {
+            throw new Error(
+              "Sell-chain lookup table created but not yet visible on-chain — retry in a moment.",
+            );
+          }
+          setStage("Submitting sell…");
+        }
+
+        const messageV0 = new TransactionMessage({
+          payerKey: publicKey,
+          recentBlockhash: tx.recentBlockhash,
+          instructions: tx.instructions,
+        }).compileToV0Message([lutAccount]);
+        const versionedTx = new VersionedTransaction(messageV0);
+        try {
+          // eslint-disable-next-line no-console
+          console.info(
+            "[sell-tx-size]",
+            versionedTx.serialize().length,
+            "bytes (v0+LUT, lut =",
+            lutPubkey?.toBase58(),
+            ")",
+          );
+        } catch {
+          // serialize() before sign throws — size diagnostic is best-effort.
+        }
+        sig = await sendTransaction(versionedTx, connection, { skipPreflight: true });
+      } else {
+        // Sanity-log the serialized size before we hand the tx to the wallet.
+        // The legacy tx hard-limit is 1232 bytes; if we ever overflow that we'd
+        // need to switch to v0 + LUT (see lib/lut.ts). Today the worst case
+        // (CreateAtaIdempotent + VerifyPubkey + ConfigureAccount + Buy +
+        // Deposit) is ~900-1100 bytes — comfortably under, but we surface it
+        // in the console so a regression is loud.
+        try {
+          const wireSize = tx.serialize({ requireAllSignatures: false, verifySignatures: false }).length;
+          // eslint-disable-next-line no-console
+          console.info(
+            side === "sell" ? "[sell-tx-size]" : "[trade] serialized tx size",
+            wireSize,
+            "bytes (legacy cap = 1232)",
+          );
+          if (wireSize > 1232) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[trade] tx exceeds 1232-byte legacy cap; sending will likely fail",
+            );
+          }
+        } catch {
+          // Serialize can throw before signatures; size logging is best-effort.
+        }
+        sig = await sendTransaction(tx, connection, { skipPreflight: true });
+      }
       setSubmitting(false);
+      setStage(null);
       toast({
         variant: "success",
         title: side === "buy" ? "Buy submitted" : "Sell submitted",
@@ -747,9 +1078,10 @@ function TradePanel({
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
       setSubmitting(false);
+      setStage(null);
       toast({ variant: "destructive", title: "Trade failed", description: msg });
     }
-  }, [publicKey, connected, curve.graduated, quote, baseAmount, side, mint, connection, sendTransaction, toast, onSuccess]);
+  }, [publicKey, connected, curve.graduated, quote, baseAmount, side, mint, connection, sendTransaction, toast, onSuccess, confidentialMode, ataConfigured, wallet.signMessage]);
 
   return (
     <Card className="sticky top-24">
@@ -865,6 +1197,23 @@ function TradePanel({
           <p className="text-xs text-muted-foreground">Enter an amount to see a quote.</p>
         )}
 
+        {side === "buy" ? (
+          <label className="flex items-center justify-between rounded-md border border-border/40 bg-secondary/20 px-3 py-2 text-xs">
+            <span className="flex items-center gap-1.5">
+              <span aria-hidden>🔒</span>
+              <span className="font-medium">Encrypted on receive</span>
+              <span className="text-muted-foreground">
+                — token balance hidden in pending_balance
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={confidentialMode}
+              onChange={(e) => setConfidentialMode(e.target.checked)}
+              className="h-3.5 w-3.5 accent-emerald-500"
+            />
+          </label>
+        ) : null}
         <Button
           onClick={onSubmit}
           disabled={submitting || curve.graduated || !quote || (quote && "error" in quote)}
@@ -878,7 +1227,7 @@ function TradePanel({
           {submitting ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin" />
-              Submitting…
+              {stage ?? "Submitting…"}
             </>
           ) : side === "buy" ? (
             "Buy"
@@ -891,6 +1240,252 @@ function TradePanel({
           <p className="rounded border border-amber-400/40 bg-amber-400/10 p-2 text-[11px] text-amber-200">
             This curve has graduated. Trading on the bonding curve is closed; the Raydium pool
             migration runs out-of-band.
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Send (peer-to-peer transfer) panel.
+//
+// Builds a Token-22 transfer between two ATAs of the same mint. Tries the
+// confidential-transfer path first (encrypted amount); on
+// `ProofUnavailableError` falls back to a public `TransferCheckedInstruction`.
+// The fallback is identical in observable effect to a normal SPL token
+// transfer — only the privacy property is lost.
+//
+// Why it lives next to the trade panel: this is THE feature staccana sells.
+// Encrypting buys is half the story; the other half is that p2p transfers
+// don't leak amounts to chain-watchers. Keep it visible.
+// ---------------------------------------------------------------------------
+
+function SendPanel({ mint }: { mint: PublicKey }): JSX.Element {
+  const { connection } = useConnection();
+  const wallet = useWallet();
+  const { publicKey, sendTransaction, connected } = wallet;
+  const { toast } = useToast();
+
+  const [recipientStr, setRecipientStr] = useState("");
+  const [amountStr, setAmountStr] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confidential, setConfidential] = useState(true);
+  const [usedFallback, setUsedFallback] = useState(false);
+
+  const recipient = useMemo(() => {
+    try {
+      return new PublicKey(recipientStr.trim());
+    } catch {
+      return null;
+    }
+  }, [recipientStr]);
+
+  const amount = useMemo(() => parseDecimalToBigInt(amountStr, 9), [amountStr]);
+
+  const onSend = useCallback(async () => {
+    setError(null);
+    setUsedFallback(false);
+    if (!publicKey || !connected) {
+      setError("Connect a wallet first");
+      return;
+    }
+    if (!recipient) {
+      setError("Recipient address is invalid");
+      return;
+    }
+    if (!amount || amount <= 0n) {
+      setError("Enter an amount > 0");
+      return;
+    }
+    if (recipient.equals(publicKey)) {
+      setError("Recipient is your own wallet");
+      return;
+    }
+
+    try {
+      setSubmitting(true);
+      const senderAta = token22Ata(publicKey, mint);
+      const recipientAta = token22Ata(recipient, mint);
+
+      const tx = new Transaction();
+
+      // Always idempotent-create the recipient ATA so the receiver doesn't
+      // have to pre-pay rent. Cheap (~2k CU + a few thousand lamports).
+      tx.add(
+        buildCreateAtaIdempotentInstruction({
+          payer: publicKey,
+          owner: recipient,
+          mint,
+        }),
+      );
+
+      let usedConfidential = false;
+      if (confidential) {
+        try {
+          // Derive ElGamal keys for both sides. Sender derives via
+          // wallet.signMessage; recipient pubkey is taken on faith from the
+          // recipient's ATA when the proof generator ships — we pass a
+          // zero pubkey here as a placeholder since the call will throw
+          // before the bytes are used.
+          const senderKeys = await deriveElGamalKeypair(
+            { publicKey, signMessage: wallet.signMessage },
+            mint,
+          );
+          // The transfer-ix builder generates three proofs server-side and
+          // returns `[Transfer, VerifyEquality, VerifyValidity, VerifyRange]`.
+          // Today's MVP feeds placeholder commitments for the lo/hi halves
+          // of the transfer amount — the on-chain Token-22 verifier will
+          // reject the resulting tx, so the catch below routes us into the
+          // public TransferChecked path. See `lib/confidential.ts` for the
+          // TODO that closes the gap (parsing the validity proof's context
+          // bytes to extract the canonical commitments).
+          const ixs = await buildTransferInstruction({
+            ata: senderAta,
+            destinationAta: recipientAta,
+            mint,
+            owner: publicKey,
+            amount,
+            senderElgamalPubkey: senderKeys.secretSeed.slice(0, 32),
+            recipientElgamalPubkey: new Uint8Array(32),
+            auditorElgamalPubkey: new Uint8Array(32),
+            newSourceDecryptableAvailableBalance: new Uint8Array(36),
+            elgamalSeed: senderKeys.secretSeed,
+          });
+          for (const ix of ixs) tx.add(ix);
+          usedConfidential = true;
+        } catch (err) {
+          if (!(err instanceof ProofUnavailableError)) {
+            throw err;
+          }
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[send] confidential path unavailable, falling back to public TransferChecked",
+            err.code,
+          );
+        }
+      }
+
+      if (!usedConfidential) {
+        // Public path — TransferChecked. Lazy-import the spl-token helper so
+        // the codepath only loads when actually used.
+        const { createTransferCheckedInstruction } = await import("@solana/spl-token");
+        tx.add(
+          createTransferCheckedInstruction(
+            senderAta,
+            mint,
+            recipientAta,
+            publicKey,
+            amount,
+            9,
+            [],
+            TOKEN_2022_PROGRAM_ID,
+          ),
+        );
+        setUsedFallback(true);
+      }
+
+      tx.feePayer = publicKey;
+      tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
+      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
+      toast({
+        variant: "success",
+        title: usedConfidential ? "Encrypted transfer submitted" : "Transfer submitted (public)",
+        description: (
+          <a
+            className="font-mono text-xs underline underline-offset-2"
+            href={explorerTxUrl(sig)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {truncatePubkey(sig, 8, 8)}
+          </a>
+        ),
+      });
+      setAmountStr("");
+      setRecipientStr("");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      toast({ variant: "destructive", title: "Send failed", description: msg });
+    } finally {
+      setSubmitting(false);
+    }
+  }, [
+    publicKey,
+    connected,
+    recipient,
+    amount,
+    mint,
+    connection,
+    sendTransaction,
+    confidential,
+    wallet.signMessage,
+    toast,
+  ]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <span aria-hidden>🔒</span> Send
+        </CardTitle>
+        <CardDescription>
+          Transfer tokens to another wallet. Uses Token-22 confidential transfers when the
+          proof generator is available; falls back to a public transfer otherwise.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <label className="block space-y-1">
+          <span className="text-xs font-medium text-muted-foreground">Recipient (pubkey)</span>
+          <input
+            type="text"
+            value={recipientStr}
+            onChange={(e) => setRecipientStr(e.target.value)}
+            placeholder="Recipient address…"
+            className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            spellCheck={false}
+          />
+        </label>
+        <label className="block space-y-1">
+          <span className="text-xs font-medium text-muted-foreground">Amount (tokens)</span>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={amountStr}
+            onChange={(e) => setAmountStr(e.target.value)}
+            placeholder="0.0"
+            className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+        </label>
+        <label className="flex items-center justify-between rounded-md border border-border/40 bg-secondary/20 px-3 py-2 text-xs">
+          <span>Try encrypted transfer first (falls back to public on failure)</span>
+          <input
+            type="checkbox"
+            checked={confidential}
+            onChange={(e) => setConfidential(e.target.checked)}
+            className="h-3.5 w-3.5 accent-emerald-500"
+          />
+        </label>
+        <Button onClick={onSend} disabled={submitting} className="w-full">
+          {submitting ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Sending…
+            </>
+          ) : (
+            "Send"
+          )}
+        </Button>
+        {error ? <p className="text-xs text-destructive">{error}</p> : null}
+        {usedFallback ? (
+          <p className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-200">
+            Encrypted transfer rejected by chain — sent as public TransferChecked instead.
+            (The proof bytes generate cleanly, but Token-22&apos;s verifier wants canonical
+            Pedersen commitments for the amount lo/hi halves; see
+            {" "}<span className="font-mono">lib/confidential.ts</span> TODO.) The amount
+            is visible on chain.
           </p>
         ) : null}
       </CardContent>

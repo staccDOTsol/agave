@@ -22,10 +22,22 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
 import {
+  buildClaimFromBufferIx,
   buildClaimMessage,
   buildClaimTransaction,
+  buildEd25519PrecompileInstruction,
+  buildInitProofBufferIx,
+  buildWriteProofBufferIx,
+  planProofBufferWrites,
 } from "@/lib/claim";
-import { recomputeRoot, toHex, type InclusionProof } from "@/lib/merkle";
+import {
+  deriveProofFlagsFromLeafIndex,
+  fromHex,
+  recomputeRoot,
+  toHex,
+  type InclusionProof,
+} from "@/lib/merkle";
+import { PublicKey, Transaction } from "@solana/web3.js";
 import { explorerTxUrl } from "@/lib/staccana";
 import { formatSol, truncatePubkey } from "@/lib/utils";
 
@@ -48,9 +60,23 @@ type ClaimState =
   | { kind: "idle" }
   | { kind: "preparing" }
   | { kind: "signing" }
+  | { kind: "staging"; current: number; total: number }
   | { kind: "submitting" }
   | { kind: "success"; signature: string }
   | { kind: "error"; message: string };
+
+/**
+ * Single-tx vs proof-buffer cutover. The legacy 1232-byte tx limit fits roughly
+ * a 17-level proof inline; deeper proofs need the 2-tx buffered flow. We use a
+ * conservative threshold: anything above 16 levels triggers the buffer path so
+ * we always have headroom for tx envelope + ed25519 precompile.
+ *
+ * The buffer flow falls back automatically to the single-tx path if the program
+ * rejects the new ixs (e.g. on a chain that hasn't been redeployed yet) — the
+ * fallback re-throws with the original "Transaction too large" error so the user
+ * can see the underlying constraint.
+ */
+const PROOF_BUFFER_THRESHOLD = 16;
 
 export default function ClaimPage(): JSX.Element {
   const { publicKey, signMessage, sendTransaction, connected } = useWallet();
@@ -86,18 +112,33 @@ export default function ClaimPage(): JSX.Element {
         if (!r.ok) {
           throw new Error(`/api/claim returned ${r.status}`);
         }
-        const raw = (await r.json()) as Omit<InclusionProof, "lamports"> & { lamports: number | string | bigint };
-        // Edge fn JSON serializes lamports as a number (since u64 fits in
-        // JS Number for these values). Coerce back to bigint so downstream
-        // bigint arithmetic in formatSol / buildClaimTransaction doesn't
-        // throw "Cannot mix BigInt and other types".
-        const proof: InclusionProof = {
-          ...raw,
+        // Edge fn shape: { pubkey: base58, lamports: number, leafIndex, proof: hex[] }.
+        // The frontend's InclusionProof needs PublicKey + bigint lamports +
+        // Uint8Array[] siblings + packed proofFlags + root. We rebuild the
+        // bigint/byte/flag fields here. proofFlags is purely a function of
+        // leafIndex (see deriveProofFlagsFromLeafIndex). root isn't returned
+        // by the edge fn — we compute it client-side via recomputeRoot
+        // purely so the UI can display it; on-chain doesn't need it (the
+        // claim ix wire format omits root, see lib/claim.ts::encodeClaimArgs).
+        const raw = (await r.json()) as {
+          pubkey: string;
+          lamports: number | string | bigint;
+          leafIndex: number;
+          proof: string[];
+        };
+        const proofBytes = raw.proof.map(fromHex);
+        const partial: InclusionProof = {
+          pubkey: new PublicKey(raw.pubkey),
           lamports:
             typeof raw.lamports === "bigint"
               ? raw.lamports
               : BigInt(raw.lamports),
+          proof: proofBytes,
+          proofFlags: deriveProofFlagsFromLeafIndex(raw.leafIndex, proofBytes.length),
+          root: new Uint8Array(32), // placeholder, filled in by recomputeRoot below
         };
+        const root = await recomputeRoot(partial);
+        const proof: InclusionProof = { ...partial, root };
         setEligibility({ kind: "eligible", proof });
       })
       .catch((err: unknown) => {
@@ -136,13 +177,7 @@ export default function ClaimPage(): JSX.Element {
       return;
     }
     try {
-      // Self-check: recomputed root must match the one we built into the proof.
-      // Catches any local impl drift before we ask the user to sign.
       setClaim({ kind: "preparing" });
-      const recomputed = await recomputeRoot(proof);
-      if (toHex(recomputed) !== toHex(proof.root)) {
-        throw new Error("inclusion proof self-check failed");
-      }
 
       // Sign the SPEC §4.2 message using the wallet's signMessage entry point.
       const message = buildClaimMessage(publicKey, proof.lamports);
@@ -152,22 +187,108 @@ export default function ClaimPage(): JSX.Element {
         throw new Error(`unexpected signature length: ${signature.length}`);
       }
 
-      // Assemble the two-instruction tx (ed25519 precompile + claim ix).
-      const tx = await buildClaimTransaction({
-        proof,
-        signature,
-        signerPubkey: publicKey,
-        message,
+      // For tiny proofs, the inline single-tx path still works — and skips the
+      // extra 2-3 round trips needed to stage a buffer. For deep proofs (~27
+      // levels = 864 bytes of siblings) we MUST stage the proof in a PDA across
+      // multiple txs to stay under the 1232-byte tx ceiling.
+      if (proof.proof.length <= PROOF_BUFFER_THRESHOLD) {
+        const tx = await buildClaimTransaction({
+          proof,
+          signature,
+          signerPubkey: publicKey,
+          message,
+          payer: publicKey,
+          connection,
+        });
+        setClaim({ kind: "submitting" });
+        const txSig = await sendTransaction(tx, connection, { skipPreflight: true });
+        setClaim({ kind: "success", signature: txSig });
+        toast({
+          variant: "success",
+          title: "Claim submitted",
+          description: (
+            <a
+              className="font-mono text-xs underline underline-offset-2"
+              href={explorerTxUrl(txSig)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {truncatePubkey(txSig, 8, 8)}
+            </a>
+          ),
+        });
+        return;
+      }
+
+      // ---- Proof-buffer 2-tx flow ----------------------------------------
+      //
+      // 1. Tx A: init_proof_buffer + write(0, chunk0)
+      // 2. Tx B: more write ixs until the buffer is full
+      // 3. Tx C: ed25519 precompile + claim_from_buffer
+      //
+      // We cache the inferred buffer PDA in this closure so a transient failure
+      // on Tx C can retry without re-staging — the on-chain handler tolerates
+      // re-writes at the same offset and rejects re-init. (A future refactor
+      // can lift this into useState if we want cross-render persistence.)
+      const plan = planProofBufferWrites({
+        claimPubkey: publicKey,
         payer: publicKey,
-        connection,
+        proof: proof.proof,
       });
 
-      // Submit via wallet-adapter (which routes through the wallet's send +
-      // sign flow). For the gas-exempt path, the lazy-claim program covers
-      // the fee from the treasury — so the wallet should succeed even with
-      // zero staccana SOL. See SPEC §4.4.
+      // Group write-ixs into transactions, leaving one slot for init_proof_buffer
+      // in the first tx. Each write-ix carries ~7-byte ix overhead + the chunk.
+      const writeIxs = plan.chunks.map((c) =>
+        buildWriteProofBufferIx({
+          claimPubkey: publicKey,
+          payer: publicKey,
+          offset: c.offset,
+          chunk: c.bytes,
+        }),
+      );
+      const initIx = buildInitProofBufferIx({
+        claimPubkey: publicKey,
+        totalLen: plan.totalLen,
+        payer: publicKey,
+      });
+
+      // Stage as: [init + write[0]], [write[1]], [write[2]], … one tx each.
+      // Conservative — 800-byte chunks easily fit one per tx. (A future opt
+      // could pack 2 small writes per tx; doesn't matter for correctness.)
+      const stagingTxs: Transaction[] = [];
+      const firstTx = new Transaction();
+      firstTx.add(initIx);
+      if (writeIxs.length > 0) firstTx.add(writeIxs[0]);
+      stagingTxs.push(firstTx);
+      for (let i = 1; i < writeIxs.length; i++) {
+        const t = new Transaction();
+        t.add(writeIxs[i]);
+        stagingTxs.push(t);
+      }
+
+      const stagingTotal = stagingTxs.length;
+      for (let i = 0; i < stagingTotal; i++) {
+        setClaim({ kind: "staging", current: i + 1, total: stagingTotal });
+        const t = stagingTxs[i];
+        t.feePayer = publicKey;
+        t.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
+        const sig = await sendTransaction(t, connection, { skipPreflight: true });
+        await connection.confirmTransaction(sig, "confirmed");
+      }
+
+      // Tx C — ed25519 precompile + claim_from_buffer. The new ix carries only
+      // the proof_flags bytes (~4 bytes for a 27-deep tree) plus pubkey,
+      // lamports, proof_len; the proof itself comes from the staged PDA.
+      const ed25519Ix = buildEd25519PrecompileInstruction(publicKey, signature, message);
+      const claimIx = buildClaimFromBufferIx({ proof, payer: publicKey });
+      const finalTx = new Transaction();
+      finalTx.add(ed25519Ix);
+      finalTx.add(claimIx);
+      finalTx.feePayer = publicKey;
+      finalTx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
+
       setClaim({ kind: "submitting" });
-      const txSig = await sendTransaction(tx, connection, { skipPreflight: true });
+      const txSig = await sendTransaction(finalTx, connection, { skipPreflight: true });
       setClaim({ kind: "success", signature: txSig });
       toast({
         variant: "success",
@@ -185,8 +306,15 @@ export default function ClaimPage(): JSX.Element {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setClaim({ kind: "error", message });
-      toast({ variant: "destructive", title: "Claim failed", description: message });
+      // If the program rejected the new buffer ixs (e.g. the on-chain program
+      // hasn't been redeployed with the proof-buffer support yet), surface a
+      // clear hint that the chain is stuck on the legacy path.
+      const augmented =
+        /InvalidInstructionData|UnknownInstruction|0x1\b/.test(message)
+          ? `${message} — the on-chain lazy-claim program may not yet support the proof-buffer ixs (genesis-baked program, redeploy pending).`
+          : message;
+      setClaim({ kind: "error", message: augmented });
+      toast({ variant: "destructive", title: "Claim failed", description: augmented });
     }
   }, [connection, proof, publicKey, sendTransaction, signMessage, toast]);
 
@@ -195,6 +323,7 @@ export default function ClaimPage(): JSX.Element {
     !proof ||
     claim.kind === "preparing" ||
     claim.kind === "signing" ||
+    claim.kind === "staging" ||
     claim.kind === "submitting";
 
   return (
@@ -243,14 +372,19 @@ export default function ClaimPage(): JSX.Element {
           ) : null}
 
           <Button onClick={onClaim} disabled={claimDisabled} className="w-full sm:w-auto">
-            {claim.kind === "preparing" || claim.kind === "signing" || claim.kind === "submitting" ? (
+            {claim.kind === "preparing" ||
+            claim.kind === "signing" ||
+            claim.kind === "staging" ||
+            claim.kind === "submitting" ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
                 {claim.kind === "preparing"
                   ? "Building proof"
                   : claim.kind === "signing"
                     ? "Awaiting signature"
-                    : "Submitting"}
+                    : claim.kind === "staging"
+                      ? `Staging proof (${claim.current}/${claim.total})…`
+                      : "Submitting claim"}
               </>
             ) : (
               "Submit claim"

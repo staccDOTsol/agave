@@ -112,96 +112,107 @@ export function WalletHelp(): JSX.Element {
       ) : null}
 
       {open ? (
+        // The OUTER backdrop is the scrolling element — that way we don't
+        // have to fight a nested-flex sizing dance just to make the body
+        // expand. The dialog itself is a plain block element that can be
+        // taller than the viewport; the backdrop scrolls past it. Sticky
+        // title bar inside keeps the header pinned while the user reads.
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-background/80 backdrop-blur"
+          className="fixed inset-0 z-40 overflow-y-auto bg-background/80 px-4 py-6 backdrop-blur sm:py-12"
           onClick={() => setOpen(false)}
           role="presentation"
         >
           <div
-            className="relative w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-xl"
+            className="relative mx-auto w-full max-w-md rounded-xl border border-border bg-card shadow-xl"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-labelledby="wallet-help-title"
           >
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
-              aria-label="Close"
-            >
-              <X className="h-4 w-4" />
-            </button>
-
-            <h2 id="wallet-help-title" className="mb-4 text-lg font-semibold">
-              Connect your wallet to staccana
-            </h2>
-
-            <p className="mb-3 text-sm text-muted-foreground">
-              Wallets simulate transactions against their default RPC. If yours points at
-              Solana mainnet, your buy/claim/bridge calls will preflight-reject because
-              the staccana programs don't exist there. Add staccana as a custom cluster:
-            </p>
-
-            <div className="mb-4 space-y-3 text-sm">
-              <Section title="Backpack (recommended)">
-                <ol className="ml-5 list-decimal space-y-0.5 text-muted-foreground">
-                  <li>Open Backpack → click your profile (top left)</li>
-                  <li>
-                    Settings → <span className="text-foreground">Solana</span> → RPC
-                    Connection
-                  </li>
-                  <li>
-                    Choose <span className="text-foreground">Custom</span> and paste the URL below
-                  </li>
-                </ol>
-              </Section>
-
-              <Section title="Phantom">
-                <ol className="ml-5 list-decimal space-y-0.5 text-muted-foreground">
-                  <li>Settings → Developer Settings → Testnet Mode (on)</li>
-                  <li>Change Network → Add Custom RPC</li>
-                  <li>Paste the URL below</li>
-                </ol>
-              </Section>
-
-              <Section title="Solflare">
-                <ol className="ml-5 list-decimal space-y-0.5 text-muted-foreground">
-                  <li>Settings → Network → Add custom node</li>
-                  <li>Paste the URL below</li>
-                </ol>
-              </Section>
+            {/* Sticky header — pins to the top of the dialog while the
+                backdrop scrolls past. `top-0` works because the dialog itself
+                is the scroll-anchored element within the backdrop. */}
+            <div className="sticky top-0 z-10 flex items-start justify-between rounded-t-xl border-b border-border/60 bg-card px-6 py-4">
+              <h2 id="wallet-help-title" className="text-lg font-semibold">
+                Connect your wallet to staccana
+              </h2>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="-mr-2 -mt-1 inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
 
-            <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
-              <div className="mb-1 text-xs uppercase tracking-wider text-muted-foreground">
-                Staccana RPC URL
-              </div>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 truncate font-mono text-sm text-foreground">{STACCANA_RPC}</code>
-                <button
-                  type="button"
-                  onClick={onCopy}
-                  className="inline-flex h-8 items-center gap-1 rounded-md border border-border bg-secondary/40 px-2 text-xs hover:bg-secondary/70"
-                >
-                  {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                  {copied ? "Copied" : "Copy"}
-                </button>
-              </div>
-            </div>
+            <div className="px-6 py-4">
+              <p className="mb-3 text-sm text-muted-foreground">
+                Wallets simulate transactions against their default RPC. If yours points at
+                Solana mainnet, your buy/claim/bridge calls will preflight-reject because
+                the staccana programs don't exist there. Add staccana as a custom cluster:
+              </p>
 
-            <p className="mt-4 text-xs text-amber-300">
-              <strong>This step is required.</strong> Wallets always run their own
-              preflight simulation against their configured RPC before showing the
-              approve dialog — there's no way for this site to skip that. If your
-              wallet doesn't know about staccana, every buy/claim/bridge call will
-              show "Transaction simulation failed" with empty logs.
-            </p>
-            <p className="mt-2 text-[11px] text-muted-foreground">
-              Backup URL (Vercel-hosted shim){" "}
-              <code className="rounded bg-secondary/40 px-1 font-mono">{STACCANA_RPC_FALLBACK}</code>{" "}
-              works identically — use it if for any reason rpc.mp.fun isn't reachable
-              from your wallet (DNS issues, captive portal, etc).
-            </p>
+              <div className="mb-4 space-y-3 text-sm">
+                <Section title="Backpack (recommended)">
+                  <ol className="ml-5 list-decimal space-y-0.5 text-muted-foreground">
+                    <li>Open Backpack → click your profile (top left)</li>
+                    <li>
+                      Settings → <span className="text-foreground">Solana</span> → RPC
+                      Connection
+                    </li>
+                    <li>
+                      Choose <span className="text-foreground">Custom</span> and paste the URL below
+                    </li>
+                  </ol>
+                </Section>
+
+                <Section title="Phantom">
+                  <ol className="ml-5 list-decimal space-y-0.5 text-muted-foreground">
+                    <li>Settings → Developer Settings → Testnet Mode (on)</li>
+                    <li>Change Network → Add Custom RPC</li>
+                    <li>Paste the URL below</li>
+                  </ol>
+                </Section>
+
+                <Section title="Solflare">
+                  <ol className="ml-5 list-decimal space-y-0.5 text-muted-foreground">
+                    <li>Settings → Network → Add custom node</li>
+                    <li>Paste the URL below</li>
+                  </ol>
+                </Section>
+              </div>
+
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+                <div className="mb-1 text-xs uppercase tracking-wider text-muted-foreground">
+                  Staccana RPC URL
+                </div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 truncate font-mono text-sm text-foreground">{STACCANA_RPC}</code>
+                  <button
+                    type="button"
+                    onClick={onCopy}
+                    className="inline-flex h-8 items-center gap-1 rounded-md border border-border bg-secondary/40 px-2 text-xs hover:bg-secondary/70"
+                  >
+                    {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+
+              <p className="mt-4 text-xs text-amber-300">
+                <strong>This step is required.</strong> Wallets always run their own
+                preflight simulation against their configured RPC before showing the
+                approve dialog — there's no way for this site to skip that. If your
+                wallet doesn't know about staccana, every buy/claim/bridge call will
+                show "Transaction simulation failed" with empty logs.
+              </p>
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                Backup URL (Vercel-hosted shim){" "}
+                <code className="rounded bg-secondary/40 px-1 font-mono">{STACCANA_RPC_FALLBACK}</code>{" "}
+                works identically — use it if for any reason rpc.mp.fun isn't reachable
+                from your wallet (DNS issues, captive portal, etc).
+              </p>
+            </div>
           </div>
         </div>
       ) : null}

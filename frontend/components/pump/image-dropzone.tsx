@@ -1,13 +1,17 @@
 "use client";
 
 /**
- * Drag-and-drop image upload that converts the file to a `data:` URI.
+ * Drag-and-drop image upload.
  *
- * The on-chain `uri` field is capped at 200 bytes, so we DO NOT inline the
- * full image — instead we hand the data URI back to the parent (typically
- * stored in component state) so the parent can decide whether to embed a
- * pointer URL, host on IPFS, etc. For tonight's MVP we just preview the
- * image and ask the caller to keep the URI off-chain or use a hosted URL.
+ * Hands two things back to the caller per pick:
+ *   - `onChange(dataUri, mime)` — a `data:` URI suitable for in-browser preview.
+ *   - `onPickFile(file)` — the raw `File` so the caller can stream the image
+ *     up to off-chain storage (e.g. Vercel Blob) and embed the resulting URL
+ *     in token metadata.
+ *
+ * The on-chain Token-22 mint stores the image as a URL inside its
+ * TokenMetadata extension's `uri` field (which points at a JSON document with
+ * an `image` URL inside it). Inline data: URIs are not used on-chain.
  */
 
 import { ImagePlus, X } from "lucide-react";
@@ -18,6 +22,8 @@ import { cn } from "@/lib/utils";
 export interface ImageDropzoneProps {
   /** Called whenever the user picks (or clears) an image. */
   onChange: (dataUri: string | null, mime: string | null) => void;
+  /** Called with the raw File (or null on clear) for off-chain upload. */
+  onPickFile?: (file: File | null) => void;
   /** Optional initial preview. */
   initialPreview?: string | null;
   /** Max file size in bytes — files larger are rejected. Default 256KB. */
@@ -26,6 +32,7 @@ export interface ImageDropzoneProps {
 
 export function ImageDropzone({
   onChange,
+  onPickFile,
   initialPreview = null,
   maxBytes = 256 * 1024,
 }: ImageDropzoneProps): JSX.Element {
@@ -51,11 +58,12 @@ export function ImageDropzone({
         const result = reader.result as string;
         setPreview(result);
         onChange(result, file.type);
+        onPickFile?.(file);
       };
       reader.onerror = () => setError("Failed to read file");
       reader.readAsDataURL(file);
     },
-    [maxBytes, onChange],
+    [maxBytes, onChange, onPickFile],
   );
 
   return (
@@ -93,6 +101,7 @@ export function ImageDropzone({
                 e.stopPropagation();
                 setPreview(null);
                 onChange(null, null);
+                onPickFile?.(null);
                 if (inputRef.current) inputRef.current.value = "";
               }}
               className="absolute right-2 top-2 rounded-full bg-background/90 p-1 text-muted-foreground hover:text-foreground"

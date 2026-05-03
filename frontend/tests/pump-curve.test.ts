@@ -266,7 +266,7 @@ describe("pump: PDA + ATA derivations", () => {
 
   it("uses the live secret-pump program id", () => {
     expect(SECRET_PUMP_PROGRAM_ID.toBase58()).toBe(
-      "3Pbv3bHBh7SvcMDZqBFjJ3T9jLdrpiednaTRdViitMWF",
+      "7LVzPiRVdcgZUpwwgUxx1wJrNKqYWts6WRKPqgbb94We",
     );
   });
 

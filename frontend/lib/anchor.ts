@@ -71,6 +71,23 @@ export const MEGADROP_CONFIG_DISCRIMINATOR = new Uint8Array([
   0x03, 0xee, 0xb6, 0x3a, 0x0e, 0xb0, 0x57, 0x15,
 ]);
 
+// Megadrop proof-buffer 2-tx flow.
+//
+// `sha256("global:init_megadrop_proof_buffer")[0..8]`.
+export const MEGADROP_INIT_PROOF_BUFFER_DISCRIMINATOR = new Uint8Array([
+  0x23, 0xe0, 0xc0, 0x10, 0xce, 0x9f, 0x9f, 0xa9,
+]);
+
+// `sha256("global:write_megadrop_proof_buffer")[0..8]`.
+export const MEGADROP_WRITE_PROOF_BUFFER_DISCRIMINATOR = new Uint8Array([
+  0xc2, 0x5d, 0x08, 0x3c, 0x1d, 0x29, 0xb9, 0x17,
+]);
+
+// `sha256("global:claim_megadrop_from_buffer")[0..8]`.
+export const MEGADROP_CLAIM_FROM_BUFFER_DISCRIMINATOR = new Uint8Array([
+  0x66, 0x85, 0xe7, 0xbc, 0xa0, 0x7c, 0x58, 0x5d,
+]);
+
 /** Encode a u32 as 4 little-endian bytes. */
 export function u32LeBytes(n: number): Uint8Array {
   if (n < 0 || n > 0xffff_ffff) {

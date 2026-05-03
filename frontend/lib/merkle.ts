@@ -243,3 +243,44 @@ export function bitIsSet(bytes: Uint8Array, i: number): boolean {
 export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+/** Hex-decode a string into a Uint8Array. Throws on odd length / non-hex chars. */
+export function fromHex(hex: string): Uint8Array {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0) {
+    throw new Error(`fromHex: odd-length input (${clean.length})`);
+  }
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    const byte = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+    if (Number.isNaN(byte)) {
+      throw new Error(`fromHex: non-hex byte at index ${i}`);
+    }
+    out[i] = byte;
+  }
+  return out;
+}
+
+/**
+ * Derive `proofFlags` from a leaf index. At level i, the sibling is on the
+ * right iff the current index is even — so flag bit i = `(idx >> i) & 1 === 0`.
+ *
+ * Mirrors the index-walking logic inside `buildInclusionProof`, but works
+ * without access to the leaf set: we only need the leaf index + the proof
+ * length (= number of levels above the leaf).
+ *
+ * Use this when an edge fn returns the proof siblings + leafIndex but omits
+ * the packed bitmap (the bitmap is purely a function of leafIndex).
+ */
+export function deriveProofFlagsFromLeafIndex(
+  leafIndex: number,
+  proofLen: number,
+): Uint8Array {
+  const bits: boolean[] = [];
+  let idx = leafIndex;
+  for (let i = 0; i < proofLen; i++) {
+    bits.push(idx % 2 === 0);
+    idx = Math.floor(idx / 2);
+  }
+  return packBits(bits);
+}
