@@ -170,7 +170,7 @@ mod tests {
     fn cte_feature_gates_present_with_count_four() {
         let out = synthetic_output(0, 0, 0);
         let composed = compose(&out);
-        assert_eq!(composed.active_feature_gates.len(), 4);
+        assert_eq!(composed.active_feature_gates.len(), CTE_FEATURE_GATES_AT_GENESIS.len());
         // First gate from §2.4 of the spec.
         assert_eq!(
             composed.active_feature_gates[0].pubkey_b58,
@@ -208,6 +208,6 @@ mod tests {
         assert_eq!(composed.treasury_account_count, 2);
         assert_eq!(composed.lazy_claim_account.claimable_root, out.claimable_root.0.to_bytes());
         assert!(composed.inflation_disabled);
-        assert_eq!(composed.active_feature_gates.len(), 4);
+        assert_eq!(composed.active_feature_gates.len(), CTE_FEATURE_GATES_AT_GENESIS.len());
     }
 }
