@@ -89,10 +89,10 @@ const fn label_bytes(label: &str) -> [u8; 32] {
     out
 }
 
-/// Hard-coded asset config table. Lookup is `O(n)` but n=3.
+/// Hard-coded asset config table. Lookup is `O(n)` but n=4.
 pub fn asset_configs() -> &'static [BridgeAssetConfig] {
     // SAFETY: uses const fns and `'static` strs — table is built at compile-time.
-    static TABLE: [BridgeAssetConfig; 3] = [
+    static TABLE: [BridgeAssetConfig; 4] = [
         BridgeAssetConfig {
             label: "stSOL",
             asset_id: 0,
@@ -119,6 +119,20 @@ pub fn asset_configs() -> &'static [BridgeAssetConfig] {
             mint_fee_bps: 10,
             burn_fee_bps: 10,
             flags: ASSET_FLAG_R_LOCKED, // R pinned at 1.0 forever.
+        },
+        BridgeAssetConfig {
+            // `Staccana` (id=3) — culture asset for the v9 launch. Mainnet
+            // mint `73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump` (Token-22
+            // SPL, decimals=6, name="Solana Fork Staccana"). R-locked at 1.0
+            // because it's a 1:1 mirror — we don't run an AMM that drifts
+            // its own ratio.
+            label: "Staccana",
+            asset_id: 3,
+            underlying_label: label_bytes("Staccana"),
+            decimals: 6,
+            mint_fee_bps: 10,
+            burn_fee_bps: 10,
+            flags: ASSET_FLAG_R_LOCKED,
         },
     ];
     &TABLE

@@ -125,12 +125,15 @@ const DEFAULT_FEE_BPS = 10;
  * cluster strings — flip back to functional automatically once the env vars
  * point at mainnet.
  */
-const BRIDGE_IS_DEVNET =
-  MAINNET_RPC_URL.includes("devnet") ||
-  MAINNET_EXPLORER_CLUSTER.includes("devnet");
-const BRIDGE_DISABLED_TITLE = BRIDGE_IS_DEVNET
-  ? "Disabled: bridge-vault is on Solana devnet for tonight's bring-up. Switching to mainnet flips this back on automatically."
-  : "";
+// Bridge is intentionally "devnet-flavored" (staccana side is its own
+// private cluster; the mainnet side wires through a regular Solana
+// mainnet RPC for the Staccana token's underlying mint). The legacy
+// `BRIDGE_IS_DEVNET` flag used to gate the burn button off when
+// MAINNET_RPC_URL pointed at devnet — we no longer disable it. Users
+// can play with the Staccana culture token end-to-end. The big
+// disclaimer banner on the page tells them what they're getting into.
+const BRIDGE_IS_DEVNET = false;
+const BRIDGE_DISABLED_TITLE = "";
 
 export default function BridgePage(): JSX.Element {
   const { publicKey, sendTransaction, connected } = useWallet();
@@ -397,6 +400,42 @@ export default function BridgePage(): JSX.Element {
         tagline="The Staccana token (mainnet mint 73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump) is the only asset on this bridge. Deposit on mainnet, mint a confidential mirror on staccana (Token-22 + CT extension active by default), burn to redeem. For the culture."
       />
       <div className="container space-y-8 py-8">
+
+      {/* Big disclaimer — this is staccana DEVNET hooked up to a community
+          pump.fun token on Solana mainnet. Not an endorsement of the
+          token, the dev, or any future price action. Just a culture move
+          because the dev's art slaps. Users should understand they're
+          playing with: (1) a private staccana fork, NOT real Solana
+          mainnet; (2) a community-issued meme token whose underlying
+          economics are entirely outside our control. */}
+      <div
+        role="alert"
+        className="rounded-lg border border-amber-500/50 bg-amber-500/10 p-5 text-amber-100"
+      >
+        <p className="text-base font-semibold">
+          ⚠️ Heads up — this is staccana <span className="font-mono">DEVNET</span>
+        </p>
+        <p className="mt-2 text-sm text-amber-100/90">
+          You can play with your <span className="font-mono">$Staccana</span>{" "}
+          community-token here. The mainnet underlying is{" "}
+          <a
+            href="https://solscan.io/token/73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump"
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono underline underline-offset-2"
+          >
+            73edX6xoGY4v…au1Ki1pump
+          </a>{" "}
+          on Solana mainnet, a community-launched pump.fun token.{" "}
+          <strong className="text-amber-50">
+            This is NOT an endorsement of the token or its dev.
+          </strong>{" "}
+          We just like the dev and the art. Bridge value at your own risk —
+          the mainnet token&apos;s economics, supply, and authorities are
+          entirely outside our control. The staccana side is a private
+          fork; balances here have no value outside the staccana cluster.
+        </p>
+      </div>
 
       {BRIDGE_IS_DEVNET ? (
         <div
