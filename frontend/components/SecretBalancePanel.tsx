@@ -626,6 +626,17 @@ function SendPanelInner({
 
       let usedConfidential = false;
       let pathTaken: "direct" | "transit" | "public" = "public";
+
+      // Snapshot the ix count before any path tries to push its own ixs.
+      // Each path appends to `tx.instructions` directly via `tx.add(ix)`;
+      // if a path partially populates the array then throws, the next
+      // path's append-only flow accumulates broken ixs. Truncate back to
+      // this point before falling through to the next path.
+      const pristineIxCount = tx.instructions.length;
+      const resetTxToPristine = () => {
+        tx.instructions = tx.instructions.slice(0, pristineIxCount);
+      };
+
       if (confidential) {
         try {
           const senderKeys = await deriveElGamalKeypair(
@@ -664,13 +675,19 @@ function SendPanelInner({
           usedConfidential = true;
           pathTaken = "direct";
         } catch (err) {
-          if (!(err instanceof ProofUnavailableError)) {
-            throw err;
-          }
+          // Any failure in the confidential build chain (proof endpoint
+          // unavailable, wasm input mismatch, web3.js Buffer-bounds error
+          // from a malformed ix data, etc.) → fall back to the transit
+          // hack first, then public TransferChecked. We deliberately catch
+          // EVERY error here, not just ProofUnavailableError — the user's
+          // last priority is "amount is visible on chain", not "show me a
+          // dev-tools stack trace". Real errors still surface in the
+          // browser console for debugging.
+          resetTxToPristine();
           // eslint-disable-next-line no-console
           console.warn(
-            "[send] direct CT path unavailable, trying transit-account hack",
-            err.code,
+            "[send] direct CT path failed, trying transit-account hack",
+            err instanceof Error ? `${err.name}: ${err.message}` : String(err),
           );
         }
       }
@@ -750,9 +767,14 @@ function SendPanelInner({
           onAfterSend?.();
           return;
         } catch (err) {
-          // Transit also failed — fall through to public TransferChecked.
+          // Transit also failed — wipe its partial ixs and fall through
+          // to public TransferChecked.
+          resetTxToPristine();
           // eslint-disable-next-line no-console
-          console.warn("[send] transit-account path failed, falling back", err);
+          console.warn(
+            "[send] transit-account path failed, falling back",
+            err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          );
         }
       }
 
