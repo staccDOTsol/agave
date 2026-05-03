@@ -53,13 +53,35 @@ pub struct AssetConfig {
 
     /// PDA bump cached so we don't re-derive on every instruction.
     pub bump: u8,
+
+    /// Bit-flags controlling per-asset behaviour. See [`AssetFlag`].
+    ///
+    /// Bit 0 (`AssetFlag::R_LOCKED`): R is hard-pinned at 1.0 and cannot be moved by
+    /// `update_ratio`. Used by the wSOL asset (1:1 mainnet SOL backing, no yield).
+    /// See `docs/BRIDGE.md` §"Native SOL ↔ mainnet SOL via the bridge".
+    pub flags: u8,
+}
+
+/// Bit positions for [`AssetConfig::flags`].
+pub struct AssetFlag;
+
+impl AssetFlag {
+    /// R is fixed forever at 1.0 (Q64.64 == `1u128 << 64`). Any `update_ratio`
+    /// attestation against this asset is rejected with [`crate::error::BridgeError::RatioLocked`].
+    pub const R_LOCKED: u8 = 0b0000_0001;
 }
 
 impl AssetConfig {
     /// Anchor discriminator (8) + asset_id (4) + label (32) + mainnet_vault (32)
     /// + staccana_mint (32) + decimals (1) + mint_fee_bps (2) + burn_fee_bps (2)
-    /// + bump (1).
-    pub const SPACE: usize = 8 + 4 + 32 + 32 + 32 + 1 + 2 + 2 + 1;
+    /// + bump (1) + flags (1).
+    pub const SPACE: usize = 8 + 4 + 32 + 32 + 32 + 1 + 2 + 2 + 1 + 1;
+
+    /// Returns true if R for this asset is hard-pinned at 1.0 and cannot be updated.
+    /// Used by the wSOL asset.
+    pub fn is_r_locked(&self) -> bool {
+        self.flags & AssetFlag::R_LOCKED != 0
+    }
 }
 
 /// Accruing ratio R published per-asset by the federation. Mints divide by `r_q64`,
@@ -157,4 +179,29 @@ pub struct NonceOutCounter {
 impl NonceOutCounter {
     /// Anchor discriminator (8) + asset_id (4) + next_nonce (8) + bump (1).
     pub const SPACE: usize = 8 + 4 + 8 + 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn r_locked_flag_round_trips_through_asset_config() {
+        // wSOL is registered with R_LOCKED set; the helper must report true.
+        let mut cfg = AssetConfig::default();
+        cfg.flags = AssetFlag::R_LOCKED;
+        assert!(cfg.is_r_locked());
+
+        // stSOL / ssUSDC have flags == 0; helper reports false.
+        let unlocked = AssetConfig::default();
+        assert!(!unlocked.is_r_locked());
+    }
+
+    #[test]
+    fn r_locked_flag_does_not_collide_with_future_flags() {
+        // A future flag at bit 1 should not accidentally match `is_r_locked`.
+        let mut cfg = AssetConfig::default();
+        cfg.flags = 0b1111_1110; // every bit EXCEPT R_LOCKED
+        assert!(!cfg.is_r_locked());
+    }
 }

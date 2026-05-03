@@ -14,11 +14,15 @@
 //!   to relay back to the mainnet vault.
 
 pub mod burn;
+pub mod convert_native_to_wsol;
+pub mod convert_wsol_to_native;
 pub mod mint;
 pub mod register_asset;
 pub mod update_ratio;
 
 pub use burn::*;
+pub use convert_native_to_wsol::*;
+pub use convert_wsol_to_native::*;
 pub use mint::*;
 pub use register_asset::*;
 pub use update_ratio::*;

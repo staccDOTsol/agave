@@ -80,4 +80,19 @@ pub enum BridgeError {
 
     #[msg("M-of-N parameters out of range (M == 0 or N > MAX_FEDERATION_MEMBERS)")]
     BadFederationParams = 22,
+
+    #[msg("R is hard-pinned for this asset (e.g. wSOL); update_ratio is not permitted")]
+    RatioLocked = 23,
+
+    #[msg("AMM oracle pool reserves are zero — cannot quote a price")]
+    AmmEmptyReserves = 24,
+
+    #[msg("AMM-quoted output amount overflowed u64")]
+    AmmQuoteOverflow = 25,
+
+    #[msg("AMM-quoted output is below the user-supplied minimum (slippage exceeded)")]
+    AmmSlippageExceeded = 26,
+
+    #[msg("native SOL transfer to bridge escrow failed")]
+    NativeSolTransferFailed = 27,
 }

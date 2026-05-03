@@ -17,16 +17,74 @@ export const LEAF_DOMAIN = 0x00;
 export const NODE_DOMAIN = 0x01;
 
 /**
- * Lazy-claim program ID.
- *
- * TODO(prod): replace with the real on-chain program ID once assigned at genesis.
- * Mirrors `tools/claim-cli/src/tx.rs::LAZY_CLAIM_PROGRAM_ID` — the ASCII string
- * `LAZY_CLAIM_PROGRAM_PLACEHOLDER11` packed into a 32-byte pubkey so it is
- * recognizable in transaction logs while still being a valid PublicKey.
+ * Lazy-claim program ID. Live on staccana devnet (deployed 2026-05-02).
  */
 export const LAZY_CLAIM_PROGRAM_ID = new PublicKey(
-  new TextEncoder().encode("LAZY_CLAIM_PROGRAM_PLACEHOLDER11"),
+  "BK95n7mFdF7Wk5T8oiSFLtmULprQe6bRcpgLMQGC3oeK",
 );
+
+/**
+ * Bridge program ID. Live on staccana devnet (deployed 2026-05-02).
+ */
+export const BRIDGE_PROGRAM_ID = new PublicKey("LA7h3hjvD62MeTtdeE4h2vq3EGxbU1oqzHtewp4xb9b");
+
+/**
+ * Secret-pump program ID. Live on staccana devnet (deployed 2026-05-02).
+ */
+export const SECRET_PUMP_PROGRAM_ID = new PublicKey(
+  "3Pbv3bHBh7SvcMDZqBFjJ3T9jLdrpiednaTRdViitMWF",
+);
+
+/**
+ * Megadrop program ID. Live on staccana devnet (deployed 2026-05-02).
+ */
+export const MEGADROP_PROGRAM_ID = new PublicKey(
+  "Aicff1zk6b5ifYzFoyhenUD5ehhFYb8GiDbRCrWt9t34",
+);
+
+/**
+ * Validator-subsidy program ID. Live on staccana devnet (deployed 2026-05-02).
+ *
+ * Disburses SOL from the treasury PDA (485M SOL pre-credited at genesis) to
+ * registered validators based on `uptime_bps × delegated_stake × votes_cast`
+ * weight per epoch. See `programs/validator-subsidy/`.
+ */
+export const VALIDATOR_SUBSIDY_PROGRAM_ID = new PublicKey(
+  "Ef9YyzrsFx7sptmu8v3M6ju82krceHXhq6jfivw6BBgk",
+);
+
+/**
+ * Placeholder treasury pubkey for secret-pump curve fees. Mirrors
+ * `programs/secret-pump/src/lib.rs::TREASURY_PUBKEY_PLACEHOLDER` — the ASCII
+ * string `staccana_treasury_placeholder___` packed as a 32-byte pubkey. The
+ * on-chain `buy` / `sell` ix verify the treasury account against this constant,
+ * so the same bytes must round-trip through TS.
+ *
+ * TODO(prod): swap to the real treasury PDA once SPEC §2.1 fills it in.
+ */
+export const SECRET_PUMP_TREASURY = new PublicKey(
+  new TextEncoder().encode("staccana_treasury_placeholder___"),
+);
+
+/** SPL Token-2022 program ID. The `pump` and `bridge` mints are Token-22. */
+export const TOKEN_2022_PROGRAM_ID = new PublicKey(
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+);
+
+/**
+ * SPL Associated Token Account program ID. Used to derive a wallet's ATA for
+ * a given Token-2022 mint and to construct an idempotent
+ * `create-ATA-if-missing` ix on the secret-pump buy path.
+ */
+export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+);
+
+/** Default megadrop allocations URL. Override via NEXT_PUBLIC_MEGADROP_URL. */
+const DEFAULT_MEGADROP_URL = "https://snapshot.mp.fun/megadrop/allocations.json";
+
+/** Resolved megadrop allocations URL. */
+export const MEGADROP_URL = process.env.NEXT_PUBLIC_MEGADROP_URL ?? DEFAULT_MEGADROP_URL;
 
 /**
  * System program ID. Used by the partition rule (claimable iff system-owned + zero data)

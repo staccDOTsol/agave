@@ -377,4 +377,38 @@ mod tests {
         let all: Vec<u8> = (0u8..32).collect();
         check_unique_indices(&all, 32).unwrap();
     }
+
+    // -- wSOL (R-locked at 1.0) sanity ----------------------------------------
+
+    /// wSOL is the 1:1 mainnet-SOL-backed asset (`docs/BRIDGE.md` §"Native SOL ↔
+    /// mainnet SOL"). R is hard-pinned at 1.0 forever via [`crate::state::AssetFlag::R_LOCKED`].
+    /// These tests document the math at that fixed R.
+    const WSOL_R_Q64: u128 = 1u128 << 64;
+
+    #[test]
+    fn wsol_mint_is_lamport_for_lamport() {
+        // 1 lamport mainnet-SOL → 1 lamport wSOL, every time, for any input that fits
+        // in u64. R==1.0 means `mint_amount = value`.
+        for &v in &[1u64, 1_000, 1_000_000_000, u64::MAX / 2] {
+            assert_eq!(mint_amount_for_value(v, WSOL_R_Q64).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn wsol_burn_is_lamport_for_lamport() {
+        // wSOL burn at R=1.0: release == amount, no truncation possible.
+        for &a in &[1u64, 1_000, 1_000_000_000, u64::MAX / 2] {
+            assert_eq!(release_amount_for_burn(a, WSOL_R_Q64).unwrap(), a);
+        }
+    }
+
+    #[test]
+    fn wsol_round_trip_is_exact_at_zero_fee() {
+        // No drift on mint→burn at R=1.0 with no fees applied. Distinguishes the wSOL
+        // path from the stSOL path which can drift 1 lamport at non-power-of-2 R.
+        let value = 999_999_999;
+        let minted = mint_amount_for_value(value, WSOL_R_Q64).unwrap();
+        let released = release_amount_for_burn(minted, WSOL_R_Q64).unwrap();
+        assert_eq!(value, released, "wSOL must round-trip exactly at R=1.0");
+    }
 }

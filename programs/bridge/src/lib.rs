@@ -16,12 +16,37 @@
 //! Instructions:
 //!
 //! 1. `register_asset` — governance one-shot per asset; bootstraps the federation set
-//!    on first call.
+//!    on first call. Per-asset `flags` opt into special behaviour (e.g. R-locking for
+//!    wSOL).
 //! 2. `update_ratio` — federation publishes a fresh R, gated by an interval and an
-//!    M-of-N signature check.
+//!    M-of-N signature check. Rejected for R-locked assets.
 //! 3. `mint` — relay an inbound deposit attestation; mint Token-22 to the recipient.
 //! 4. `burn` — user redeems wrapper tokens; emits a `Burn` event for the federation
 //!    to relay back to the mainnet vault.
+//! 5. `convert_native_to_wsol` — swap native staccana SOL → wSOL via the on-chain
+//!    secret-ray AMM as price oracle. Used by holders exiting native SOL → mainnet
+//!    SOL (this ix produces wSOL; the standard `burn` then redeems for mainnet SOL).
+//! 6. `convert_wsol_to_native` — mirror: swap wSOL → native staccana SOL via the AMM.
+//!    Used by mainnet-SOL inbound flows (`mint` produces wSOL; this ix produces
+//!    native SOL).
+//!
+//! ## wSOL and the native SOL ↔ mainnet SOL flow
+//!
+//! Per `docs/BRIDGE.md` §"Native SOL ↔ mainnet SOL via the bridge (uncorrelated,
+//! AMM-quoted)", the bridge supports a third asset class **wSOL** that is 1:1 mainnet
+//! SOL backed with no yield component (R hard-pinned at 1.0 forever via the
+//! [`state::AssetFlag::R_LOCKED`] flag). wSOL exists so the secret-ray pool
+//! `wSOL ↔ native-SOL` can act as the price oracle for native staccana SOL.
+//!
+//! **This is not a peg.** Native staccana SOL is intentionally a non-correlated
+//! asset; the bridge always quotes at the current AMM rate. Round-trips close at AMM
+//! slippage + 2× bridge fees, identical to a direct AMM trade. There is no fixed
+//! rate to defend, no UST/LUNA-style death spiral surface — if the chain is "worthless",
+//! the AMM rate reflects that and the bridge honors it.
+//!
+//! Genesis-baked native SOL (485M treasury, lazy-claim airdrops, validator stakes)
+//! is **not** directly redeemable. Only newly-locked mainnet SOL backs wSOL; native
+//! SOL prices itself via AMM trades against wSOL.
 //!
 //! Token-22 specifics: the staccana mint for each asset has the Confidential Transfer
 //! extension active (set up out-of-band before `register_asset`). Mint authority MUST
@@ -29,6 +54,7 @@
 
 use anchor_lang::prelude::*;
 
+pub mod amm_oracle;
 pub mod attestation;
 pub mod ed25519;
 pub mod error;
@@ -80,5 +106,25 @@ pub mod staccana_bridge {
     /// `BurnEvent`. See [`instructions::burn`].
     pub fn burn(ctx: Context<BridgeBurn>, args: BurnArgs) -> Result<()> {
         instructions::burn::handler(ctx, args)
+    }
+
+    /// Convert native staccana SOL to wSOL using the on-chain secret-ray AMM as the
+    /// price oracle. Step 1 of the user-facing native-SOL → mainnet-SOL exit path.
+    /// See [`instructions::convert_native_to_wsol`].
+    pub fn convert_native_to_wsol(
+        ctx: Context<ConvertNativeToWsol>,
+        args: ConvertNativeToWsolArgs,
+    ) -> Result<()> {
+        instructions::convert_native_to_wsol::handler(ctx, args)
+    }
+
+    /// Convert wSOL to native staccana SOL using the on-chain secret-ray AMM. Step 2
+    /// of the mainnet-SOL → native-SOL inbound path. See
+    /// [`instructions::convert_wsol_to_native`].
+    pub fn convert_wsol_to_native(
+        ctx: Context<ConvertWsolToNative>,
+        args: ConvertWsolToNativeArgs,
+    ) -> Result<()> {
+        instructions::convert_wsol_to_native::handler(ctx, args)
     }
 }

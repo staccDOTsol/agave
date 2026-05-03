@@ -85,6 +85,14 @@ pub struct UpdateRatio<'info> {
 pub fn handler(ctx: Context<UpdateRatio>, args: UpdateRatioArgs) -> Result<()> {
     require_instructions_sysvar(&ctx.accounts.instructions_sysvar)?;
 
+    // R-locked assets (wSOL) reject ALL ratio updates — R is structurally pinned at 1.0.
+    // Verified BEFORE signature checks so no work is wasted on a structurally-invalid
+    // attestation. See `docs/BRIDGE.md` §"Native SOL ↔ mainnet SOL via the bridge".
+    require!(
+        !ctx.accounts.asset_config.is_r_locked(),
+        BridgeError::RatioLocked
+    );
+
     let fed = &ctx.accounts.federation_set;
     require!(fed.n > 0 && fed.m > 0, BridgeError::BadFederationSet);
     require!(

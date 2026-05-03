@@ -5,6 +5,7 @@ members = [
     "genesis",
     "programs/lazy-claim",
     "programs/bridge",
+    "programs/bridge-vault",
     "programs/secret-pump",
     "programs/validator-subsidy",
     "programs/megadrop",

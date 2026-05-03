@@ -24,6 +24,12 @@ export function SiteHeader(): JSX.Element {
             <Link href="/pump" className="hover:text-foreground">
               Pump
             </Link>
+            <Link href="/megadrop" className="hover:text-foreground">
+              Megadrop
+            </Link>
+            <Link href="/validators" className="hover:text-foreground">
+              Validators
+            </Link>
           </nav>
         </div>
         <WalletButton />

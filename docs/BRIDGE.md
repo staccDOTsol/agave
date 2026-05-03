@@ -43,6 +43,24 @@ The bridge solves this by being multi-asset from slot 0:
 
 **Distinct from staccana native SOL**: staccana has its own native SOL (raw-EOA balances claimed via lazy-claim, plus any treasury distribution). Native SOL is the gas/staking token of staccana. Bridge mints are tokens *on* staccana — fungible, tradable, but separate from native SOL. They will trade against each other; the market sets the price.
 
+### Native SOL ↔ mainnet SOL via the bridge (uncorrelated, AMM-quoted)
+
+The bridge ALSO supports a third asset, **wSOL**, that is 1:1 wrapped mainnet SOL with no yield component (R fixed at 1.0 forever). wSOL exists so the secret-ray pool `wSOL ↔ native-SOL` can act as the price oracle for native staccana SOL.
+
+The bridge does NOT peg native staccana SOL to mainnet SOL. It uses the on-chain AMM price as the conversion oracle:
+
+```
+mint  (mainnet → staccana):  deposit N mainnet-SOL → mint N × P native-SOL,
+                              where P = current AMM price `native-SOL per wSOL`
+burn  (staccana → mainnet):  burn Z native-SOL    → release Z / P mainnet-SOL
+```
+
+Native staccana SOL is intentionally a non-correlated asset. The market sets P. If the chain is "worthless" early, P is huge — depositing 1 mainnet-SOL mints a million native-SOL, fine, no peg pressure, it's just a cheap chain. As demand grows (megadrop tranches drying up, validator-subsidy productivity, secret-ray volume), P drifts down, and a mainnet-SOL deposit mints fewer native-SOL.
+
+There is no arbitrage target: the bridge always quotes at the *current* AMM rate, so a round-trip (deposit → mint → swap → burn → withdraw) closes at AMM slippage + 2× bridge fees, same as a pure AMM trade. Nobody can extract risk-free profit from rate disparity because there is no fixed rate being defended.
+
+The mainnet vault holds exactly what was deposited; it doesn't have to back the entire native-SOL supply. Genesis-baked native SOL (485M treasury, lazy-claim airdrops, validator stakes) is **not** directly redeemable — it inherits value only via the AMM's price discovery against wSOL/ssUSDC. If holders want mainnet SOL out, they must first acquire wSOL on the AMM (selling native-SOL into the wSOL pool), then burn the wSOL via the bridge.
+
 ## The ratio R (per asset)
 
 ```

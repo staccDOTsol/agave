@@ -39,6 +39,10 @@ pub struct RegisterAssetArgs {
     /// Federation pubkeys. Only the first `federation_n` slots are read. Ignored if
     /// `FederationSet` PDA already exists.
     pub federation_members: [Pubkey; MAX_FEDERATION_MEMBERS],
+
+    /// Per-asset behaviour flags. See [`crate::state::AssetFlag`]. For wSOL this MUST
+    /// have `AssetFlag::R_LOCKED` set so R is pinned at 1.0 forever.
+    pub flags: u8,
 }
 
 #[derive(Accounts)]
@@ -107,6 +111,7 @@ pub fn handler(ctx: Context<RegisterAsset>, args: RegisterAssetArgs) -> Result<(
     cfg.mint_fee_bps = args.mint_fee_bps;
     cfg.burn_fee_bps = args.burn_fee_bps;
     cfg.bump = ctx.bumps.asset_config;
+    cfg.flags = args.flags;
 
     // R starts at 1.0 (Q64.64) and is bumped on every `update_ratio`. Setting
     // `last_published_slot = 0` lets the first update land at any future slot.

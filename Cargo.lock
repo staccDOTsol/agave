@@ -9772,6 +9772,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "staccana-bridge-vault"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+ "solana-instructions-sysvar 3.0.0",
+ "solana-sdk-ids 3.1.0",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "staccana-claim-cli"
 version = "0.1.0"
 dependencies = [

@@ -21,3 +21,4 @@ dist/
 # Test artifacts
 coverage/
 .vitest-cache/
+.vercel
