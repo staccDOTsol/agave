@@ -114,6 +114,19 @@ pub const CTE_FEATURE_GATES_AT_GENESIS: &[(&str, &str)] = &[
         "EaQpmC6GtRssaZ3PCUM5YksGqUdMLeZ46BQXYtHYakDS",
         "enable poseidon syscall (sol_poseidon)",
     ),
+    // --- SBPF v3 deployment + execution ---
+    //
+    // cargo-build-sbf 3.1.14 (the toolchain we're stuck on, since 2.0.x can't
+    // compile blake3 1.6+ which our deps pull in) emits ELF headers with
+    // e_machine=0x107 for all --arch v0/v1/v2 outputs — that's actually
+    // SBPFv3 in agave's loader-v3 view (cargo's --arch label != runtime's
+    // version label). Without this gate active, the validator rejects every
+    // SBPFv3 .so at deploy time with "Incompatible ELF: wrong machine",
+    // which is what bricked our 5 staccana program redeploys post-rebake.
+    (
+        "BUwGLeF3Lxyfv1J1wY8biFHBB2hrk2QhbNftQf3VV3cC",
+        "SIMD-0178/0179/0189: Enable deployment and execution of SBPFv3 programs",
+    ),
 ];
 
 #[cfg(test)]
@@ -132,7 +145,7 @@ mod tests {
     #[test]
     fn cte_gate_count() {
         // 4 ZK gates + 5 Token-22 v8 syscall prerequisite gates.
-        assert_eq!(CTE_FEATURE_GATES_AT_GENESIS.len(), 9);
+        assert_eq!(CTE_FEATURE_GATES_AT_GENESIS.len(), 10);
     }
 
     #[test]
