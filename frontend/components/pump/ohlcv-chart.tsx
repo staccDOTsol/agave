@@ -80,7 +80,13 @@ export function OhlcvChart({
   const fetchCandles = useCallback(
     async (signal: AbortSignal): Promise<void> => {
       try {
-        const r = await fetch(`/api/launch/${mint}/ohlcv?bucket=${bucketSec}`, {
+        // limit=500 (NOT the API default 240) — bisected: `limit=240`
+        // deterministically returns `[]` even when limits 5..239 + 241..1000
+        // all return real candles from the same backend. Suspected Vercel
+        // edge cache poisoning on that exact URL that survived a switch to
+        // `cache-control: no-store`. 500 is plenty for any of our 1m/5m/1h
+        // bucket windows.
+        const r = await fetch(`/api/launch/${mint}/ohlcv?bucket=${bucketSec}&limit=500`, {
           signal,
           cache: "no-store",
         });
