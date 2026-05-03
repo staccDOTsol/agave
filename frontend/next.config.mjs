@@ -33,17 +33,19 @@ const nextConfig = {
   experimental: {
     serverComponentsExternalPackages: ["@staccoverflow/zk-proofs-wasm"],
     outputFileTracingIncludes: {
+      // `.npmrc` sets `node-linker=hoisted` so pnpm installs the wasm
+      // package as a real flat dir under node_modules/, no .pnpm symlink
+      // sandbox. The previous .pnpm/<pkg>@<ver>/... globs caused Vercel
+      // to reject the deployment with "files in symlinked directories"
+      // because the tracer was following pnpm's isolation symlinks. With
+      // hoisted layout the simple glob is enough.
       "/api/confidential/proof": [
         "./node_modules/@staccoverflow/zk-proofs-wasm/**/*.wasm",
         "../node_modules/@staccoverflow/zk-proofs-wasm/**/*.wasm",
-        "./node_modules/.pnpm/@staccoverflow+zk-proofs-wasm*/**/*.wasm",
-        "../node_modules/.pnpm/@staccoverflow+zk-proofs-wasm*/**/*.wasm",
       ],
       "app/api/confidential/proof/route": [
         "./node_modules/@staccoverflow/zk-proofs-wasm/**/*.wasm",
         "../node_modules/@staccoverflow/zk-proofs-wasm/**/*.wasm",
-        "./node_modules/.pnpm/@staccoverflow+zk-proofs-wasm*/**/*.wasm",
-        "../node_modules/.pnpm/@staccoverflow+zk-proofs-wasm*/**/*.wasm",
       ],
     },
   },
