@@ -83,7 +83,7 @@ struct Cli {
     vault_token_account: Option<String>,
 }
 
-fn load_federation(path: &std::path::Path) -> Result<(u8, u8, [[u8; 32]; MAX_FEDERATION_MEMBERS])> {
+fn load_federation(path: &std::path::Path) -> Result<(u8, u8, Vec<[u8; 32]>)> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading federation file {}", path.display()))?;
     let f: FederationFile =
@@ -106,11 +106,14 @@ fn load_federation(path: &std::path::Path) -> Result<(u8, u8, [[u8; 32]; MAX_FED
         ));
     }
     let n = f.pubkeys.len() as u8;
-    let mut members = [[0u8; 32]; MAX_FEDERATION_MEMBERS];
+    // Variable-length on the wire — size prefixed by Borsh as `[u32_le_len,
+    // n × 32 bytes]`. For 5-of-9 that's 4 + 288 = 292 bytes vs the old
+    // fixed-size 1024 bytes that blew the 1232-byte legacy tx ceiling.
+    let mut members: Vec<[u8; 32]> = Vec::with_capacity(f.pubkeys.len());
     for (i, p) in f.pubkeys.iter().enumerate() {
         let pk = Pubkey::from_str(p)
             .with_context(|| format!("parsing federation pubkey #{i}: {p}"))?;
-        members[i] = pk.to_bytes();
+        members.push(pk.to_bytes());
     }
     Ok((f.threshold, n, members))
 }

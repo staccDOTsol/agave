@@ -46,7 +46,12 @@ pub struct InitVaultArgs {
     pub release_fee_bps: u16,
     pub federation_m: u8,
     pub federation_n: u8,
-    pub federation_members: [[u8; 32]; MAX_FEDERATION_MEMBERS],
+    /// Variable-length on the wire (`Vec<Pubkey>`, length-prefixed). Storage
+    /// in `FederationSet` stays a fixed `[Pubkey; MAX_FEDERATION_MEMBERS]`
+    /// zero-padded internally — only the wire format changed. Length must
+    /// equal `federation_n`. The fixed [[u8;32]; 32] form blew the 1232-
+    /// byte tx ceiling at register_asset time.
+    pub federation_members: Vec<[u8; 32]>,
     pub flags: u8,
 }
 
@@ -79,7 +84,7 @@ const fn label_bytes(label: &str) -> [u8; 32] {
 }
 
 pub fn asset_configs() -> &'static [VaultAssetConfig] {
-    static TABLE: [VaultAssetConfig; 3] = [
+    static TABLE: [VaultAssetConfig; 4] = [
         VaultAssetConfig {
             label: "stSOL",
             asset_id: 0,
@@ -109,6 +114,19 @@ pub fn asset_configs() -> &'static [VaultAssetConfig] {
             release_fee_bps: 10,
             flags: ASSET_FLAG_NATIVE_SOL, // vault holds native SOL.
             requires_spl_backing: false,
+        },
+        VaultAssetConfig {
+            // `Staccana` (id=3) — culture asset. Underlying mint:
+            // 73edX6xoGY4v5y2hzuKdrUbJXLntqgmo74au1Ki1pump on Solana mainnet
+            // (Token-22 SPL, decimals=6).
+            label: "Staccana",
+            asset_id: 3,
+            underlying_label: label_bytes("Staccana"),
+            decimals: 6,
+            deposit_fee_bps: 10,
+            release_fee_bps: 10,
+            flags: 0,
+            requires_spl_backing: true, // requires --underlying-mint
         },
     ];
     &TABLE

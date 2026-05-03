@@ -40,7 +40,14 @@ export const BRIDGE_PROGRAM_ID = new PublicKey("Bridge11111111111111111111111111
  * + submits.
  */
 export const BRIDGE_VAULT_PROGRAM_ID = new PublicKey(
-  process.env.NEXT_PUBLIC_BRIDGE_VAULT_PROGRAM_ID ?? "F2AypZ8FDWnR5bdyLHzo4idof9YrBpdBmbgLwLBjLfVU",
+  // Live on Solana mainnet-beta as of v9 launch:
+  // BwimCCoPP5of41ukG1wA1gLz5wXQ4mmbcmjdFT9M1mBL (deployed via
+  // upgrade-authority HSwe2Y…5f4y on 2026-05-03). The previous
+  // F2AypZ8…LfVU placeholder was never deployed; the bridge page
+  // displayed "VaultConfig PDA not found on the mainnet RPC" because
+  // the program account itself didn't exist. Override via
+  // NEXT_PUBLIC_BRIDGE_VAULT_PROGRAM_ID for non-mainnet testing.
+  process.env.NEXT_PUBLIC_BRIDGE_VAULT_PROGRAM_ID ?? "BwimCCoPP5of41ukG1wA1gLz5wXQ4mmbcmjdFT9M1mBL",
 );
 
 /**

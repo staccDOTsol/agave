@@ -431,6 +431,20 @@ export interface VaultDepositIxArgs {
    * `null`.
    */
   vaultTokenAccount: PublicKey | null;
+  /**
+   * Token program for the underlying mint. Defaults to legacy SPL Token
+   * (`TokenkegQfeZ…`) but MUST be the Token-22 program ID
+   * (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`) when the underlying
+   * mint is itself Token-22 (e.g. the `$Staccana` culture asset). Anchor's
+   * `Interface<TokenInterface>` accepts either at the program level, but
+   * the runtime CPI reads this account's program-id and dispatches to the
+   * matching token program — pass legacy Token here when the mint is
+   * Token-22 and `transfer_checked` rejects with `InvalidAccountData`
+   * because the underlying account has CT/extension bytes legacy Token
+   * doesn't recognize. Resolve via `deriveDepositAccounts(...)` which
+   * already detects the underlying mint's owner and picks the right one.
+   */
+  tokenProgram?: PublicKey | null;
 }
 
 /**
@@ -493,7 +507,11 @@ export function buildVaultDepositInstruction(args: VaultDepositIxArgs): Transact
         isWritable: !meta.isNativeSol,
         isSigner: false,
       },
-      { pubkey: MAINNET_SPL_TOKEN_PROGRAM_ID, isWritable: false, isSigner: false },
+      {
+        pubkey: args.tokenProgram ?? MAINNET_SPL_TOKEN_PROGRAM_ID,
+        isWritable: false,
+        isSigner: false,
+      },
       { pubkey: MAINNET_SYSTEM_PROGRAM_ID, isWritable: false, isSigner: false },
     ],
     data: Buffer.from(data),

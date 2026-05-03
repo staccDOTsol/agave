@@ -35,7 +35,12 @@ pub struct InitVaultArgs {
     /// M-of-N threshold. Ignored if the federation set is already initialized.
     pub federation_m: u8,
     pub federation_n: u8,
-    pub federation_members: [Pubkey; MAX_FEDERATION_MEMBERS],
+    /// Variable-length on the wire (`Vec<Pubkey>`) so a 5-of-9 federation
+    /// fits in ~408 bytes instead of the fixed 1024 bytes. Storage in
+    /// `FederationSet` stays a fixed `[Pubkey; MAX_FEDERATION_MEMBERS]`
+    /// array zero-padded internally — only the wire format changed. Length
+    /// must equal `federation_n`.
+    pub federation_members: Vec<Pubkey>,
 
     /// Per-asset behaviour flags. See [`crate::state::AssetFlag`]. wSOL MUST set
     /// `NATIVE_SOL`.
@@ -135,12 +140,19 @@ pub fn handler(ctx: Context<InitVault>, args: InitVaultArgs) -> Result<()> {
             args.federation_m > 0
                 && args.federation_n > 0
                 && args.federation_n as usize <= MAX_FEDERATION_MEMBERS
-                && args.federation_m <= args.federation_n,
+                && args.federation_m <= args.federation_n
+                && args.federation_members.len() == args.federation_n as usize,
             VaultError::BadFederationParams
         );
         fed.m = args.federation_m;
         fed.n = args.federation_n;
-        fed.members = args.federation_members;
+        // Wire format is `Vec<Pubkey>` (length-prefixed) but storage is a
+        // fixed `[Pubkey; MAX_FEDERATION_MEMBERS]` zero-padded internally.
+        let mut padded = [Pubkey::default(); MAX_FEDERATION_MEMBERS];
+        for (i, k) in args.federation_members.iter().enumerate() {
+            padded[i] = *k;
+        }
+        fed.members = padded;
         fed.bump = ctx.bumps.federation_set;
     }
 
@@ -213,7 +225,7 @@ mod tests {
             release_fee_bps: 10,
             federation_m: 5,
             federation_n: 9,
-            federation_members: [Pubkey::default(); MAX_FEDERATION_MEMBERS],
+            federation_members: vec![Pubkey::default(); 9],
             flags: AssetFlag::NATIVE_SOL,
         }
     }
@@ -230,7 +242,7 @@ mod tests {
             release_fee_bps: 10,
             federation_m: 5,
             federation_n: 9,
-            federation_members: [Pubkey::default(); MAX_FEDERATION_MEMBERS],
+            federation_members: vec![Pubkey::default(); 9],
             flags: 0,
         }
     }

@@ -774,6 +774,15 @@ function DepositPanel(props: DepositPanelProps): JSX.Element {
         underlyingMint: meta.isNativeSol ? null : accounts.underlyingMint,
         userTokenAccount: meta.isNativeSol ? null : accounts.userTokenAccount,
         vaultTokenAccount: meta.isNativeSol ? null : accounts.vaultTokenAccount,
+        // Pass the resolved token program (legacy SPL Token or Token-22)
+        // detected by `deriveDepositAccounts`. The previous hardcoded
+        // legacy program caused the deposit's TransferChecked CPI to
+        // reject Token-22 accounts (e.g. $Staccana's underlying mint
+        // 73edX6…pump) with `InvalidAccountData`. Wallet wrappers like
+        // Phantom didn't surface the issue because the wallet just
+        // signed; the failure was on-chain at simulation. wSOL still
+        // takes the native SOL branch where this slot is ignored.
+        tokenProgram: meta.isNativeSol ? null : accounts.tokenProgram,
       });
       tx.add(ix);
       tx.feePayer = mainnetPubkey;

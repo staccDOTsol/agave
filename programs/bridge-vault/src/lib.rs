@@ -46,10 +46,12 @@ pub mod state;
 pub use error::VaultError;
 pub use instructions::*;
 
-// Placeholder program ID. The deploy script writes the real devnet ID into
-// `/etc/staccana/bridge-vault-devnet-id.txt` after the first deploy; mainnet swaps to
-// a vanity address pre-launch.
-declare_id!("VauLt11111111111111111111111111111111111111");
+// Live on Solana mainnet-beta as of 2026-05-03. Deployed via upgrade
+// authority HSwe2Y…5f4y. Anchor's runtime check requires this constant
+// to match the runtime program-id, otherwise every ix rejects with
+// `DeclaredProgramIdMismatch`. The previous `VauLt11…111` placeholder
+// was never keypair-backed so we couldn't deploy under that address.
+declare_id!("BwimCCoPP5of41ukG1wA1gLz5wXQ4mmbcmjdFT9M1mBL");
 
 #[program]
 pub mod staccana_bridge_vault {
