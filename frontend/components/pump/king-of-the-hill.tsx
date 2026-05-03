@@ -52,7 +52,7 @@ export function KingOfTheHill({ candidates }: { candidates: KothCandidate[] }): 
 
   return (
     <Link
-      href={`/pump/${king.curve.mint.toBase58()}`}
+      href={`/launch/${king.curve.mint.toBase58()}`}
       className="group relative block overflow-hidden rounded-2xl border border-amber-400/40 bg-gradient-to-br from-amber-500/10 via-card/80 to-card p-6 transition-all hover:border-amber-300/60 hover:shadow-xl hover:shadow-amber-500/10"
     >
       <div className="pointer-events-none absolute -right-12 -top-12 h-48 w-48 rounded-full bg-amber-400/10 blur-3xl" />

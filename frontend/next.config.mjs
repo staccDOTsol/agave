@@ -1,6 +1,14 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Catch every stale /pump/* link from before the rename. Permanent so
+  // search engines + bookmarks update too.
+  async redirects() {
+    return [
+      { source: "/pump", destination: "/launch", permanent: true },
+      { source: "/pump/:path*", destination: "/launch/:path*", permanent: true },
+    ];
+  },
   // TODO: drop once @solana/wallet-adapter-react ships React 18 strict-mode-compatible
   // FC<{children}> typings (or pin @types/react to a version that resolves the JSX
   // overload conflict). Until then, allow next build to proceed despite the wallet

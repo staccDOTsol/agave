@@ -64,7 +64,7 @@ export function TokenCard({
 
   return (
     <Link
-      href={`/pump/${curve.mint.toBase58()}`}
+      href={`/launch/${curve.mint.toBase58()}`}
       className={cn(
         "group relative flex flex-col gap-3 overflow-hidden rounded-xl border border-border/60 bg-card/60 p-4 transition-all",
         "hover:-translate-y-0.5 hover:border-primary/40 hover:bg-card/90 hover:shadow-lg hover:shadow-primary/10",

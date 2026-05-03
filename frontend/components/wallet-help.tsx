@@ -20,7 +20,19 @@ import { useEffect, useState } from "react";
 
 import { GENESIS_HASH, RPC_URL } from "@/lib/staccana";
 
+// Recommended URL — `rpc.mp.fun` itself, which sits behind a Cloudflare
+// Worker (see infra/cloudflare/rpc-compat-worker.js) that translates the
+// 3 deprecated JSON-RPC methods (getRecentBlockhash + getFees +
+// getMinimumLedgerSlot) older wallets still call. Transparent — wallets
+// just point at the canonical URL.
 const STACCANA_RPC = RPC_URL.replace(/\/$/, "");
+
+// Fallback for any deploy where the CF Worker isn't yet wired — the same
+// translation runs at the Vercel edge under app.mp.fun/api/rpc.
+const STACCANA_RPC_FALLBACK =
+  typeof window !== "undefined"
+    ? `${window.location.origin}/api/rpc`
+    : "https://app.mp.fun/api/rpc";
 
 export function WalletHelp(): JSX.Element {
   const [open, setOpen] = useState(false);
@@ -72,10 +84,30 @@ export function WalletHelp(): JSX.Element {
         <HelpCircle className="h-4 w-4" />
       </button>
 
-      {/* Wrong-network banner: only shown if connected AND we suspect mismatch. */}
-      {connected && genesisOk === "mismatch" ? (
-        <div className="absolute left-0 right-0 top-14 z-30 border-b border-amber-400/40 bg-amber-400/10 px-4 py-2 text-center text-xs text-amber-300">
-          Your wallet looks like it's on a different cluster. Click <kbd>?</kbd> for setup.
+      {/* Wrong-network banner: shown when wallet isn't connected OR when the
+          page's connection's genesis hash doesn't match staccana's. We can't
+          probe the wallet's own RPC directly, so this is best-effort. */}
+      {(!connected || genesisOk === "mismatch") ? (
+        <div className="absolute left-0 right-0 top-14 z-30 flex flex-wrap items-center justify-center gap-2 border-b border-amber-400/40 bg-amber-400/10 px-4 py-2 text-center text-xs text-amber-300">
+          <span>{connected ? "Wallet on a different cluster." : "Add staccana to your wallet:"}</span>
+          <code className="rounded bg-amber-300/10 px-1.5 py-0.5 font-mono text-[11px] text-amber-100">
+            {STACCANA_RPC}
+          </code>
+          <button
+            type="button"
+            onClick={onCopy}
+            className="inline-flex h-5 items-center gap-1 rounded border border-amber-300/40 bg-amber-300/10 px-1.5 text-[11px] hover:bg-amber-300/20"
+          >
+            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+            {copied ? "copied" : "copy"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="underline underline-offset-2"
+          >
+            setup guide
+          </button>
         </div>
       ) : null}
 
@@ -163,6 +195,12 @@ export function WalletHelp(): JSX.Element {
               approve dialog — there's no way for this site to skip that. If your
               wallet doesn't know about staccana, every buy/claim/bridge call will
               show "Transaction simulation failed" with empty logs.
+            </p>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              Backup URL (Vercel-hosted shim){" "}
+              <code className="rounded bg-secondary/40 px-1 font-mono">{STACCANA_RPC_FALLBACK}</code>{" "}
+              works identically — use it if for any reason rpc.mp.fun isn't reachable
+              from your wallet (DNS issues, captive portal, etc).
             </p>
           </div>
         </div>
