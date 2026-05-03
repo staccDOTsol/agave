@@ -25,19 +25,23 @@ import {
   buildClaimMessage,
   buildClaimTransaction,
 } from "@/lib/claim";
-import { buildInclusionProof, recomputeRoot, toHex, type InclusionProof } from "@/lib/merkle";
-import {
-  asLeaves,
-  fetchClaimableSnapshot,
-  type ClaimableAccount,
-} from "@/lib/snapshot";
+import { recomputeRoot, toHex, type InclusionProof } from "@/lib/merkle";
 import { explorerTxUrl } from "@/lib/staccana";
 import { formatSol, truncatePubkey } from "@/lib/utils";
 
-type SnapshotState =
+/**
+ * Eligibility state — single edge-function lookup keyed on the connected
+ * wallet's pubkey. We deliberately don't fetch the full genesis snapshot
+ * (85.6M leaves, multi-GB) — that's what `app/api/claim/[pubkey]/route.ts`
+ * exists for. The route returns just this wallet's leaf + proof, or 404 if
+ * not in the set.
+ */
+type EligibilityState =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "ready"; accounts: ClaimableAccount[] }
+  | { kind: "eligible"; proof: InclusionProof }
+  | { kind: "not_in_set" }
+  | { kind: "pending_index" }
   | { kind: "error"; message: string };
 
 type ClaimState =
@@ -53,57 +57,67 @@ export default function ClaimPage(): JSX.Element {
   const { connection } = useConnection();
   const { toast } = useToast();
 
-  const [snapshot, setSnapshot] = useState<SnapshotState>({ kind: "idle" });
+  const [eligibility, setEligibility] = useState<EligibilityState>({ kind: "idle" });
   const [claim, setClaim] = useState<ClaimState>({ kind: "idle" });
-  const [proof, setProof] = useState<InclusionProof | null>(null);
 
-  // Fetch snapshot once after connect.
+  // Look up this wallet's leaf+proof via the edge function whenever the
+  // connected pubkey changes. One round-trip, ~200B response.
   useEffect(() => {
-    if (!connected || snapshot.kind !== "idle") return;
-    let cancelled = false;
-    setSnapshot({ kind: "loading" });
-    fetchClaimableSnapshot()
-      .then((accounts) => {
-        if (!cancelled) setSnapshot({ kind: "ready", accounts });
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        if (!cancelled) setSnapshot({ kind: "error", message });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [connected, snapshot.kind]);
-
-  // Compute the inclusion proof when both snapshot and pubkey are ready.
-  useEffect(() => {
-    if (snapshot.kind !== "ready" || !publicKey) {
-      setProof(null);
+    if (!connected || !publicKey) {
+      setEligibility({ kind: "idle" });
       return;
     }
     let cancelled = false;
-    buildInclusionProof(asLeaves(snapshot.accounts), publicKey)
-      .then((p) => {
-        if (!cancelled) setProof(p);
+    setEligibility({ kind: "loading" });
+    fetch(`/api/claim/${publicKey.toBase58()}`)
+      .then(async (r) => {
+        if (cancelled) return;
+        if (r.status === 404) {
+          // The edge fn returns 404 for both "not in set" and "snapshot index
+          // pending"; the body distinguishes via the `error` field.
+          const body = (await r.json()) as { error?: string };
+          if (body.error === "snapshot index pending") {
+            setEligibility({ kind: "pending_index" });
+          } else {
+            setEligibility({ kind: "not_in_set" });
+          }
+          return;
+        }
+        if (!r.ok) {
+          throw new Error(`/api/claim returned ${r.status}`);
+        }
+        const proof = (await r.json()) as InclusionProof;
+        setEligibility({ kind: "eligible", proof });
       })
-      .catch(() => {
-        if (!cancelled) setProof(null);
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setEligibility({ kind: "error", message });
       });
     return () => {
       cancelled = true;
     };
-  }, [snapshot, publicKey]);
+  }, [connected, publicKey]);
+
+  const proof = eligibility.kind === "eligible" ? eligibility.proof : null;
 
   const eligibilitySummary = useMemo(() => {
     if (!connected || !publicKey) return "Connect your wallet to check eligibility.";
-    if (snapshot.kind === "loading") return "Loading genesis snapshot...";
-    if (snapshot.kind === "error") return `Snapshot error: ${snapshot.message}`;
-    if (snapshot.kind !== "ready") return "";
-    if (!proof) {
-      return `No claimable balance for ${truncatePubkey(publicKey.toBase58())}.`;
+    switch (eligibility.kind) {
+      case "loading":
+        return "Looking up your wallet in the genesis snapshot...";
+      case "pending_index":
+        return "Snapshot index is being uploaded. Check back shortly.";
+      case "not_in_set":
+        return `No claimable balance for ${truncatePubkey(publicKey.toBase58())}.`;
+      case "eligible":
+        return `You are eligible to claim ${formatSol(eligibility.proof.lamports)} SOL.`;
+      case "error":
+        return `Lookup error: ${eligibility.message}`;
+      default:
+        return "";
     }
-    return `You are eligible to claim ${formatSol(proof.lamports)} SOL.`;
-  }, [connected, publicKey, snapshot, proof]);
+  }, [connected, publicKey, eligibility]);
 
   const onClaim = useCallback(async () => {
     if (!publicKey || !signMessage || !proof) {
