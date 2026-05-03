@@ -70,6 +70,7 @@ import {
   buildTransferInstruction,
   buildVerifyProofInstruction,
   buildWithdrawInstruction,
+  deriveElGamalPubkeyFromSeed,
   findConfidentialTransferAccountExtension,
 } from "./confidential";
 import { MEMO_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "./staccana";
@@ -124,6 +125,14 @@ export interface PrepareTransitSendArgs {
   senderElgamalPubkey: Uint8Array;
   /** Sender's new decryptable available balance after the transfer (36 bytes). */
   newSourceDecryptableAvailableBalance: Uint8Array;
+  /**
+   * Sender's CURRENT (pre-transfer) plaintext available balance. Required so
+   * `buildTransferInstruction` can synthesize a self-consistent
+   * (post-transfer source ciphertext, Pedersen commitment, opening) tuple
+   * for the equality proof. See the privacy note on
+   * `TransferIxArgs.currentAvailablePlaintext` in `lib/confidential.ts`.
+   */
+  currentAvailablePlaintext?: bigint;
   /**
    * Optional — caller provides a 4-byte nonce for determinism in tests. When
    * omitted we sample from `crypto.getRandomValues`.
@@ -397,7 +406,15 @@ export async function prepareTransitSendIxs(
     args.mint,
     randNonce,
   );
-  const transitPk = transitElGamalPubkeyPlaceholder(transitSeed);
+  // Derive the canonical 32-byte ElGamal pubkey via the wasm's
+  // `pubkey_validity` proof (its context bytes ARE the pubkey). We used to
+  // stub this with `transitSeed.slice(0, 32)`, which produced inconsistent
+  // (post-transfer source ciphertext, equality proof) tuples once the
+  // transfer ix builder actually computed the decrypt handle as
+  // `opening * pk` — the on-chain verifier rejected, and the UI silently
+  // fell back to public TransferChecked. The real pubkey is `s_inv * H`
+  // where H is the Pedersen blinding base.
+  const transitPk = await deriveElGamalPubkeyFromSeed(transitSeed, args.fetchImpl);
 
   const newAccount = Keypair.generate();
 
@@ -463,6 +480,10 @@ export async function prepareTransitSendIxs(
     auditorElgamalPubkey: new Uint8Array(32),
     newSourceDecryptableAvailableBalance: args.newSourceDecryptableAvailableBalance,
     elgamalSeed: args.senderElgamalSeed,
+    // The plaintext source available balance — see TransferIxArgs.
+    // Required so the post-transfer source ciphertext + Pedersen commitment
+    // + opening are all self-consistent for the equality proof.
+    currentAvailablePlaintext: args.currentAvailablePlaintext,
     fetchImpl: args.fetchImpl,
   });
   for (const ix of transferIxs) ixs.push(ix);

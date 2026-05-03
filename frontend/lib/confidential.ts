@@ -100,6 +100,11 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 
+import {
+  elgamalDecryptHandle,
+  joinCiphertext,
+  randScalar,
+} from "./elgamal-client";
 import { SYSVAR_INSTRUCTIONS_ID, TOKEN_2022_PROGRAM_ID } from "./staccana";
 
 /**
@@ -659,6 +664,46 @@ function base64ToBytes(b64: string): Uint8Array {
   return Uint8Array.from(Buffer.from(b64, "base64"));
 }
 
+/**
+ * Derive the canonical ElGamal pubkey (32-byte compressed Ristretto) for the
+ * given 32-byte secret seed by piggybacking on the `/api/confidential/proof`
+ * endpoint's `pubkey_validity` kind — that proof's `contextData` IS the
+ * pubkey, since `PubkeyValidityProofContext` is a single `PodElGamalPubkey`
+ * field (`solana-zk-sdk-2.2.1::pubkey_validity::PubkeyValidityProofContext`).
+ *
+ * Why we don't compute this client-side: `pubkey = s_inv * H`, where `H` is
+ * the Pedersen blinding base — `RistrettoPoint::hash_from_bytes::<Sha3_512>(
+ * RISTRETTO_BASEPOINT_COMPRESSED)`. We don't ship `Sha3_512` or
+ * Ristretto255's hash-to-curve in the bundle (would add ~10 KB and a
+ * compatibility risk), so we let the wasm compute it once.
+ *
+ * Returns 32 bytes. Throws `ProofUnavailableError` if the proof endpoint is
+ * down — the caller should propagate, since the same endpoint is needed for
+ * the equality proof anyway.
+ */
+export async function deriveElGamalPubkeyFromSeed(
+  seed: Uint8Array,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Uint8Array> {
+  if (seed.length < 32) {
+    throw new RangeError(`seed must be >= 32 bytes (got ${seed.length})`);
+  }
+  const { contextData } = await requestServerSideProof(
+    "pubkey_validity",
+    { elgamalSeed: bytesToBase64(seed) },
+    fetchImpl,
+  );
+  const bytes = base64ToBytes(contextData);
+  if (bytes.length !== 32) {
+    throw new ProofUnavailableError(
+      "pubkey_validity",
+      "invalid_context",
+      `pubkey_validity context was ${bytes.length} bytes; expected 32 (the ElGamal pubkey)`,
+    );
+  }
+  return bytes;
+}
+
 // ---------------------------------------------------------------------------
 // ConfigureAccount — needs a PubkeyValidity (or ZeroCiphertext) proof.
 // ---------------------------------------------------------------------------
@@ -845,8 +890,25 @@ export interface TransferIxArgs {
    * sender's pubkey) and `newBalanceCommitment` both encode this value. If
    * the three (ciphertext, commitment, amount) aren't self-consistent, the
    * generator rejects with `InconsistentInput`.
+   *
+   * If omitted but `currentAvailablePlaintext` is supplied, this is computed
+   * automatically as `currentAvailablePlaintext - amount`.
    */
   newBalancePlaintext?: bigint;
+  /**
+   * The CURRENT (pre-transfer) plaintext value of the source's
+   * `available_balance` ciphertext, supplied from the UI.
+   *
+   * Privacy note: passing this in plaintext does NOT reduce the on-chain
+   * privacy of confidential transfers — the encrypted ciphertext on chain
+   * stays encrypted, the auditor pubkey is still the only oracle, and the
+   * other UIs that observe balances see only encrypted bytes. The plaintext
+   * is needed locally to compute the post-transfer ciphertext under the
+   * sender's pubkey with the same randomness scalar that the equality proof
+   * binds the Pedersen commitment to. The UI already has it (the picker
+   * shows a decrypted amount); see `SecretBalancePanel.tsx`.
+   */
+  currentAvailablePlaintext?: bigint;
   /** Optional fetch override. */
   fetchImpl?: typeof fetch;
 }
@@ -891,15 +953,10 @@ export async function buildTransferInstruction(
   }
 
   const seed = args.elgamalSeed ?? new Uint8Array(32);
-  const sourceCt = args.sourceCiphertext ?? new Uint8Array(64);
-  const newBalCommit = args.newBalanceCommitment ?? new Uint8Array(32);
-  const newBalOpen = args.newBalanceOpening ?? new Uint8Array(32);
-  const newBalPlain = args.newBalancePlaintext;
-  const openingLo = args.transferAmountOpeningLo ?? new Uint8Array(32);
-  const openingHi = args.transferAmountOpeningHi ?? new Uint8Array(32);
+  const seedNonzero = seed.some((b) => b !== 0);
+  const senderPkNonzero = args.senderElgamalPubkey.some((b) => b !== 0);
   const auditorCtLo = args.transferAmountAuditorCiphertextLo ?? new Uint8Array(64);
   const auditorCtHi = args.transferAmountAuditorCiphertextHi ?? new Uint8Array(64);
-
   if (auditorCtLo.length !== ELGAMAL_CIPHERTEXT_LEN) {
     throw new RangeError("transferAmountAuditorCiphertextLo must be 64 bytes");
   }
@@ -907,44 +964,126 @@ export async function buildTransferInstruction(
     throw new RangeError("transferAmountAuditorCiphertextHi must be 64 bytes");
   }
 
-  // Pre-flight the equality-proof inputs. The wasm
-  // `ciphertext_commitment_equality_proof` rejects with `InconsistentInput`
-  // when (ciphertext, commitment, opening, amount, seed) don't form a
-  // self-consistent tuple — i.e. when `ciphertext` doesn't encrypt `amount`
-  // under the seed-derived pubkey, or when `commitment` isn't `Pedersen(amount,
-  // opening)`. The client cannot fabricate these from zero buffers.
+  // Resolve the post-transfer source-ciphertext + Pedersen commitment + opening.
   //
-  // The inputs MUST come from the same source: callers compute the
-  // post-transfer source ciphertext via ElGamal::encrypt and capture both
-  // the ciphertext bytes AND the randomness; that randomness becomes the
-  // Pedersen `opening` and `Pedersen(new_balance, opening)` is the
-  // commitment.
+  // Three possible input shapes, in order of precedence:
   //
-  // The current `@staccoverflow/zk-proofs-wasm@0.3.0` does NOT export
-  // `elgamal_encrypt` or a unified `transfer_proof` super-builder, so the
-  // client has no way to construct a real post-transfer source ciphertext.
-  // Until the wasm package adds one of those exports (or we ship a
-  // curve25519-dalek JS implementation), confidential Transfer cannot land
-  // on chain. Surface this cleanly via `ProofUnavailableError` so the UI
-  // falls back to public `TransferChecked` instead of producing a 500 from
-  // the proof endpoint.
-  const seedNonzero = seed.some((b) => b !== 0);
-  const sourceCtNonzero = sourceCt.some((b) => b !== 0);
-  const newBalCommitNonzero = newBalCommit.some((b) => b !== 0);
-  if (
-    !seedNonzero ||
-    !sourceCtNonzero ||
-    !newBalCommitNonzero ||
-    newBalPlain === undefined
-  ) {
-    throw new ProofUnavailableError(
-      "ciphertext_commitment_equality",
-      "transfer_inputs_unavailable",
-      "buildTransferInstruction needs (elgamalSeed, sourceCiphertext, newBalanceCommitment, newBalanceOpening, newBalancePlaintext) all derived from the same ElGamal::encrypt(new_balance) call. " +
-        "@staccoverflow/zk-proofs-wasm@0.3.0 doesn't export elgamal_encrypt or a transfer_proof super-builder, so the client cannot construct a valid post-transfer source ciphertext. " +
-        "Falling back to public TransferChecked.",
+  //   1. Caller provides everything (the test fixture path) — use as-is.
+  //   2. Caller provides ONLY `newBalancePlaintext` (or `currentAvailable
+  //      Plaintext`, from which we derive the new plaintext as old - amount)
+  //      plus a real `elgamalSeed` + `senderElgamalPubkey`. We synthesize
+  //      `(opening_new, sourceCiphertext, newBalanceCommitment)` client-side
+  //      via @noble/curves's Ristretto255 ops, calling the wasm only for
+  //      `pedersen_commit` (which gives us the commitment half — equal to the
+  //      `commitment` half of the twisted-ElGamal ciphertext under the same
+  //      randomness, by construction).
+  //   3. Neither → throw `ProofUnavailableError` so the UI falls back to
+  //      public TransferChecked.
+  //
+  // Why scheme 2 matters: solana-zk-sdk's twisted ElGamal lays out
+  // `ciphertext = commitment(32) || handle(32)` where
+  //
+  //     commitment = amount * G + r * H            ← same as Pedersen.with(amount, r)
+  //     handle     = r * pk                        ← only thing we need a curve op for
+  //
+  // so `pedersen_commit(amount, r)` (server) gives us the commitment half
+  // verbatim, and `r * pk` (client, via noble-curves) gives us the handle.
+  let sourceCt: Uint8Array;
+  let newBalCommit: Uint8Array;
+  let newBalOpen: Uint8Array;
+  let newBalPlain: bigint;
+  let openingLo: Uint8Array;
+  let openingHi: Uint8Array;
+
+  const fetchImpl = args.fetchImpl ?? fetch;
+
+  // Fully-supplied path (existing behavior; keeps the wired test green).
+  const fullyProvided =
+    args.sourceCiphertext !== undefined &&
+    args.sourceCiphertext.some((b) => b !== 0) &&
+    args.newBalanceCommitment !== undefined &&
+    args.newBalanceCommitment.some((b) => b !== 0) &&
+    args.newBalanceOpening !== undefined &&
+    args.newBalancePlaintext !== undefined &&
+    args.transferAmountOpeningLo !== undefined &&
+    args.transferAmountOpeningHi !== undefined;
+
+  if (fullyProvided) {
+    sourceCt = args.sourceCiphertext!;
+    newBalCommit = args.newBalanceCommitment!;
+    newBalOpen = args.newBalanceOpening!;
+    newBalPlain = args.newBalancePlaintext!;
+    openingLo = args.transferAmountOpeningLo!;
+    openingHi = args.transferAmountOpeningHi!;
+  } else {
+    // Resolve the new-balance plaintext.
+    let resolvedNewBalPlain = args.newBalancePlaintext;
+    if (resolvedNewBalPlain === undefined && args.currentAvailablePlaintext !== undefined) {
+      if (args.currentAvailablePlaintext < args.amount) {
+        throw new ProofUnavailableError(
+          "ciphertext_commitment_equality",
+          "insufficient_available_balance",
+          `currentAvailablePlaintext (${args.currentAvailablePlaintext}) < amount (${args.amount}); ` +
+            "Withdraw or Deposit + ApplyPendingBalance first to materialize the encrypted balance, " +
+            "or pass an accurate plaintext from the UI.",
+        );
+      }
+      resolvedNewBalPlain = args.currentAvailablePlaintext - args.amount;
+    }
+
+    if (
+      !seedNonzero ||
+      !senderPkNonzero ||
+      resolvedNewBalPlain === undefined
+    ) {
+      // Without (elgamalSeed, senderElgamalPubkey, newBalancePlaintext-or-currentAvailablePlaintext)
+      // we have nothing to encrypt under and nothing to encrypt. Surface this
+      // so the UI falls back to public TransferChecked. This is the
+      // "test path" where the caller passes only zeros.
+      throw new ProofUnavailableError(
+        "ciphertext_commitment_equality",
+        "transfer_inputs_unavailable",
+        "buildTransferInstruction needs (elgamalSeed, senderElgamalPubkey) plus either " +
+          "newBalancePlaintext or currentAvailablePlaintext to synthesize the post-transfer " +
+          "source ciphertext. Falling back to public TransferChecked.",
+      );
+    }
+    if (resolvedNewBalPlain < 0n || resolvedNewBalPlain > (1n << 64n) - 1n) {
+      throw new RangeError(`newBalancePlaintext out of u64 range: ${resolvedNewBalPlain}`);
+    }
+    newBalPlain = resolvedNewBalPlain;
+
+    // Generate fresh openings — one for the new available-balance ciphertext
+    // and two for the lo/hi halves of the transfer amount.
+    newBalOpen = randScalar();
+    openingLo = randScalar();
+    openingHi = randScalar();
+
+    // Compute the new source ciphertext = (commitment_new, handle_new)
+    // under the SENDER's pubkey, with `r = newBalOpen` shared between the
+    // commitment (from wasm) and handle (from noble-curves). This is the
+    // crucial bit: the equality proof binds (sourceCiphertext, commitment,
+    // opening, amount) all under the SAME randomness, so the wasm
+    // `pedersen_commit(amount, opening)` IS the commitment-half of the
+    // ciphertext by definition (twisted ElGamal == Pedersen + handle).
+    const commitResp = await requestServerSideProof(
+      "pedersen_commit",
+      { amount: newBalPlain.toString(), opening: bytesToBase64(newBalOpen) },
+      fetchImpl,
     );
+    const commitBytes = base64ToBytes(commitResp.proofData);
+    if (commitBytes.length !== 32) {
+      throw new ProofUnavailableError(
+        "pedersen_commit",
+        "invalid_response",
+        `pedersen_commit returned ${commitBytes.length}-byte commitment, expected 32`,
+      );
+    }
+    newBalCommit = commitBytes;
+    const handleBytes = elgamalDecryptHandle(args.senderElgamalPubkey, newBalOpen);
+    sourceCt = joinCiphertext(commitBytes, handleBytes);
   }
+
   if (sourceCt.length !== ELGAMAL_CIPHERTEXT_LEN) {
     throw new RangeError("sourceCiphertext must be 64 bytes");
   }
@@ -967,7 +1106,6 @@ export async function buildTransferInstruction(
   const amountHi = args.amount >> 16n;
 
   const seedB64 = bytesToBase64(seed);
-  const fetchImpl = args.fetchImpl ?? fetch;
 
   // Three proofs, all server-side via the wasm-backed proof API.
   // Equality first — binds the (post-transfer) source ciphertext to a

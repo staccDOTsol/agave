@@ -40,6 +40,7 @@ import {
   ProofUnavailableError,
   buildTransferInstruction,
   deriveElGamalKeypair,
+  deriveElGamalPubkeyFromSeed,
 } from "@/lib/confidential";
 import {
   PendingTransitAccount,
@@ -631,17 +632,33 @@ function SendPanelInner({
             { publicKey, signMessage: wallet.signMessage },
             mint,
           );
+          // Derive the canonical ElGamal pubkey from the seed via the
+          // wasm. The pubkey is `s_inv * H` (Pedersen blinding base) —
+          // an earlier hack used the raw seed bytes here, which makes
+          // the equality proof fail because the post-transfer source
+          // ciphertext we synthesize uses the REAL pubkey to compute
+          // the decrypt handle. The `pubkey_validity` proof endpoint's
+          // `contextData` IS the 32-byte canonical pubkey by construction
+          // (see solana-zk-sdk's `PubkeyValidityProofContext` — a single
+          // `PodElGamalPubkey` field), so we piggyback on it.
+          const senderPk = await deriveElGamalPubkeyFromSeed(senderKeys.secretSeed);
           const ixs = await buildTransferInstruction({
             ata: senderAta,
             destinationAta: recipientAta,
             mint,
             owner: publicKey,
             amount,
-            senderElgamalPubkey: senderKeys.secretSeed.slice(0, 32),
+            senderElgamalPubkey: senderPk,
             recipientElgamalPubkey: new Uint8Array(32),
             auditorElgamalPubkey: new Uint8Array(32),
             newSourceDecryptableAvailableBalance: new Uint8Array(36),
             elgamalSeed: senderKeys.secretSeed,
+            // The current decrypted available balance plaintext, supplied by
+            // the picker. The on-chain ciphertext stays encrypted — this is
+            // only consumed locally to compute the post-transfer ciphertext
+            // with matching randomness. See `lib/confidential.ts` for the
+            // full privacy-impact note.
+            currentAvailablePlaintext: maxBalance ?? 0n,
           });
           for (const ix of ixs) tx.add(ix);
           usedConfidential = true;
@@ -670,6 +687,9 @@ function SendPanelInner({
             { publicKey, signMessage: wallet.signMessage },
             mint,
           );
+          const senderPk = await deriveElGamalPubkeyFromSeed(
+            senderKeys.secretSeed,
+          );
           const bundle = await prepareTransitSendIxs({
             connection,
             sender: publicKey,
@@ -678,8 +698,9 @@ function SendPanelInner({
             mint,
             amount,
             senderElgamalSeed: senderKeys.secretSeed,
-            senderElgamalPubkey: senderKeys.secretSeed.slice(0, 32),
+            senderElgamalPubkey: senderPk,
             newSourceDecryptableAvailableBalance: new Uint8Array(36),
+            currentAvailablePlaintext: maxBalance ?? 0n,
           });
 
           // Build a v0 tx + LUT — the bundle has 5 outer ixs + 4 verify ixs
@@ -1010,7 +1031,7 @@ function PendingClaimsRow({
           fetchConfidentialAccountState(connection, p.account),
         ]);
         let decimals = 9;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+// @ts-ignore
         const mintParsed: any = mintInfo.value?.data;
         if (
           mintParsed &&
