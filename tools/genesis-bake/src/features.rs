@@ -148,7 +148,7 @@ mod tests {
     fn build_all_feature_accounts_yields_one_per_gate() {
         let gates = cte_gates_as_active_feature_gates();
         let accts = build_all_feature_accounts(&gates).expect("build");
-        assert_eq!(accts.len(), 4);
+        assert_eq!(accts.len(), CTE_FEATURE_GATES_AT_GENESIS.len());
         // All distinct pubkeys (defense against accidental duplication in the gate
         // list).
         for i in 0..accts.len() {

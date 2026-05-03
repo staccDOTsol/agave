@@ -432,12 +432,12 @@ mod tests {
         // native processor).
         assert!(summary.programs_installed.is_empty());
         assert_eq!(summary.native_programs_installed.len(), 1);
-        // Four CTE gates flipped on.
-        assert_eq!(summary.feature_gates_activated.len(), 4);
-        // Account total: 4 bootstrap + treasury + lazy-claim config + 4 features +
+        // 4 ZK/CTE gates + 5 Token-22 v8 syscall gates flipped on.
+        assert_eq!(summary.feature_gates_activated.len(), 9);
+        // Account total: 4 bootstrap + treasury + lazy-claim config + 9 features +
         // 2 from `solana_stake_program::add_genesis_accounts` (stake config program +
-        // epoch rewards sysvar) = 12.
-        assert_eq!(summary.total_accounts, 12);
+        // epoch rewards sysvar) = 17.
+        assert_eq!(summary.total_accounts, 17);
         // Total lamports: 4*1SOL + treasury + LC rent + 4*feature rent + stake
         // genesis accounts. Treasury alone dwarfs everything else.
         assert!(summary.total_lamports >= 485_192_075_139_020_370);
@@ -602,7 +602,7 @@ mod tests {
         inputs.lazy_claim_so = Some(lc);
         inputs.bridge_so = Some(br);
         let (_, summary) = assemble_genesis_config(&inputs).expect("assemble");
-        assert_eq!(summary.total_accounts, 12 + 4);
+        assert_eq!(summary.total_accounts, 17 + 4);
         assert_eq!(summary.programs_installed.len(), 2);
     }
 
