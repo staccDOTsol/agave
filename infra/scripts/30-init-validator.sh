@@ -277,6 +277,15 @@ cat > "$GENESIS_DIR/post-boot-state.json" <<EOF
 }
 EOF
 
+# CRITICAL: chown ledger + accounts to staccana so the systemd unit (which runs
+# as user staccana) can open rocksdb. Without this, val-1 enters a "Permission
+# denied" crashloop on rocksdb/LOG, and by the time an operator notices and
+# fixes ownership, epoch 0 (~12s in default warmup) has elapsed — at which
+# point val-1 + val-2 enter LockedOut state and tower convergence fails
+# permanently. Symptom seen 2026-05-02: chain dead at slot 95.
+chown -R staccana:staccana /var/lib/staccana/ledger /var/lib/staccana/accounts /var/log/staccana 2>/dev/null || true
+echo "[init] chowned ledger + accounts + logs to staccana:staccana"
+
 echo "[init] done."
 echo "[init] next: systemctl enable --now staccana-validator"
 echo "[init] then: ./40-deploy-programs.sh    (deploys any programs that were skipped above; idempotent for already-installed builtins)"
