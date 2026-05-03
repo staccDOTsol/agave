@@ -15,4 +15,4 @@ anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 solana-client = "2"
 solana-sdk = "2"
-spl-token-2022 = { version = "8", default-features = false, features = ["no-entrypoint"] }
+spl-token-2022 = { version = "8", features = ["no-entrypoint"] }
