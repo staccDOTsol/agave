@@ -22,6 +22,7 @@
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { AlertTriangle, Check, Copy, HelpCircle, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { GENESIS_HASH, RPC_URL } from "@/lib/staccana";
 
@@ -133,14 +134,25 @@ export function WalletHelp(): JSX.Element {
           doesn't fight z-index with the header / dialogs. WalletHelp now
           owns ONLY the help button + the modal. */}
 
-      {open ? (
+      {open && typeof document !== "undefined"
+        ? createPortal(
         // The OUTER backdrop is the scrolling element — that way we don't
         // have to fight a nested-flex sizing dance just to make the body
         // expand. The dialog itself is a plain block element that can be
         // taller than the viewport; the backdrop scrolls past it. Sticky
         // title bar inside keeps the header pinned while the user reads.
+        //
+        // Portal to document.body so the dialog is a top-level child and
+        // can never be trapped inside a parent stacking context (e.g. a
+        // <main className="relative">). z-50 sits above SiteHeader (z-30)
+        // and the SecretBalancePanel rail (z-20).
+        //
+        // Opaque background (no `/95` opacity modifier) guarantees the
+        // page content underneath does not bleed through, even on
+        // browsers that compile color-mix() differently. -webkit-
+        // backdrop-filter mirrors the blur for Safari.
         <div
-          className="fixed inset-0 z-40 overflow-y-auto bg-background/95 px-4 py-6 backdrop-blur-md sm:py-12"
+          className="fixed inset-0 z-50 overflow-y-auto bg-background px-4 py-6 [backdrop-filter:blur(8px)] [-webkit-backdrop-filter:blur(8px)] sm:py-12"
           onClick={() => setOpen(false)}
           role="presentation"
         >
@@ -288,8 +300,10 @@ export function WalletHelp(): JSX.Element {
               </div>
             </div>
           </div>
-        </div>
-      ) : null}
+        </div>,
+        document.body,
+        )
+        : null}
     </>
   );
 }
