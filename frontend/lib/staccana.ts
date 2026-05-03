@@ -61,23 +61,25 @@ export const VALIDATOR_SUBSIDY_PROGRAM_ID = new PublicKey("Subsidy11111111111111
 export const SECRET_PUMP_TREASURY = new PublicKey(new TextEncoder().encode("staccana_treasury_placeholder___"));
 
 /**
- * SPL Token-2022 program ID. The `pump` and `bridge` mints are Token-22.
- * NOTE: staccana devnet deploys Token-22 v8 at a fresh address rather than mainnet's canonical.
+ * SPL Token-2022 program ID — canonical mainnet address. Baked at genesis on
+ * staccana so Anchor's `Program<'info, Token2022>` checks pass and so wallet
+ * libs that hardcode this constant work without any custom config.
  */
 export const TOKEN_2022_PROGRAM_ID = new PublicKey(TOKEN_2022_PROGRAM_ID_2);
 
 /**
- * SPL Associated Token Account program ID. Used to derive a wallet's ATA for
- * a given Token-2022 mint and to construct an idempotent create-ATA-if-missing ix.
- * Same address caveat as TOKEN_2022_PROGRAM_ID above.
+ * SPL Associated Token Account program — canonical mainnet address. Baked at
+ * genesis on staccana. (Was previously a fresh post-deploy address; the rebake
+ * moved it to canonical so wallets + spl-token's `getAssociatedTokenAddress`
+ * stop hitting `ProgramAccountNotFound` on buy/transfer txs.)
  */
-export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("2osq4Xf5YxbpyR4nWqJkqpsyRYwPrVD6CjZztCHCvYd6");
+export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
-/** SPL Token v3 (the original spl-token program). */
-export const TOKEN_PROGRAM_ID = new PublicKey("4PsxvxhPuysYQAf8FrggZKQvxQkCVG6hQCVHVJFrmFRj");
+/** SPL Token v3 (the original spl-token program) — canonical mainnet address. */
+export const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
-/** SPL Memo v3. */
-export const MEMO_PROGRAM_ID = new PublicKey("2o6EJBtsFaf4yBpgZ992zjaQPjukUFHZT7SmE2J8e9pG");
+/** SPL Memo v3 — canonical mainnet address. */
+export const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
 /**
  * System program ID (canonical Solana).
