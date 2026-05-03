@@ -27,16 +27,13 @@
 
 use anyhow::{Context, Result};
 use solana_account::AccountSharedData;
+use solana_program::program_option::COption;
 use solana_pubkey::Pubkey;
 use solana_rent::Rent;
-use solana_sdk_ids::sysvar;
 
 use spl_pod::optional_keys::OptionalNonZeroPubkey;
 use spl_token_2022::extension::confidential_transfer::ConfidentialTransferMint;
 use spl_token_2022::extension::{BaseStateWithExtensionsMut, ExtensionType, StateWithExtensionsMut};
-use spl_token_2022::pod::{PodCOption, PodMint};
-use spl_token_2022::pod_instruction::PodTokenInstruction;
-use spl_token_2022::state::AccountState;
 
 use crate::pdas::{
     bridge_asset_pda, SPL_TOKEN_2022_PROGRAM_ID, SSUSDC_MINT_ID, STSOL_MINT_ID, WSOL_MINT_ID,
@@ -114,11 +111,11 @@ pub fn build_mint_account(slot: &MintSlot) -> Result<(Pubkey, AccountSharedData)
         cte.auditor_elgamal_pubkey = Default::default();
 
         // Base mint init.
-        state.base.mint_authority = PodCOption::some(auth);
-        state.base.supply = 0u64.into();
+        state.base.mint_authority = COption::Some(auth);
+        state.base.supply = 0;
         state.base.decimals = slot.decimals;
-        state.base.is_initialized = true.into();
-        state.base.freeze_authority = PodCOption::none();
+        state.base.is_initialized = true;
+        state.base.freeze_authority = COption::None;
 
         state
             .init_account_type()
@@ -177,9 +174,9 @@ mod tests {
             let parsed =
                 StateWithExtensions::<spl_token_2022::state::Mint>::unpack(data).expect("unpack");
             assert_eq!(parsed.base.decimals, slot.decimals);
-            assert_eq!(u64::from(parsed.base.supply), 0);
+            assert_eq!(parsed.base.supply, 0);
             let auth = bridge_asset_pda(slot.asset_id).0;
-            assert_eq!(parsed.base.mint_authority, PodCOption::some(auth));
+            assert_eq!(parsed.base.mint_authority, COption::Some(auth));
             assert!(parsed.base.freeze_authority.is_none());
             // CTE extension reads back.
             let cte = parsed
@@ -210,12 +207,4 @@ mod tests {
         assert_ne!(a, c);
     }
 
-    // Suppress unused-import warning when the unused symbols stay around.
-    #[allow(dead_code)]
-    fn _silence_unused() {
-        let _ = sysvar::id;
-        let _ = PodTokenInstruction::Revoke;
-        let _ = AccountState::Initialized;
-        let _: PodMint = unsafe { std::mem::zeroed() };
-    }
 }
