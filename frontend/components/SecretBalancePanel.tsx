@@ -486,6 +486,7 @@ export function SecretBalancePanel({
           </div>
         ) : null}
       </CardHeader>
+      <PendingClaimsRow onClaimed={refresh} />
       {selected ? (
         <>
           <button
@@ -892,4 +893,97 @@ function parseDecimalToBigInt(input: string, decimals: number): bigint | null {
   const total = intVal * 10n ** BigInt(decimals) + fracVal;
   if (total < 0n || total > (1n << 64n) - 1n) return null;
   return total;
+}
+
+/**
+ * "Pending claims" row at the top of the secret-balance card. Scans the
+ * connected wallet for non-canonical Token-22 accounts (transit drops) and
+ * exposes a one-click "Claim" button per item.
+ *
+ * Today the Claim button is a stub — actually moving funds back to the
+ * recipient's canonical ATA needs the multi-ix flow described in the SPEC
+ * (Withdraw + EmptyAccount + ConfigureAccount + Deposit + ApplyPending) and
+ * a client-side proof generator for `EmptyAccount`'s ZeroCiphertext proof,
+ * which we don't have wired up server-side yet. The detector itself is
+ * useful right now as visibility — the UI surfaces the inflight transit
+ * accounts so users know value is parked under their key.
+ *
+ * TODO(transit-claim): build the claim tx and wire the button.
+ */
+function PendingClaimsRow({
+  onClaimed,
+}: {
+  onClaimed?: () => void;
+}): JSX.Element | null {
+  const { connection } = useConnection();
+  const { publicKey, connected } = useWallet();
+  const [pending, setPending] = useState<PendingTransitAccount[] | null>(null);
+
+  useEffect(() => {
+    if (!publicKey || !connected) {
+      setPending(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        // We pass `null` for the canonical ElGamal pubkey — without a
+        // signMessage prompt at scan time we can't derive it. The result is
+        // that a recipient's own previously-CT-configured ATA shows up as
+        // a "pending claim" too. Future: cache the derived pubkey in
+        // sessionStorage after the first signMessage so the scan can filter.
+        const found = await scanPendingTransitAccounts(
+          connection,
+          publicKey,
+          null,
+        );
+        if (!cancelled) setPending(found);
+      } catch {
+        if (!cancelled) setPending([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [connection, publicKey, connected]);
+
+  if (!pending || pending.length === 0) return null;
+
+  return (
+    <div className="border-t border-border/50 px-6 py-3 text-xs">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="font-medium">Pending claims</span>
+        <span className="text-[10px] text-muted-foreground">
+          {pending.length}
+        </span>
+      </div>
+      <ul className="space-y-1">
+        {pending.map((p) => (
+          <li
+            key={p.account.toBase58()}
+            className="flex items-center justify-between gap-2 rounded border border-border/40 bg-secondary/20 px-2 py-1.5"
+          >
+            <div className="min-w-0 space-y-0.5">
+              <div className="truncate font-mono text-[10px] text-muted-foreground">
+                {truncatePubkey(p.mint.toBase58(), 4, 4)}
+              </div>
+              <div className="truncate font-mono text-[10px]">
+                {truncatePubkey(p.account.toBase58(), 4, 4)}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-6 px-2 text-[10px]"
+              disabled
+              title="Claim flow pending — see lib/confidential-transit.ts TODO"
+              onClick={() => onClaimed?.()}
+            >
+              Claim
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
