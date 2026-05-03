@@ -87,6 +87,7 @@ User=staccana
 Group=staccana
 LimitNOFILE=2000000
 LimitNPROC=65535
+LimitMEMLOCK=infinity
 TimeoutStopSec=180
 Restart=on-failure
 RestartSec=10s
@@ -111,7 +112,7 @@ ExecStart=/usr/local/bin/agave-validator \\
   --no-snapshot-fetch \\
   --no-genesis-fetch \\
   --no-wait-for-vote-to-start-leader \\
-  --gossip-host \${STACCANA_THIS_PUBLIC_IP} \\
+  --bind-address \${STACCANA_THIS_PUBLIC_IP} \\
   --entrypoint \${STACCANA_VAL1_GOSSIP} \\
   --full-rpc-api \\
   --enable-rpc-transaction-history \\
@@ -121,7 +122,7 @@ ExecStart=/usr/local/bin/agave-validator \\
   --rpc-port 8899 \\
   --rpc-bind-address 127.0.0.1 \\
   --gossip-port 8001 \\
-  --dynamic-port-range 8002-8020 \\
+  --dynamic-port-range 8002-8027 \\
   --log /var/log/staccana/validator-${N}.log
 
 [Install]
