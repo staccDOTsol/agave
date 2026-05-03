@@ -838,6 +838,15 @@ export interface TransferIxArgs {
   transferAmountAuditorCiphertextLo?: Uint8Array;
   /** Auditor ciphertext hi-half — 64B. Zero-bytes ok when auditor is disabled. */
   transferAmountAuditorCiphertextHi?: Uint8Array;
+  /**
+   * New available balance plaintext (old_balance - amount), required by the
+   * equality proof. The wasm `ciphertext_commitment_equality_proof` checks
+   * that `sourceCiphertext` (the *post-transfer* ciphertext under the
+   * sender's pubkey) and `newBalanceCommitment` both encode this value. If
+   * the three (ciphertext, commitment, amount) aren't self-consistent, the
+   * generator rejects with `InconsistentInput`.
+   */
+  newBalancePlaintext?: bigint;
   /** Optional fetch override. */
   fetchImpl?: typeof fetch;
 }
@@ -885,6 +894,7 @@ export async function buildTransferInstruction(
   const sourceCt = args.sourceCiphertext ?? new Uint8Array(64);
   const newBalCommit = args.newBalanceCommitment ?? new Uint8Array(32);
   const newBalOpen = args.newBalanceOpening ?? new Uint8Array(32);
+  const newBalPlain = args.newBalancePlaintext;
   const openingLo = args.transferAmountOpeningLo ?? new Uint8Array(32);
   const openingHi = args.transferAmountOpeningHi ?? new Uint8Array(32);
   const auditorCtLo = args.transferAmountAuditorCiphertextLo ?? new Uint8Array(64);
@@ -895,6 +905,57 @@ export async function buildTransferInstruction(
   }
   if (auditorCtHi.length !== ELGAMAL_CIPHERTEXT_LEN) {
     throw new RangeError("transferAmountAuditorCiphertextHi must be 64 bytes");
+  }
+
+  // Pre-flight the equality-proof inputs. The wasm
+  // `ciphertext_commitment_equality_proof` rejects with `InconsistentInput`
+  // when (ciphertext, commitment, opening, amount, seed) don't form a
+  // self-consistent tuple — i.e. when `ciphertext` doesn't encrypt `amount`
+  // under the seed-derived pubkey, or when `commitment` isn't `Pedersen(amount,
+  // opening)`. The client cannot fabricate these from zero buffers.
+  //
+  // The inputs MUST come from the same source: callers compute the
+  // post-transfer source ciphertext via ElGamal::encrypt and capture both
+  // the ciphertext bytes AND the randomness; that randomness becomes the
+  // Pedersen `opening` and `Pedersen(new_balance, opening)` is the
+  // commitment.
+  //
+  // The current `@staccoverflow/zk-proofs-wasm@0.3.0` does NOT export
+  // `elgamal_encrypt` or a unified `transfer_proof` super-builder, so the
+  // client has no way to construct a real post-transfer source ciphertext.
+  // Until the wasm package adds one of those exports (or we ship a
+  // curve25519-dalek JS implementation), confidential Transfer cannot land
+  // on chain. Surface this cleanly via `ProofUnavailableError` so the UI
+  // falls back to public `TransferChecked` instead of producing a 500 from
+  // the proof endpoint.
+  const seedNonzero = seed.some((b) => b !== 0);
+  const sourceCtNonzero = sourceCt.some((b) => b !== 0);
+  const newBalCommitNonzero = newBalCommit.some((b) => b !== 0);
+  if (
+    !seedNonzero ||
+    !sourceCtNonzero ||
+    !newBalCommitNonzero ||
+    newBalPlain === undefined
+  ) {
+    throw new ProofUnavailableError(
+      "ciphertext_commitment_equality",
+      "transfer_inputs_unavailable",
+      "buildTransferInstruction needs (elgamalSeed, sourceCiphertext, newBalanceCommitment, newBalanceOpening, newBalancePlaintext) all derived from the same ElGamal::encrypt(new_balance) call. " +
+        "@staccoverflow/zk-proofs-wasm@0.3.0 doesn't export elgamal_encrypt or a transfer_proof super-builder, so the client cannot construct a valid post-transfer source ciphertext. " +
+        "Falling back to public TransferChecked.",
+    );
+  }
+  if (sourceCt.length !== ELGAMAL_CIPHERTEXT_LEN) {
+    throw new RangeError("sourceCiphertext must be 64 bytes");
+  }
+  if (newBalCommit.length !== 32) {
+    throw new RangeError("newBalanceCommitment must be 32 bytes");
+  }
+  if (newBalOpen.length !== 32) {
+    throw new RangeError("newBalanceOpening must be 32 bytes");
+  }
+  if (newBalPlain < 0n || newBalPlain > (1n << 64n) - 1n) {
+    throw new RangeError(`newBalancePlaintext out of u64 range: ${newBalPlain}`);
   }
 
   // Token-22 splits the 64-bit transfer amount into a 16-bit lo half and a
@@ -911,6 +972,11 @@ export async function buildTransferInstruction(
   // Three proofs, all server-side via the wasm-backed proof API.
   // Equality first — binds the (post-transfer) source ciphertext to a
   // Pedersen commitment so the range proof can operate on the commitment.
+  // The wasm rejects with `InconsistentInput` unless every field below
+  // refers to the *new* source available balance: `sourceCiphertext` is the
+  // post-transfer ciphertext under the sender's pubkey, `commitment` is
+  // `Pedersen(newBalancePlaintext, opening)`, and `amount` is the cleartext
+  // value both encode. The pre-flight above guarantees these are non-zero.
   const eq = await requestServerSideProof(
     "ciphertext_commitment_equality",
     {
@@ -918,13 +984,7 @@ export async function buildTransferInstruction(
       ciphertext: bytesToBase64(sourceCt),
       commitment: bytesToBase64(newBalCommit),
       opening: bytesToBase64(newBalOpen),
-      // Plaintext amount the (ciphertext, commitment) tuple both encode.
-      // For a transfer, this is the *new* source available balance, which
-      // the caller must compute (old - amount). We pass the transfer amount
-      // here as a placeholder when the caller didn't pre-compute the new
-      // balance — the proof will fail to verify on-chain but the equality
-      // proof generator will still produce bytes from the wasm side.
-      amount: args.amount.toString(),
+      amount: newBalPlain.toString(),
     },
     fetchImpl,
   );
@@ -1128,9 +1188,32 @@ export async function buildWithdrawInstruction(
   const sourceCt = args.sourceCiphertext ?? new Uint8Array(64);
   const newBalCommit = args.newBalanceCommitment ?? new Uint8Array(32);
   const newBalOpen = args.newBalanceOpening ?? new Uint8Array(32);
-  const newBalPlain = args.newBalancePlaintext ?? 0n;
+  const newBalPlain = args.newBalancePlaintext;
   const seedB64 = bytesToBase64(seed);
   const fetchImpl = args.fetchImpl ?? fetch;
+
+  // Same self-consistency requirement as the Transfer equality proof —
+  // see the matching pre-flight in `buildTransferInstruction`. Without a
+  // real post-withdraw source ciphertext + matching commitment + opening +
+  // new balance plaintext, the wasm rejects with `InconsistentInput`. Fail
+  // upstream so the sell flow falls back to the public-spend path.
+  const seedNonzero = seed.some((b) => b !== 0);
+  const sourceCtNonzero = sourceCt.some((b) => b !== 0);
+  const newBalCommitNonzero = newBalCommit.some((b) => b !== 0);
+  if (
+    !seedNonzero ||
+    !sourceCtNonzero ||
+    !newBalCommitNonzero ||
+    newBalPlain === undefined
+  ) {
+    throw new ProofUnavailableError(
+      "ciphertext_commitment_equality",
+      "withdraw_inputs_unavailable",
+      "buildWithdrawInstruction needs (elgamalSeed, sourceCiphertext, newBalanceCommitment, newBalanceOpening, newBalancePlaintext) all derived from the same ElGamal::encrypt(new_balance) call. " +
+        "@staccoverflow/zk-proofs-wasm@0.3.0 doesn't export elgamal_encrypt or a withdraw_proof super-builder, so the client cannot construct a valid post-withdraw source ciphertext. " +
+        "Falling back to public sell.",
+    );
+  }
 
   // Equality proof: binds the (post-withdraw) source ciphertext to a
   // Pedersen commitment of the leftover plaintext amount.
