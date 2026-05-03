@@ -32,8 +32,13 @@ RUN echo "[builder] BUILDARCH=$BUILDARCH TARGETARCH=$TARGETARCH"
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential pkg-config libssl-dev libudev-dev clang cmake \
+        libclang-dev llvm-dev \
         protobuf-compiler git curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+# Help bindgen / rocksdb-sys find libclang under each TARGETARCH (Debian puts
+# it at /usr/lib/{x86_64,aarch64}-linux-gnu/libclang.so.1).
+ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
 
 WORKDIR /build
 COPY agave-src/ ./
