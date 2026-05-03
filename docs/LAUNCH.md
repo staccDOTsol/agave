@@ -88,25 +88,37 @@ Supermajority is 3-of-4 = 75%. The cluster tolerates one validator down.
 - **Explorer**: `https://explorer.mp.fun` — staccana-branded fork of solana-labs/explorer with XMR-style ConfidentialIndicator components for Token-22 CTE accounts
 - **Docker image** (laptop validator): `jrsdunn/solana-classic-validator:v2.0.0-devnet-20260502` and `:latest` (slug inherited from solana-classic v1's 332 organic Docker pulls; v2 keeps the brand and the audience)
 
+## live chain
+
+- **Genesis hash**: `75Ymas2GiSjX4YRGHE9oJKoXKthYSKBimGycC62Pyswd`
+- **Initial validator set**: 4 (BtTrfSMe, GfqwY5En, 6dG5FtSn, 4fk2Ky8K) × 1000 SOL stake each
+- **Epoch length**: 1024 slots
+- **Block time**: ~400 ms (Solana default)
+- **First block produced**: 2026-05-03 ~01:45 UTC
+
 ## programs deployed
 
-5 staccana programs, all upgradeable BPF, deployed via
-`infra/scripts/40-deploy-programs.sh` post-boot. IDs land in
-`/etc/staccana/program-ids.json` on val-1 — see that file for canonical
-addresses. The programs:
+5 staccana programs + 4 SPL-stack programs, all live on staccana devnet
+2026-05-03. IDs land in `/etc/staccana/program-ids.json` on val-1.
 
-- **lazy-claim** — the 85.6M claimable airdrop (root-embedded in genesis)
-- **bridge** — staccana-side of the cross-chain bridge (wSOL R-locked +
-  AMM-oracle-quoted native SOL, see `docs/BRIDGE.md`)
-- **secret-pump** — bonding-curve token launcher with Token-22 CTE
-  ("pump.fun, but every balance is encrypted by default")
-- **validator-subsidy** — treasury → validator runtime payouts
-- **megadrop** — the 30M SOL second drop (Merkle root re-inited post-boot
-  with the real `0x4cd7098e...` root)
+### staccana programs
 
-Plus on the Solana side: **bridge-vault** at `F2AypZ8FDWnR5bdyLHzo4idof9YrBpdBmbgLwLBjLfVU`
-(devnet) — escrows wSOL/stSOL/ssUSDC, releases on M-of-N federation
-attestation.
+- **lazy-claim**         `BK95n7mFdF7Wk5T8oiSFLtmULprQe6bRcpgLMQGC3oeK` — the 85.6M claimable airdrop (root-embedded in genesis)
+- **bridge**             `LA7h3hjvD62MeTtdeE4h2vq3EGxbU1oqzHtewp4xb9b` — staccana-side bridge (wSOL R-locked + AMM-oracle-quoted native SOL, see `docs/BRIDGE.md`)
+- **secret-pump**        `3Pbv3bHBh7SvcMDZqBFjJ3T9jLdrpiednaTRdViitMWF` — Token-22 CTE bonding-curve launcher ("pump.fun, but every balance encrypted by default")
+- **validator-subsidy**  `Ef9YyzrsFx7sptmu8v3M6ju82krceHXhq6jfivw6BBgk` — treasury → validator runtime payouts
+- **megadrop**           `Aicff1zk6b5ifYzFoyhenUD5ehhFYb8GiDbRCrWt9t34` — 30M SOL second drop (root `0x4cd7098e…` initialized post-boot at PDA `GSPLWBykuVJNjFyqeLKMDkpoi4rZSD4fkXzVVwL9xGpV`)
+
+### SPL stack (deployed at fresh addresses; canonical IDs require Anza's keypairs)
+
+- **Token-22 v8**         `7bFHH22ASoMF1MGPvKPSWVfKXku8UJQUh355rmdrwAjU` — confidential transfers work day one
+- **SPL Token v3**        `4PsxvxhPuysYQAf8FrggZKQvxQkCVG6hQCVHVJFrmFRj`
+- **Associated Token**    `2osq4Xf5YxbpyR4nWqJkqpsyRYwPrVD6CjZztCHCvYd6`
+- **SPL Memo v3**         `2o6EJBtsFaf4yBpgZ992zjaQPjukUFHZT7SmE2J8e9pG`
+
+### Solana side
+
+- **bridge-vault**        `F2AypZ8FDWnR5bdyLHzo4idof9YrBpdBmbgLwLBjLfVU` (devnet) — escrows wSOL/stSOL/ssUSDC, releases on M-of-N federation attestation
 
 ## federation
 
