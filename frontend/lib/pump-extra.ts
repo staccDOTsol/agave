@@ -221,10 +221,17 @@ export async function fetchRecentTrades(
     if (!tx) continue;
     const parsed = classifyTradeFromTx(tx, programId);
     if (!parsed) continue;
+    // Prefer the parsed-tx envelope's blockTime — the RPC's
+    // `getSignaturesForAddress` often returns `blockTime: null` on freshly
+    // confirmed slots (the block-time stamp lags the slot's confirmation by
+    // a few hundred ms). `getParsedTransaction` re-resolves it from the
+    // BlockMeta cache and is more reliable. Either may still be null on
+    // very-recent slots; the indexer falls back to wall-clock time then.
+    const blockTime = tx.blockTime ?? sig.blockTime ?? null;
     out.push({
       signature: sig.signature,
       slot: sig.slot,
-      blockTime: sig.blockTime ?? null,
+      blockTime,
       ...parsed,
     });
   }

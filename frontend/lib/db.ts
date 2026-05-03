@@ -294,6 +294,29 @@ export async function setIndexState(
   `;
 }
 
+/**
+ * Backfill `block_time` for any rows the indexer wrote with NULL — a side
+ * effect of the RPC returning `blockTime: null` for very-fresh slots. The
+ * OHLCV query filters `block_time IS NOT NULL`, so NULL rows never plot;
+ * this UPDATE recovers them by reading their `inserted_at` wall clock,
+ * which is within a cron-tick of the actual block time (close enough for
+ * a 60s candle bucket).
+ *
+ * Returns the number of rows updated. Idempotent and safe to call every
+ * cron tick — the WHERE block_time IS NULL clause limits work to fresh
+ * stragglers only.
+ */
+export async function backfillNullBlockTimes(): Promise<number> {
+  const sql = getSql();
+  const rows = (await sql`
+    UPDATE launch_trades
+       SET block_time = EXTRACT(EPOCH FROM inserted_at)::bigint
+     WHERE block_time IS NULL
+    RETURNING signature
+  `) as Array<{ signature: string }>;
+  return rows.length;
+}
+
 /** All known mints we've seen at least one trade for — used by the cron. */
 export async function getKnownMints(): Promise<string[]> {
   const sql = getSql();

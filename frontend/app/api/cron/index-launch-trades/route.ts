@@ -39,6 +39,7 @@ import { fetchRecentTrades } from "@/lib/pump-extra";
 import { BONDING_CURVE_DISCRIMINATOR } from "@/lib/anchor";
 import { RPC_URL, SECRET_PUMP_PROGRAM_ID } from "@/lib/staccana";
 import {
+  backfillNullBlockTimes,
   ensureSchema,
   getIndexState,
   setIndexState,
@@ -56,6 +57,8 @@ export const maxDuration = 60;
 interface IndexerStats {
   curvesScanned: number;
   newTradesInserted: number;
+  /** NULL block_time rows backfilled from inserted_at this tick. */
+  blockTimesBackfilled: number;
   errors: Array<{ mint: string; error: string }>;
   durationMs: number;
 }
@@ -76,6 +79,7 @@ export async function GET(req: Request): Promise<NextResponse> {
   const stats: IndexerStats = {
     curvesScanned: 0,
     newTradesInserted: 0,
+    blockTimesBackfilled: 0,
     errors: [],
     durationMs: 0,
   };
@@ -119,6 +123,19 @@ export async function GET(req: Request): Promise<NextResponse> {
       const msg = err instanceof Error ? err.message : String(err);
       stats.errors.push({ mint: acc.pubkey.toBase58(), error: msg });
     }
+  }
+
+  // Heal any rows previously inserted with a NULL block_time (e.g. before
+  // the wall-clock fallback shipped, or from a sub-second RPC blockTime
+  // miss). Without this, the OHLCV query — which filters
+  // `block_time IS NOT NULL` — silently drops these rows forever.
+  try {
+    stats.blockTimesBackfilled = await backfillNullBlockTimes();
+  } catch (err) {
+    stats.errors.push({
+      mint: "*",
+      error: `backfillNullBlockTimes: ${err instanceof Error ? err.message : String(err)}`,
+    });
   }
 
   stats.durationMs = Date.now() - t0;
@@ -183,11 +200,18 @@ async function indexCurve(
       reserves = applySell(reserves, solOutGross);
     }
 
+    // Fall back to wall-clock seconds if the RPC didn't surface a blockTime
+    // for this signature. Fresh slots can have `blockTime: null` for a few
+    // hundred ms after confirmation, and the OHLCV query filters
+    // `block_time IS NOT NULL` — so a NULL stamp = trade that never plots.
+    // Within ~half a second of true slot time, this is the right call.
+    const blockTime = t.blockTime ?? Math.floor(Date.now() / 1000);
+
     const row: DbTradeRow = {
       signature: t.signature,
       mint: mintB58,
       slot: t.slot,
-      blockTime: t.blockTime,
+      blockTime,
       side: t.side,
       userPubkey: t.user,
       solLamports: userDelta,
