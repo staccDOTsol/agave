@@ -34,7 +34,8 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { OhlcvChart } from "@/components/pump/ohlcv-chart";
+import { MarketChart } from "@/components/MarketChart";
+import { SecretBalancePanel } from "@/components/SecretBalancePanel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
@@ -58,7 +59,6 @@ import {
   buildApplyPendingBalanceInstruction,
   buildConfigureAccountInstruction,
   buildDepositInstruction,
-  buildTransferInstruction,
   buildWithdrawInstruction,
   deriveElGamalKeypair,
   hasConfidentialAccountState,
@@ -325,18 +325,11 @@ export default function TokenDetailPage(): JSX.Element {
 
       <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
         <div className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Price chart</CardTitle>
-              <CardDescription>
-                Indexed trades bucketed into OHLCV candles. Falls back to a synthetic
-                curve preview before the first trade lands.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <OhlcvChart mint={mint.toBase58()} fallbackReserves={reserves} />
-            </CardContent>
-          </Card>
+          <MarketChart
+            mint={mint}
+            description="Indexed trades bucketed into OHLCV candles. Falls back to a synthetic curve preview before the first trade lands."
+          />
+
 
           <StatsGrid
             priceSol={priceSol}
@@ -367,7 +360,7 @@ export default function TokenDetailPage(): JSX.Element {
 
         <aside className="space-y-4">
           <TradePanel mint={mint} curve={curve} onSuccess={onTradeSuccess} />
-          <SendPanel mint={mint} />
+          <SecretBalancePanel mint={mint} />
         </aside>
       </div>
     </div>
@@ -1247,251 +1240,6 @@ function TradePanel({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Send (peer-to-peer transfer) panel.
-//
-// Builds a Token-22 transfer between two ATAs of the same mint. Tries the
-// confidential-transfer path first (encrypted amount); on
-// `ProofUnavailableError` falls back to a public `TransferCheckedInstruction`.
-// The fallback is identical in observable effect to a normal SPL token
-// transfer — only the privacy property is lost.
-//
-// Why it lives next to the trade panel: this is THE feature staccana sells.
-// Encrypting buys is half the story; the other half is that p2p transfers
-// don't leak amounts to chain-watchers. Keep it visible.
-// ---------------------------------------------------------------------------
-
-function SendPanel({ mint }: { mint: PublicKey }): JSX.Element {
-  const { connection } = useConnection();
-  const wallet = useWallet();
-  const { publicKey, sendTransaction, connected } = wallet;
-  const { toast } = useToast();
-
-  const [recipientStr, setRecipientStr] = useState("");
-  const [amountStr, setAmountStr] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [confidential, setConfidential] = useState(true);
-  const [usedFallback, setUsedFallback] = useState(false);
-
-  const recipient = useMemo(() => {
-    try {
-      return new PublicKey(recipientStr.trim());
-    } catch {
-      return null;
-    }
-  }, [recipientStr]);
-
-  const amount = useMemo(() => parseDecimalToBigInt(amountStr, 9), [amountStr]);
-
-  const onSend = useCallback(async () => {
-    setError(null);
-    setUsedFallback(false);
-    if (!publicKey || !connected) {
-      setError("Connect a wallet first");
-      return;
-    }
-    if (!recipient) {
-      setError("Recipient address is invalid");
-      return;
-    }
-    if (!amount || amount <= 0n) {
-      setError("Enter an amount > 0");
-      return;
-    }
-    if (recipient.equals(publicKey)) {
-      setError("Recipient is your own wallet");
-      return;
-    }
-
-    try {
-      setSubmitting(true);
-      const senderAta = token22Ata(publicKey, mint);
-      const recipientAta = token22Ata(recipient, mint);
-
-      const tx = new Transaction();
-
-      // Always idempotent-create the recipient ATA so the receiver doesn't
-      // have to pre-pay rent. Cheap (~2k CU + a few thousand lamports).
-      tx.add(
-        buildCreateAtaIdempotentInstruction({
-          payer: publicKey,
-          owner: recipient,
-          mint,
-        }),
-      );
-
-      let usedConfidential = false;
-      if (confidential) {
-        try {
-          // Derive ElGamal keys for both sides. Sender derives via
-          // wallet.signMessage; recipient pubkey is taken on faith from the
-          // recipient's ATA when the proof generator ships — we pass a
-          // zero pubkey here as a placeholder since the call will throw
-          // before the bytes are used.
-          const senderKeys = await deriveElGamalKeypair(
-            { publicKey, signMessage: wallet.signMessage },
-            mint,
-          );
-          // The transfer-ix builder generates three proofs server-side and
-          // returns `[Transfer, VerifyEquality, VerifyValidity, VerifyRange]`.
-          // Today's MVP feeds placeholder commitments for the lo/hi halves
-          // of the transfer amount — the on-chain Token-22 verifier will
-          // reject the resulting tx, so the catch below routes us into the
-          // public TransferChecked path. See `lib/confidential.ts` for the
-          // TODO that closes the gap (parsing the validity proof's context
-          // bytes to extract the canonical commitments).
-          const ixs = await buildTransferInstruction({
-            ata: senderAta,
-            destinationAta: recipientAta,
-            mint,
-            owner: publicKey,
-            amount,
-            senderElgamalPubkey: senderKeys.secretSeed.slice(0, 32),
-            recipientElgamalPubkey: new Uint8Array(32),
-            auditorElgamalPubkey: new Uint8Array(32),
-            newSourceDecryptableAvailableBalance: new Uint8Array(36),
-            elgamalSeed: senderKeys.secretSeed,
-          });
-          for (const ix of ixs) tx.add(ix);
-          usedConfidential = true;
-        } catch (err) {
-          if (!(err instanceof ProofUnavailableError)) {
-            throw err;
-          }
-          // eslint-disable-next-line no-console
-          console.warn(
-            "[send] confidential path unavailable, falling back to public TransferChecked",
-            err.code,
-          );
-        }
-      }
-
-      if (!usedConfidential) {
-        // Public path — TransferChecked. Lazy-import the spl-token helper so
-        // the codepath only loads when actually used.
-        const { createTransferCheckedInstruction } = await import("@solana/spl-token");
-        tx.add(
-          createTransferCheckedInstruction(
-            senderAta,
-            mint,
-            recipientAta,
-            publicKey,
-            amount,
-            9,
-            [],
-            TOKEN_2022_PROGRAM_ID,
-          ),
-        );
-        setUsedFallback(true);
-      }
-
-      tx.feePayer = publicKey;
-      tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
-      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
-      toast({
-        variant: "success",
-        title: usedConfidential ? "Encrypted transfer submitted" : "Transfer submitted (public)",
-        description: (
-          <a
-            className="font-mono text-xs underline underline-offset-2"
-            href={explorerTxUrl(sig)}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {truncatePubkey(sig, 8, 8)}
-          </a>
-        ),
-      });
-      setAmountStr("");
-      setRecipientStr("");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
-      toast({ variant: "destructive", title: "Send failed", description: msg });
-    } finally {
-      setSubmitting(false);
-    }
-  }, [
-    publicKey,
-    connected,
-    recipient,
-    amount,
-    mint,
-    connection,
-    sendTransaction,
-    confidential,
-    wallet.signMessage,
-    toast,
-  ]);
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <span aria-hidden>🔒</span> Send
-        </CardTitle>
-        <CardDescription>
-          Transfer tokens to another wallet. Uses Token-22 confidential transfers when the
-          proof generator is available; falls back to a public transfer otherwise.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <label className="block space-y-1">
-          <span className="text-xs font-medium text-muted-foreground">Recipient (pubkey)</span>
-          <input
-            type="text"
-            value={recipientStr}
-            onChange={(e) => setRecipientStr(e.target.value)}
-            placeholder="Recipient address…"
-            className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
-            spellCheck={false}
-          />
-        </label>
-        <label className="block space-y-1">
-          <span className="text-xs font-medium text-muted-foreground">Amount (tokens)</span>
-          <input
-            type="text"
-            inputMode="decimal"
-            value={amountStr}
-            onChange={(e) => setAmountStr(e.target.value)}
-            placeholder="0.0"
-            className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-        </label>
-        <label className="flex items-center justify-between rounded-md border border-border/40 bg-secondary/20 px-3 py-2 text-xs">
-          <span>Try encrypted transfer first (falls back to public on failure)</span>
-          <input
-            type="checkbox"
-            checked={confidential}
-            onChange={(e) => setConfidential(e.target.checked)}
-            className="h-3.5 w-3.5 accent-emerald-500"
-          />
-        </label>
-        <Button onClick={onSend} disabled={submitting} className="w-full">
-          {submitting ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Sending…
-            </>
-          ) : (
-            "Send"
-          )}
-        </Button>
-        {error ? <p className="text-xs text-destructive">{error}</p> : null}
-        {usedFallback ? (
-          <p className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-200">
-            Encrypted transfer rejected by chain — sent as public TransferChecked instead.
-            (The proof bytes generate cleanly, but Token-22&apos;s verifier wants canonical
-            Pedersen commitments for the amount lo/hi halves; see
-            {" "}<span className="font-mono">lib/confidential.ts</span> TODO.) The amount
-            is visible on chain.
-          </p>
-        ) : null}
-      </CardContent>
-    </Card>
-  );
-}
 
 function DetailSkeleton({ mint }: { mint: PublicKey }): JSX.Element {
   return (

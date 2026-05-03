@@ -24,6 +24,7 @@ import { Plus, Search, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { MarketChart } from "@/components/MarketChart";
 import { KingOfTheHill, type KothCandidate } from "@/components/pump/king-of-the-hill";
 import { TokenCard, TokenCardSkeleton } from "@/components/pump/token-card";
 import { TradeTicker } from "@/components/pump/trade-ticker";
@@ -260,6 +261,11 @@ export default function PumpPage(): JSX.Element {
       </header>
 
       <ConfidentialityExplainer />
+
+      <MarketChart
+        title="Launchpad activity"
+        description="Aggregate OHLCV across active bonding curves (per-mint candles on token pages)."
+      />
 
       <TradeTicker onTrade={onTickerTrade} />
 

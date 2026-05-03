@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { MarketChart } from "@/components/MarketChart";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -30,6 +31,13 @@ export default function HomePage(): JSX.Element {
             </Button>
           </a>
         </div>
+      </section>
+
+      <section>
+        <MarketChart
+          title="Aggregate market"
+          description="Pick a token below to dive into per-mint OHLCV. Aggregate roll-up coming."
+        />
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">

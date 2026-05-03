@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 
 import { ClusterBanner } from "@/components/cluster-banner";
+import { SecretBalancePanel } from "@/components/SecretBalancePanel";
 import { SiteHeader } from "@/components/site-header";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/use-toast";
@@ -35,6 +36,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }):
         <WalletContextProviders>
           <SiteHeader />
           {children}
+          {/* Persistent secret-balance widget — visible on lg+ as a fixed
+              right sidebar. The component itself returns null pre-hydration
+              and on disconnected wallets so SSR is unaffected. */}
+          <aside className="pointer-events-none fixed right-4 top-24 z-20 hidden w-80 lg:block">
+            <div className="pointer-events-auto">
+              <SecretBalancePanel />
+            </div>
+          </aside>
         </WalletContextProviders>
       </ThemeProvider>
       <Toaster />
