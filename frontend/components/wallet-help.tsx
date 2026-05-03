@@ -85,25 +85,26 @@ export function WalletHelp(): JSX.Element {
     void runProbe();
   }, [runProbe]);
 
-  const genesisOk = probe.kind === "ok" ? "ok" : probe.kind === "mismatch" ? "mismatch" : "unknown";
-
-  // Toggle a body data-attr while the fixed banner is visible — `globals.css`
-  // adds the matching `padding-top` so the page hero doesn't slide under
-  // the banner. Without this the "Confidential launchpad" h1 overlapped the
-  // banner on narrow viewports (the old absolute-positioned banner had no
-  // layout footprint at all).
+  // The inline `<NetworkStatusBanner/>` doesn't have a ref to this
+  // component's `setOpen`; instead it sets `location.hash = 'wallet-help'`
+  // which we listen for here to pop the modal open. This avoids
+  // threading a context just for one cross-component prod.
   useEffect(() => {
-    if (typeof document === "undefined") return;
-    const showBanner = !connected || genesisOk === "mismatch";
-    if (showBanner) {
-      document.body.setAttribute("data-staccana-banner", "1");
-    } else {
-      document.body.removeAttribute("data-staccana-banner");
-    }
-    return () => {
-      document.body.removeAttribute("data-staccana-banner");
+    if (typeof window === "undefined") return;
+    const tryOpen = () => {
+      if (window.location.hash === "#wallet-help") {
+        setOpen(true);
+        // Clear the hash so a back-button doesn't re-trigger the modal
+        // and a re-click of the same setup-guide button still works.
+        history.replaceState(null, "", window.location.pathname + window.location.search);
+      }
     };
-  }, [connected, genesisOk]);
+    tryOpen();
+    window.addEventListener("hashchange", tryOpen);
+    return () => window.removeEventListener("hashchange", tryOpen);
+  }, []);
+
+  const genesisOk = probe.kind === "ok" ? "ok" : probe.kind === "mismatch" ? "mismatch" : "unknown";
 
   const onCopy = async (): Promise<void> => {
     try {
@@ -127,49 +128,10 @@ export function WalletHelp(): JSX.Element {
         <HelpCircle className="h-4 w-4" />
       </button>
 
-      {/* Wrong-network banner: shown when wallet isn't connected OR when the
-          page's connection's genesis hash doesn't match staccana's. We can't
-          probe the wallet's own RPC directly, so this is best-effort. */}
-      {/* Wrong-network / not-connected banner. Renders as a fixed bar at the
-          very top of the viewport, ABOVE the page's header — that way it
-          doesn't overlap the page hero. The body's `padding-top` is bumped
-          via the matching `body[data-staccana-banner="1"]` selector in
-          globals.css so site content doesn't slide under the banner.
-
-          On mobile (<sm) the URL field is too long to fit alongside copy/setup
-          buttons; we drop the bare URL and keep just the action buttons +
-          short label, which fits on one line.
-
-          Previously this used `absolute top-14` which assumed a 56px header,
-          breaking on mobile where the header collapses. */}
-      {(!connected || genesisOk === "mismatch") ? (
-        <div
-          className="fixed inset-x-0 top-0 z-30 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-b border-amber-400/40 bg-amber-400/10 px-3 py-1.5 text-center text-[11px] text-amber-300 sm:text-xs"
-          role="status"
-        >
-          <span>
-            {connected ? "Wallet on a different cluster." : "Add staccana to your wallet:"}
-          </span>
-          <code className="hidden rounded bg-amber-300/10 px-1.5 py-0.5 font-mono text-[11px] text-amber-100 sm:inline-block">
-            {STACCANA_RPC}
-          </code>
-          <button
-            type="button"
-            onClick={onCopy}
-            className="inline-flex h-5 items-center gap-1 rounded border border-amber-300/40 bg-amber-300/10 px-1.5 text-[11px] hover:bg-amber-300/20"
-          >
-            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-            {copied ? "copied" : "copy URL"}
-          </button>
-          <button
-            type="button"
-            onClick={() => setOpen(true)}
-            className="underline underline-offset-2"
-          >
-            setup guide
-          </button>
-        </div>
-      ) : null}
+      {/* Wrong-network banner moved into a sibling component
+          `<NetworkStatusBanner/>` so it lives in the page's normal flow and
+          doesn't fight z-index with the header / dialogs. WalletHelp now
+          owns ONLY the help button + the modal. */}
 
       {open ? (
         // The OUTER backdrop is the scrolling element — that way we don't
