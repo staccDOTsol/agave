@@ -78,6 +78,18 @@ pub mod staccana_megadrop {
         instructions::init_megadrop::handler(ctx, args)
     }
 
+    /// Authority-gated patch of the singleton `MegadropConfig` PDA — lets us
+    /// rotate the Merkle root after a re-snapshot, fix the genesis month,
+    /// or update the treasury authority without rebuilding genesis. Each
+    /// field is optional in the args; only provided fields are written. See
+    /// [`instructions::update_megadrop`].
+    pub fn update_megadrop(
+        ctx: Context<UpdateMegadrop>,
+        args: UpdateMegadropArgs,
+    ) -> Result<()> {
+        instructions::update_megadrop::handler(ctx, args)
+    }
+
     /// Holder-initiated claim. Anyone can submit (the holder, or a relayer on their
     /// behalf — but the holder must have produced a fresh ed25519 signature on the
     /// canonical message), and the lamports always land at the holder's pubkey.
