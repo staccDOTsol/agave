@@ -43,6 +43,10 @@ import {
 } from "@/lib/confidential";
 import {
   PendingTransitAccount,
+  fetchConfidentialAccountState,
+  findTransitMemoForAccountV2,
+  prepareTransitClaimApplyPendingTx,
+  prepareTransitClaimMigrationTx,
   prepareTransitSendIxs,
   scanPendingTransitAccounts,
 } from "@/lib/confidential-transit";
@@ -900,15 +904,16 @@ function parseDecimalToBigInt(input: string, decimals: number): bigint | null {
  * connected wallet for non-canonical Token-22 accounts (transit drops) and
  * exposes a one-click "Claim" button per item.
  *
- * Today the Claim button is a stub — actually moving funds back to the
- * recipient's canonical ATA needs the multi-ix flow described in the SPEC
- * (Withdraw + EmptyAccount + ConfigureAccount + Deposit + ApplyPending) and
- * a client-side proof generator for `EmptyAccount`'s ZeroCiphertext proof,
- * which we don't have wired up server-side yet. The detector itself is
- * useful right now as visibility — the UI surfaces the inflight transit
- * accounts so users know value is parked under their key.
+ * The claim is unavoidably 2 transactions:
  *
- * TODO(transit-claim): build the claim tx and wire the button.
+ *   TX A: ApplyPendingBalance — flushes the post-Transfer pending_balance
+ *         into available_balance under the transit ElGamal keypair.
+ *   TX B: Withdraw + EmptyAccount + ConfigureAccount + Deposit +
+ *         ApplyPendingBalance (v0 + LUT) — re-keys the account onto the
+ *         recipient's own ElGamal pubkey with the funds preserved as
+ *         encrypted pending balance.
+ *
+ * See `lib/confidential-transit.ts` for the flow + memo wire-format.
  */
 function PendingClaimsRow({
   onClaimed,
@@ -916,8 +921,11 @@ function PendingClaimsRow({
   onClaimed?: () => void;
 }): JSX.Element | null {
   const { connection } = useConnection();
-  const { publicKey, connected } = useWallet();
+  const wallet = useWallet();
+  const { publicKey, connected, sendTransaction } = wallet;
+  const { toast } = useToast();
   const [pending, setPending] = useState<PendingTransitAccount[] | null>(null);
+  const [claimingKey, setClaimingKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!publicKey || !connected) {
@@ -947,6 +955,185 @@ function PendingClaimsRow({
     };
   }, [connection, publicKey, connected]);
 
+  const onClaim = useCallback(
+    async (p: PendingTransitAccount) => {
+      if (!publicKey || !connected) {
+        toast({ variant: "destructive", title: "Wallet not connected" });
+        return;
+      }
+      const accountKey = p.account.toBase58();
+      try {
+        setClaimingKey(accountKey);
+
+        // 1. Recover the transit ElGamal seed + amount from the on-chain
+        //    memo. v2 memos embed the amount; v1 memos return null and the
+        //    claim aborts (we'd have to brute-force the discrete log
+        //    otherwise — out of scope for tonight's hack).
+        const memoMatch = await findTransitMemoForAccountV2(
+          connection,
+          p.account,
+          null,
+          publicKey,
+          p.mint,
+        );
+        if (!memoMatch) {
+          throw new Error(
+            "Could not find the transit memo for this account on chain.",
+          );
+        }
+        if (memoMatch.amount === null) {
+          throw new Error(
+            "This is an older v1 transit drop without an embedded amount; claim flow needs a v2 memo. Ask the sender to re-send.",
+          );
+        }
+        const transitSeed = memoMatch.transitSeed;
+        // The placeholder pubkey the sender used during ConfigureAccount —
+        // matches `transitElGamalPubkeyPlaceholder` (seed.slice(0, 32)).
+        const transitPubkey = transitSeed.slice(0, 32);
+        const amount = memoMatch.amount;
+
+        // 2. Derive the recipient's OWN ElGamal seed + pubkey — this prompts
+        //    a signMessage. Mirrors the sender's `deriveElGamalKeypair` call
+        //    so the resulting transit-account state looks identical to a
+        //    self-configured ATA after the claim lands.
+        const recipientKeys = await deriveElGamalKeypair(
+          { publicKey, signMessage: wallet.signMessage },
+          p.mint,
+        );
+        const recipientPubkey = recipientKeys.secretSeed.slice(0, 32);
+
+        // 3. Fetch decimals (Token-22 base account stores the mint pubkey
+        //    only; decimals lives on the mint account itself). We pull both
+        //    in one batch.
+        const [mintInfo, accountState] = await Promise.all([
+          connection.getParsedAccountInfo(p.mint, "confirmed"),
+          fetchConfidentialAccountState(connection, p.account),
+        ]);
+        let decimals = 9;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mintParsed: any = mintInfo.value?.data;
+        if (
+          mintParsed &&
+          typeof mintParsed === "object" &&
+          "parsed" in mintParsed &&
+          mintParsed.parsed?.info?.decimals !== undefined
+        ) {
+          decimals = Number(mintParsed.parsed.info.decimals);
+        }
+        if (!accountState) {
+          throw new Error(
+            "Transit account state not parseable — already claimed or not configured?",
+          );
+        }
+
+        // 4. TX A — ApplyPendingBalance. Flush the post-Transfer pending
+        //    into available so the migration tx has a known on-chain
+        //    available_balance ciphertext to feed into the equality proof.
+        //    `expected_pending_balance_credit_counter` must equal the
+        //    on-chain `pending_balance_credit_counter` AT TIME OF CALL
+        //    (the total number of credits the user expects to be flushing).
+        const applyIxs = prepareTransitClaimApplyPendingTx({
+          account: p.account,
+          recipient: publicKey,
+          expectedPendingBalanceCreditCounter:
+            accountState.pendingBalanceCreditCounter,
+        });
+        const applyTx = new Transaction();
+        for (const ix of applyIxs) applyTx.add(ix);
+        applyTx.feePayer = publicKey;
+        applyTx.recentBlockhash = (
+          await connection.getLatestBlockhash("confirmed")
+        ).blockhash;
+        const sigA = await sendTransaction(applyTx, connection, {
+          skipPreflight: true,
+        });
+        await connection.confirmTransaction(sigA, "confirmed");
+
+        // 5. Re-fetch the available_balance ciphertext now that
+        //    ApplyPendingBalance landed.
+        const postApply = await fetchConfidentialAccountState(
+          connection,
+          p.account,
+        );
+        if (!postApply) {
+          throw new Error("Failed to re-fetch transit account state after apply");
+        }
+
+        // 6. TX B — full migration. v0 + LUT (9 ixs total + LUT scope).
+        const migrationIxs = await prepareTransitClaimMigrationTx({
+          account: p.account,
+          recipient: publicKey,
+          mint: p.mint,
+          decimals,
+          amount,
+          availableCiphertextBeforeWithdraw: postApply.availableBalance,
+          transitSeed,
+          transitPubkey,
+          recipientElgamalSeed: recipientKeys.secretSeed,
+          recipientElgamalPubkey: recipientPubkey,
+        });
+        const lutResp = await connection.getAddressLookupTable(
+          STACCANA_MASTER_LUT,
+          { commitment: "confirmed" },
+        );
+        if (!lutResp.value) {
+          throw new Error(
+            "Master LUT not visible on chain — recipient setup required",
+          );
+        }
+        const blockhash = (await connection.getLatestBlockhash("confirmed"))
+          .blockhash;
+        const message = new TransactionMessage({
+          payerKey: publicKey,
+          recentBlockhash: blockhash,
+          instructions: migrationIxs,
+        }).compileToV0Message([lutResp.value]);
+        const vtx = new VersionedTransaction(message);
+        const sigB = await sendTransaction(vtx, connection, {
+          skipPreflight: true,
+        });
+        toast({
+          variant: "success",
+          title: "Claim submitted",
+          description: (
+            <a
+              className="font-mono text-xs underline underline-offset-2"
+              href={explorerTxUrl(sigB)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {truncatePubkey(sigB, 8, 8)}
+            </a>
+          ),
+        });
+        // Drop the row optimistically; the next scan will pick up the new
+        // (now self-keyed) account state.
+        setPending((prev) =>
+          (prev ?? []).filter((q) => !q.account.equals(p.account)),
+        );
+        onClaimed?.();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        toast({
+          variant: "destructive",
+          title: "Claim failed",
+          description: msg,
+        });
+      } finally {
+        setClaimingKey(null);
+      }
+    },
+    [
+      publicKey,
+      connected,
+      connection,
+      sendTransaction,
+      wallet.signMessage,
+      toast,
+      onClaimed,
+    ],
+  );
+
   if (!pending || pending.length === 0) return null;
 
   return (
@@ -958,31 +1145,42 @@ function PendingClaimsRow({
         </span>
       </div>
       <ul className="space-y-1">
-        {pending.map((p) => (
-          <li
-            key={p.account.toBase58()}
-            className="flex items-center justify-between gap-2 rounded border border-border/40 bg-secondary/20 px-2 py-1.5"
-          >
-            <div className="min-w-0 space-y-0.5">
-              <div className="truncate font-mono text-[10px] text-muted-foreground">
-                {truncatePubkey(p.mint.toBase58(), 4, 4)}
-              </div>
-              <div className="truncate font-mono text-[10px]">
-                {truncatePubkey(p.account.toBase58(), 4, 4)}
-              </div>
-            </div>
-            <Button
-              size="sm"
-              variant="secondary"
-              className="h-6 px-2 text-[10px]"
-              disabled
-              title="Claim flow pending — see lib/confidential-transit.ts TODO"
-              onClick={() => onClaimed?.()}
+        {pending.map((p) => {
+          const key = p.account.toBase58();
+          const busy = claimingKey === key;
+          return (
+            <li
+              key={key}
+              className="flex items-center justify-between gap-2 rounded border border-border/40 bg-secondary/20 px-2 py-1.5"
             >
-              Claim
-            </Button>
-          </li>
-        ))}
+              <div className="min-w-0 space-y-0.5">
+                <div className="truncate font-mono text-[10px] text-muted-foreground">
+                  {truncatePubkey(p.mint.toBase58(), 4, 4)}
+                </div>
+                <div className="truncate font-mono text-[10px]">
+                  {truncatePubkey(p.account.toBase58(), 4, 4)}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-6 px-2 text-[10px]"
+                disabled={busy || claimingKey !== null}
+                onClick={() => void onClaim(p)}
+                title="Run the 2-tx Withdraw+Empty+Configure+Deposit+Apply migration"
+              >
+                {busy ? (
+                  <>
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    Claiming…
+                  </>
+                ) : (
+                  "Claim"
+                )}
+              </Button>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

@@ -58,11 +58,17 @@ import {
   AE_CIPHERTEXT_LEN,
   CT_EXT_TAG,
   CT_IX,
+  ELGAMAL_CIPHERTEXT_LEN,
   EXT_TYPE_CONFIDENTIAL_TRANSFER_ACCOUNT,
+  PROOF_API_URL,
+  ProofUnavailableError,
   TOKEN_BASE_ACCOUNT_SIZE,
+  ZK_PROOF_IX,
   buildApplyPendingBalanceInstruction,
   buildConfigureAccountInstruction,
+  buildDepositInstruction,
   buildTransferInstruction,
+  buildVerifyProofInstruction,
   buildWithdrawInstruction,
   findConfidentialTransferAccountExtension,
 } from "./confidential";
@@ -476,14 +482,18 @@ export async function prepareTransitSendIxs(
     ),
   );
 
-  // 6. Memo — emits the transit seed wrapped under the (sender, recipient,
-  //    mint, randNonce)-derived shared key. Recipient detector finds it via
-  //    the `staccana:transit:v1:` prefix.
-  const { memoText } = await buildTransitMemoText(
+  // 6. Memo — emits the (transit seed || amount) wrapped under the (sender,
+  //    recipient, mint, randNonce)-derived shared key. Recipient detector
+  //    finds it via the `staccana:transit:v1:` prefix and uses the embedded
+  //    amount to drive the Withdraw + Deposit during claim. The wire-format
+  //    envelope is byte-compatible with v1 (32-byte plaintext) so existing
+  //    drops still parse — see `tryDecodeTransitMemoV2`.
+  const { memoText } = await buildTransitMemoTextWithAmount(
     args.sender,
     args.recipient,
     args.mint,
     randNonce,
+    args.amount,
   );
   ixs.push(buildMemoInstruction(memoText));
 
@@ -650,7 +660,7 @@ export async function findTransitMemoForAccount(
       // Parsed memo ixs come back as `{ program: 'spl-memo', parsed: '...' }`
       // OR as a partially-decoded `{ programId, data }` shape. Handle both.
       let memoText: string | null = null;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+// @ts-ignore
       const anyIx = ix as any;
       if (
         anyIx.programId &&
@@ -692,6 +702,10 @@ export async function findTransitMemoForAccount(
 // confidential extension's variant; we hand-encode the wire format).
 // ---------------------------------------------------------------------------
 
+const SYSVAR_INSTRUCTIONS_PUBKEY = new PublicKey(
+  "Sysvar1nstructions1111111111111111111111111",
+);
+
 /**
  * `ConfidentialTransferInstruction::EmptyAccount` — ix discriminator 4.
  *
@@ -703,13 +717,10 @@ export async function findTransitMemoForAccount(
  *   1. instructions sysvar      [readonly]
  *   2. authority/owner          [signer, readonly]
  *
- * Requires a `VerifyZeroCiphertext` proof at offset +1. Caller is responsible
- * for fetching that proof from the proof API and chaining it after this ix.
- *
- * NOTE: We don't ship a `buildEmptyAccountInstruction` helper for the full
- * proof flow because the recipient claim path is currently TODO — it would
- * need a fresh `zero_ciphertext` proof generated server-side. See the
- * `buildEmptyAccountIxRaw` placeholder below.
+ * Requires a `VerifyZeroCiphertext` proof at `proof_instruction_offset` slots
+ * later in the same tx. Caller is responsible for fetching that proof from
+ * the proof API and chaining it after this ix — see
+ * `buildEmptyAccountInstruction` for the full bundle.
  */
 export function buildEmptyAccountIxRaw(args: {
   ata: PublicKey;
@@ -725,16 +736,578 @@ export function buildEmptyAccountIxRaw(args: {
     programId: TOKEN_2022_PROGRAM_ID,
     keys: [
       { pubkey: args.ata, isWritable: true, isSigner: false },
-      // Sysvar instructions (id loaded lazily to avoid a cycle).
-      {
-        pubkey: new PublicKey("Sysvar1nstructions1111111111111111111111111"),
-        isWritable: false,
-        isSigner: false,
-      },
+      { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isWritable: false, isSigner: false },
       { pubkey: args.owner, isWritable: false, isSigner: true },
     ],
     data: Buffer.from(data),
   });
+}
+
+/**
+ * Build `[EmptyAccount, VerifyZeroCiphertext]` — the 2-ix bundle that closes
+ * out a CT-configured account's encrypted state.
+ *
+ * EmptyAccount requires the `available_balance` ElGamal ciphertext to encrypt
+ * exactly zero (not pending — pending must be drained via `ApplyPendingBalance`
+ * before calling this). The `VerifyZeroCiphertext` proof attests that the
+ * supplied 64-byte ciphertext encrypts the value 0 under the keypair derived
+ * from `elgamalSeed`.
+ *
+ * Hits the `/api/confidential/proof` route with `proofKind: "zero_ciphertext"`.
+ * On failure to obtain the proof (network, malformed seed, ciphertext doesn't
+ * actually decrypt to zero) throws `ProofUnavailableError`.
+ */
+export async function buildEmptyAccountInstruction(args: {
+  ata: PublicKey;
+  owner: PublicKey;
+  /** 64-byte ElGamal ciphertext of the available_balance — must encrypt 0. */
+  availableCiphertext: Uint8Array;
+  /** ElGamal secret seed for the account being emptied. 32 bytes. */
+  elgamalSeed: Uint8Array;
+  /** Optional fetch override. */
+  fetchImpl?: typeof fetch;
+}): Promise<TransactionInstruction[]> {
+  if (args.availableCiphertext.length !== ELGAMAL_CIPHERTEXT_LEN) {
+    throw new RangeError(
+      `availableCiphertext must be ${ELGAMAL_CIPHERTEXT_LEN} bytes (got ${args.availableCiphertext.length})`,
+    );
+  }
+  if (args.elgamalSeed.length < 32) {
+    throw new RangeError(
+      `elgamalSeed must be at least 32 bytes (got ${args.elgamalSeed.length})`,
+    );
+  }
+  const fetchImpl = args.fetchImpl ?? fetch;
+  const body = {
+    proofKind: "zero_ciphertext" as const,
+    params: {
+      elgamalSeed: bytesToBase64(args.elgamalSeed),
+      ciphertext: bytesToBase64(args.availableCiphertext),
+    },
+  };
+  let res: Response;
+  try {
+    res = await fetchImpl(PROOF_API_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new ProofUnavailableError(
+      "zero_ciphertext",
+      "network_error",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { error?: string; details?: string };
+      detail = j.details ?? j.error ?? detail;
+    } catch {
+      // ignore
+    }
+    throw new ProofUnavailableError(
+      "zero_ciphertext",
+      `http_${res.status}`,
+      detail,
+    );
+  }
+  const json = (await res.json()) as { proofData?: string; contextData?: string };
+  if (typeof json.proofData !== "string" || typeof json.contextData !== "string") {
+    throw new ProofUnavailableError(
+      "zero_ciphertext",
+      "malformed_response",
+      "Proof API did not return base64 {proofData, contextData}.",
+    );
+  }
+  const proofBytes = base64ToBytes(json.proofData);
+  const contextBytes = base64ToBytes(json.contextData);
+
+  const verifyIx = buildVerifyProofInstruction(
+    ZK_PROOF_IX.VerifyZeroCiphertext,
+    contextBytes,
+    proofBytes,
+  );
+  const emptyIx = buildEmptyAccountIxRaw({
+    ata: args.ata,
+    owner: args.owner,
+    proofInstructionOffset: 1,
+  });
+  return [emptyIx, verifyIx];
+}
+
+// ---------------------------------------------------------------------------
+// CT extension parser — pull the on-chain ciphertexts out of a Token-22
+// account's `ConfidentialTransferAccount` extension. Used by the recipient
+// claim flow to read the post-Transfer pending_lo/_hi (for Withdraw amount
+// determination) and the post-ApplyPendingBalance available_balance (for
+// Withdraw equality proof + EmptyAccount zero proof).
+// ---------------------------------------------------------------------------
+
+/**
+ * Decoded `ConfidentialTransferAccount` extension fields the recipient claim
+ * flow cares about. Offsets within the extension data slice (i.e. the bytes
+ * returned by `findConfidentialTransferAccountExtension`):
+ *
+ *   0..1            approved: u8
+ *   1..33           elgamal_pubkey: [u8; 32]
+ *   33..97          pending_balance_lo: ElGamalCiphertext (64)
+ *   97..161         pending_balance_hi: ElGamalCiphertext (64)
+ *   161..225        available_balance: ElGamalCiphertext (64)
+ *   225..261        decryptable_available_balance: AeCiphertext (36)
+ *   261..262        allow_confidential_credits: PodBool
+ *   262..263        allow_non_confidential_credits: PodBool
+ *   263..271        pending_balance_credit_counter: u64 LE
+ *   271..279        maximum_pending_balance_credit_counter: u64 LE
+ *   279..287        expected_pending_balance_credit_counter: u64 LE
+ *   287..295        actual_pending_balance_credit_counter: u64 LE
+ */
+export interface ParsedConfidentialState {
+  approved: boolean;
+  elgamalPubkey: Uint8Array;
+  pendingBalanceLo: Uint8Array;
+  pendingBalanceHi: Uint8Array;
+  availableBalance: Uint8Array;
+  decryptableAvailableBalance: Uint8Array;
+  pendingBalanceCreditCounter: bigint;
+  expectedPendingBalanceCreditCounter: bigint;
+  actualPendingBalanceCreditCounter: bigint;
+}
+
+function readU64Le(data: Uint8Array, offset: number): bigint {
+  let v = 0n;
+  for (let i = 0; i < 8; i++) v |= BigInt(data[offset + i]) << BigInt(i * 8);
+  return v;
+}
+
+/** Parse the extension data slice into the fields the claim flow needs. */
+export function parseConfidentialAccountExtension(
+  ext: Uint8Array,
+): ParsedConfidentialState | null {
+  if (ext.length < 295) return null;
+  return {
+    approved: ext[0] === 1,
+    elgamalPubkey: ext.slice(1, 33),
+    pendingBalanceLo: ext.slice(33, 97),
+    pendingBalanceHi: ext.slice(97, 161),
+    availableBalance: ext.slice(161, 225),
+    decryptableAvailableBalance: ext.slice(225, 261),
+    pendingBalanceCreditCounter: readU64Le(ext, 263),
+    expectedPendingBalanceCreditCounter: readU64Le(ext, 279),
+    actualPendingBalanceCreditCounter: readU64Le(ext, 287),
+  };
+}
+
+/** Convenience: load + parse the on-chain CT state for a Token-22 account. */
+export async function fetchConfidentialAccountState(
+  connection: Connection,
+  account: PublicKey,
+): Promise<ParsedConfidentialState | null> {
+  const acct = await connection.getAccountInfo(account, "confirmed");
+  if (!acct) return null;
+  const data =
+    acct.data instanceof Uint8Array ? acct.data : new Uint8Array(acct.data);
+  const ext = findConfidentialTransferAccountExtension(data);
+  if (!ext) return null;
+  return parseConfidentialAccountExtension(ext);
+}
+
+// ---------------------------------------------------------------------------
+// Recipient claim — assemble the migration ixs.
+//
+// The claim is unavoidably 2 transactions:
+//
+//   TX A (small): ApplyPendingBalance — flushes the post-Transfer
+//                 pending_balance into available_balance. Required because
+//                 the homomorphic sum ciphertext lives only on-chain after
+//                 ApplyPendingBalance lands; we don't ship a Ristretto255
+//                 point-add in JS to compute it locally.
+//
+//   TX B (LUT):   Withdraw + (eq, range) proofs
+//                 EmptyAccount + zero-ct proof
+//                 ConfigureAccount + pubkey-validity proof
+//                 Deposit
+//                 ApplyPendingBalance
+//
+// After TX B the same on-chain account is now configured under the recipient's
+// own ElGamal pubkey, the original transit balance has been re-encrypted into
+// the recipient's pending_balance, and the public `amount` field is back to 0.
+// Funds end up under wallet B's ElGamal keypair on the same account address —
+// migrating to the recipient's canonical ATA is left as a follow-up.
+// ---------------------------------------------------------------------------
+
+/** Args for `prepareTransitClaimApplyPendingTx`. */
+export interface PrepareTransitClaimApplyPendingArgs {
+  account: PublicKey;
+  recipient: PublicKey;
+  /** Expected pending counter — usually 1 after a single Transfer in. */
+  expectedPendingBalanceCreditCounter: bigint;
+}
+
+/**
+ * TX A: a single ApplyPendingBalance ix. The recipient (now the owner of the
+ * transit account) flushes the post-Transfer pending_balance into the
+ * available_balance.
+ *
+ * `newDecryptableAvailableBalance` is set to the 36-byte zero AeCiphertext
+ * placeholder — we never decrypt this field locally for the transit account
+ * (the cleartext amount is recovered from the memo's wrapped payload), so the
+ * wire bytes don't matter as long as Token-22 accepts them.
+ */
+export function prepareTransitClaimApplyPendingTx(
+  args: PrepareTransitClaimApplyPendingArgs,
+): TransactionInstruction[] {
+  return [
+    buildApplyPendingBalanceInstruction({
+      ata: args.account,
+      owner: args.recipient,
+      expectedPendingBalanceCreditCounter:
+        args.expectedPendingBalanceCreditCounter,
+      newDecryptableAvailableBalance: new Uint8Array(AE_CIPHERTEXT_LEN),
+    }),
+  ];
+}
+
+/** Args for `prepareTransitClaimMigrationTx`. */
+export interface PrepareTransitClaimMigrationArgs {
+  /** The transit account address (Token-22 account, owned by recipient). */
+  account: PublicKey;
+  /** The wallet pubkey that now owns the transit account. */
+  recipient: PublicKey;
+  /** Mint of the held tokens. */
+  mint: PublicKey;
+  /** Mint decimals — used by Withdraw + Deposit ix data. */
+  decimals: number;
+  /**
+   * Cleartext amount currently sitting in the transit account's
+   * available_balance (post-ApplyPendingBalance). The recipient recovered
+   * this from the transit memo's wrapped payload (the v2 memo embeds amount
+   * after the seed).
+   */
+  amount: bigint;
+  /**
+   * 64-byte available_balance ElGamal ciphertext, read from chain AFTER the
+   * TX A `ApplyPendingBalance` lands. Used by the Withdraw equality proof
+   * (proves the post-Withdraw balance — zero — commits to the same value as
+   * a fresh zero-ciphertext) and as the input to the EmptyAccount
+   * zero-ciphertext proof.
+   *
+   * Note: after Withdraw of the FULL amount, the on-chain available_balance
+   * ciphertext is updated homomorphically to encrypt zero — that's exactly
+   * what EmptyAccount's zero-ciphertext proof needs. Token-22 computes the
+   * post-Withdraw ciphertext using the proof's context; we generate the
+   * zero proof against a *fresh* 64-byte zero ciphertext (32-byte zero
+   * commitment || 32-byte zero handle), which the on-chain program accepts
+   * as the canonical encoding of zero.
+   */
+  availableCiphertextBeforeWithdraw: Uint8Array;
+  /** Transit ElGamal seed (32 bytes) — recovered from memo. */
+  transitSeed: Uint8Array;
+  /** Transit ElGamal pubkey (32 bytes) — derived from `transitSeed`. */
+  transitPubkey: Uint8Array;
+  /** Recipient's own ElGamal seed for THIS mint (post-claim ownership). */
+  recipientElgamalSeed: Uint8Array;
+  /** Recipient's own ElGamal pubkey (32 bytes). */
+  recipientElgamalPubkey: Uint8Array;
+  /** Optional fetch override. */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * TX B: full migration. Returns the in-order ix list for the v0+LUT tx that
+ * flips the transit account from the transit ElGamal keypair to the
+ * recipient's own keypair, with the funds preserved as encrypted pending
+ * balance under the recipient's pubkey.
+ *
+ * Tx layout (in order, with proof offsets):
+ *
+ *   0  Withdraw                                        (proof_offset+1 → eq, +2 → range)
+ *   1  VerifyCiphertextCommitmentEquality
+ *   2  VerifyBatchedRangeProofU64
+ *   3  EmptyAccount                                    (proof_offset+1 → zero_ct)
+ *   4  VerifyZeroCiphertext
+ *   5  ConfigureAccount                                (proof_offset+1 → pubkey_validity)
+ *   6  VerifyPubkeyValidity
+ *   7  Deposit
+ *   8  ApplyPendingBalance
+ *
+ * 9 ixs total — well past the legacy 1232-byte limit. Caller MUST compile to
+ * a v0 tx with `STACCANA_MASTER_LUT` in scope.
+ */
+export async function prepareTransitClaimMigrationTx(
+  args: PrepareTransitClaimMigrationArgs,
+): Promise<TransactionInstruction[]> {
+  if (args.availableCiphertextBeforeWithdraw.length !== ELGAMAL_CIPHERTEXT_LEN) {
+    throw new RangeError(
+      `availableCiphertextBeforeWithdraw must be ${ELGAMAL_CIPHERTEXT_LEN} bytes`,
+    );
+  }
+  if (args.transitSeed.length !== 32) {
+    throw new RangeError(`transitSeed must be 32 bytes`);
+  }
+  if (args.transitPubkey.length !== 32) {
+    throw new RangeError(`transitPubkey must be 32 bytes`);
+  }
+  if (args.recipientElgamalPubkey.length !== 32) {
+    throw new RangeError(`recipientElgamalPubkey must be 32 bytes`);
+  }
+
+  const ixs: TransactionInstruction[] = [];
+
+  // 1. Withdraw the full amount under the transit ElGamal keypair. Two
+  //    proofs follow (equality + range over the leftover-balance commitment,
+  //    which encodes zero since we drain the entire available balance).
+  //    The leftover commitment + opening are fresh zero bytes — Pedersen
+  //    commit of (0, opening=0) is the identity point, which the on-chain
+  //    program accepts as the canonical commitment to zero.
+  const withdrawIxs = await buildWithdrawInstruction({
+    ata: args.account,
+    mint: args.mint,
+    owner: args.recipient,
+    amount: args.amount,
+    decimals: args.decimals,
+    elgamalPubkey: args.transitPubkey,
+    newDecryptableAvailableBalance: new Uint8Array(AE_CIPHERTEXT_LEN),
+    elgamalSeed: args.transitSeed,
+    sourceCiphertext: args.availableCiphertextBeforeWithdraw,
+    newBalanceCommitment: new Uint8Array(32),
+    newBalanceOpening: new Uint8Array(32),
+    newBalancePlaintext: 0n,
+    fetchImpl: args.fetchImpl,
+  });
+  for (const ix of withdrawIxs) ixs.push(ix);
+
+  // 2. EmptyAccount — proves the (post-Withdraw) available_balance ciphertext
+  //    encrypts zero. We pass a fresh 64-byte zero ciphertext as the proof
+  //    input — that's the canonical encoding the on-chain verifier expects
+  //    after a full-balance Withdraw. The transit ElGamal seed signs the
+  //    proof.
+  const emptyIxs = await buildEmptyAccountInstruction({
+    ata: args.account,
+    owner: args.recipient,
+    availableCiphertext: new Uint8Array(ELGAMAL_CIPHERTEXT_LEN),
+    elgamalSeed: args.transitSeed,
+    fetchImpl: args.fetchImpl,
+  });
+  for (const ix of emptyIxs) ixs.push(ix);
+
+  // 3. ConfigureAccount under the RECIPIENT's ElGamal keypair. Re-initializes
+  //    the CT extension state on the same account address. Auto-approve is
+  //    on for the staccana fork so this lands without a moderator step.
+  const configureIxs = await buildConfigureAccountInstruction({
+    payer: args.recipient,
+    ata: args.account,
+    mint: args.mint,
+    owner: args.recipient,
+    maximumPendingBalanceCreditCounter: 65535n,
+    elgamalPubkey: args.recipientElgamalPubkey,
+    decryptableZeroBalance: new Uint8Array(AE_CIPHERTEXT_LEN),
+    elgamalSeed: args.recipientElgamalSeed,
+    fetchImpl: args.fetchImpl,
+  });
+  for (const ix of configureIxs) ixs.push(ix);
+
+  // 4. Deposit — moves the public amount (which Withdraw just dumped into the
+  //    SPL-token base `amount` field) into the encrypted pending_balance
+  //    under the recipient's ElGamal pubkey. Proofless.
+  ixs.push(
+    buildDepositInstruction({
+      ata: args.account,
+      mint: args.mint,
+      owner: args.recipient,
+      amount: args.amount,
+      decimals: args.decimals,
+    }),
+  );
+
+  // 5. ApplyPendingBalance — flush pending → available under recipient's key.
+  //    Counter increments by 1 (the Deposit ticks it). We pass a zero
+  //    AeCiphertext for the new decryptable balance — the recipient's wallet
+  //    can re-derive a real one out-of-band when they later Withdraw or
+  //    Transfer.
+  ixs.push(
+    buildApplyPendingBalanceInstruction({
+      ata: args.account,
+      owner: args.recipient,
+      expectedPendingBalanceCreditCounter: 1n,
+      newDecryptableAvailableBalance: new Uint8Array(AE_CIPHERTEXT_LEN),
+    }),
+  );
+
+  return ixs;
+}
+
+// ---------------------------------------------------------------------------
+// Memo wrap V2 — extend the wrapped payload to optionally embed the cleartext
+// amount alongside the transit seed. The recipient claim flow needs the
+// amount to drive Withdraw + Deposit; without this the recipient would have
+// to brute-force the discrete log on the on-chain ElGamal ciphertext.
+//
+// Wire format inside the AES-GCM-wrapped blob (after IV):
+//
+//   v1 plaintext: `transitSeed: 32`              (32 bytes, legacy)
+//   v2 plaintext: `transitSeed: 32 || amount: 8` (40 bytes, current)
+//
+// The memo prefix is unchanged — both versions share `staccana:transit:v1:`
+// since the wire-format envelope itself is byte-compatible. Decoder accepts
+// either length and falls back to "unknown amount" for v1-shaped memos.
+// ---------------------------------------------------------------------------
+
+/**
+ * v2 memo builder — wraps `(transitSeed || amount_le_u64)` for the recipient.
+ * Identical to `buildTransitMemoText` but embeds the cleartext amount so
+ * the claim flow can drive Withdraw without DLP.
+ */
+export async function buildTransitMemoTextWithAmount(
+  sender: PublicKey,
+  recipient: PublicKey,
+  mint: PublicKey,
+  randNonce: Uint8Array,
+  amount: bigint,
+): Promise<{ memoText: string; transitSeed: Uint8Array }> {
+  const { sharedKey, transitSeed } = await deriveTransitMaterial(
+    sender,
+    recipient,
+    mint,
+    randNonce,
+  );
+  const plaintext = new Uint8Array(32 + 8);
+  plaintext.set(transitSeed, 0);
+  let v = amount;
+  for (let i = 0; i < 8; i++) {
+    plaintext[32 + i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  const wrapped = await aesGcmWrap(sharedKey, plaintext);
+  const payload = new Uint8Array(4 + wrapped.length);
+  payload.set(randNonce, 0);
+  payload.set(wrapped, 4);
+  return {
+    memoText: TRANSIT_MEMO_PREFIX + bytesToBase64(payload),
+    transitSeed,
+  };
+}
+
+/**
+ * v2 memo decoder — returns `transitSeed` + optional `amount`. v1 memos
+ * (32-byte plaintext) decode with `amount: null`.
+ */
+export async function tryDecodeTransitMemoV2(
+  memoText: string,
+  sender: PublicKey,
+  recipient: PublicKey,
+  mint: PublicKey,
+): Promise<
+  | { randNonce: Uint8Array; transitSeed: Uint8Array; amount: bigint | null }
+  | null
+> {
+  if (!memoText.startsWith(TRANSIT_MEMO_PREFIX)) return null;
+  let payload: Uint8Array;
+  try {
+    payload = base64ToBytes(memoText.slice(TRANSIT_MEMO_PREFIX.length));
+  } catch {
+    return null;
+  }
+  if (payload.length < 4 + 12 + 16) return null;
+  const randNonce = payload.slice(0, 4);
+  const wrapped = payload.slice(4);
+  try {
+    const { sharedKey } = await deriveTransitMaterial(
+      sender,
+      recipient,
+      mint,
+      randNonce,
+    );
+    const plaintext = await aesGcmUnwrap(sharedKey, wrapped);
+    if (plaintext.length === 32) {
+      return { randNonce, transitSeed: plaintext, amount: null };
+    }
+    if (plaintext.length === 40) {
+      const transitSeed = plaintext.slice(0, 32);
+      let amount = 0n;
+      for (let i = 0; i < 8; i++) {
+        amount |= BigInt(plaintext[32 + i]) << BigInt(i * 8);
+      }
+      return { randNonce, transitSeed, amount };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * v2 variant of `findTransitMemoForAccount` — same scan, but returns the
+ * embedded amount when present.
+ */
+export async function findTransitMemoForAccountV2(
+  connection: Connection,
+  account: PublicKey,
+  sender: PublicKey | null,
+  recipient: PublicKey,
+  mint: PublicKey,
+): Promise<
+  | {
+      randNonce: Uint8Array;
+      transitSeed: Uint8Array;
+      amount: bigint | null;
+      sender: PublicKey;
+    }
+  | null
+> {
+  const sigs = await connection.getSignaturesForAddress(account, { limit: 25 });
+  if (sigs.length === 0) return null;
+  sigs.sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0));
+
+  for (const sigInfo of sigs) {
+    const tx = await connection.getParsedTransaction(sigInfo.signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    if (!tx) continue;
+    const accountKeys = tx.transaction.message.accountKeys;
+    const txSender = accountKeys[0]?.pubkey;
+    if (!txSender) continue;
+    if (sender && !txSender.equals(sender)) continue;
+
+    const ixs = tx.transaction.message.instructions;
+    for (const ix of ixs) {
+      let memoText: string | null = null;
+      // @ts-ignore parsed ix shape is loose
+      const anyIx = ix as any;
+      if (
+        anyIx.programId &&
+        anyIx.programId.equals &&
+        anyIx.programId.equals(MEMO_PROGRAM_ID)
+      ) {
+        if (typeof anyIx.parsed === "string") memoText = anyIx.parsed;
+        else if (typeof anyIx.data === "string") {
+          try {
+            const bs58 = await import("bs58");
+            const bytes = bs58.default.decode(anyIx.data);
+            memoText = new TextDecoder().decode(bytes);
+          } catch {
+            // ignore
+          }
+        }
+      } else if (anyIx.program === "spl-memo" && typeof anyIx.parsed === "string") {
+        memoText = anyIx.parsed;
+      }
+      if (!memoText) continue;
+
+      const decoded = await tryDecodeTransitMemoV2(
+        memoText,
+        txSender,
+        recipient,
+        mint,
+      );
+      if (decoded) {
+        return { ...decoded, sender: txSender };
+      }
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -747,4 +1320,5 @@ export {
   EXT_TYPE_CONFIDENTIAL_TRANSFER_ACCOUNT,
   buildApplyPendingBalanceInstruction,
   buildWithdrawInstruction,
+  findConfidentialTransferAccountExtension,
 };
