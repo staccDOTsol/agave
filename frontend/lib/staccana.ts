@@ -19,7 +19,13 @@ export const NODE_DOMAIN = 0x01;
 
 // --- Program IDs and Well-known Accounts (all as PublicKey, always standard form) ---
 
-/** Lazy-claim program ID. */
+/**
+ * Lazy-claim program ID. Genesis-baked at the canonical placeholder pubkey,
+ * matches `tools/genesis-bake/src/pdas.rs::LAZY_CLAIM_PROGRAM_ID`. After a
+ * rebake the .so at this address contains the proof-buffer ix additions and
+ * the upgrade authority is set to the bake operator's pubkey, so future
+ * upgrades go through `solana program deploy` instead of another rebake.
+ */
 export const LAZY_CLAIM_PROGRAM_ID = new PublicKey("68fnSf8CZjxLM2xHmswktgz3a77KLQT2nbhjWbpKWsYU");
 
 /** Bridge program ID. */
@@ -37,10 +43,19 @@ export const BRIDGE_VAULT_PROGRAM_ID = new PublicKey(
   process.env.NEXT_PUBLIC_BRIDGE_VAULT_PROGRAM_ID ?? "F2AypZ8FDWnR5bdyLHzo4idof9YrBpdBmbgLwLBjLfVU",
 );
 
-/** Secret-pump program ID. */
+/**
+ * Secret-pump program ID. Genesis-baked at the canonical placeholder
+ * pubkey. Post-rebake the .so is current source (empty `CreateArgs`) and
+ * the upgrade authority is set to the bake operator's pubkey, so future
+ * patches ship via `solana program deploy --upgrade-authority`.
+ */
 export const SECRET_PUMP_PROGRAM_ID = new PublicKey("SPump11111111111111111111111111111111111111");
 
-/** Megadrop program ID. */
+/**
+ * Megadrop program ID. Genesis-baked at the canonical placeholder pubkey;
+ * the rebake includes the proof-buffer ix additions at this address with an
+ * upgrade authority set, so future patches don't need another rebake.
+ */
 export const MEGADROP_PROGRAM_ID = new PublicKey("Megadrop11111111111111111111111111111111111");
 
 /**
@@ -151,8 +166,15 @@ const DEFAULT_CLUSTER_NAME = "mainnet-sigma";
 /** Resolved cluster name (display only — staccana has no chain-id concept). */
 export const CLUSTER_NAME = process.env.NEXT_PUBLIC_CLUSTER_NAME ?? DEFAULT_CLUSTER_NAME;
 
-/** Optional: known genesis hash to display in the cluster banner. Empty string => unknown. */
-export const GENESIS_HASH = process.env.NEXT_PUBLIC_GENESIS_HASH ?? "";
+/**
+ * Known genesis hash. Used by `components/wallet-help.tsx` to detect when
+ * the user's wallet is on a different cluster (mainnet/devnet) and surface
+ * the "add staccana RPC" banner. Updated to the post-rebake hash on
+ * 2026-05-03; if you re-bake genesis, update this constant (or override
+ * via `NEXT_PUBLIC_GENESIS_HASH`).
+ */
+export const GENESIS_HASH =
+  process.env.NEXT_PUBLIC_GENESIS_HASH ?? "5B4McgxXGHjUNQAqnzxf8ZDnVenXAoe4dNJyp7ystWri";
 
 // --- URL Builders and PDA Helpers ---
 
@@ -197,6 +219,33 @@ export function treasuryPda(): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
     [Buffer.from("treasury")],
     LAZY_CLAIM_PROGRAM_ID,
+  );
+  return pda;
+}
+
+/**
+ * Derive the lazy-claim proof-buffer PDA at `["proof_buffer", pubkey, payer]`.
+ *
+ * Keying on payer (as well as the claim pubkey) lets multiple users concurrently
+ * stage proofs for different leaves without colliding on the same PDA.
+ */
+export function lazyClaimProofBufferPda(pubkey: PublicKey, payer: PublicKey): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("proof_buffer"), pubkey.toBuffer(), payer.toBuffer()],
+    LAZY_CLAIM_PROGRAM_ID,
+  );
+  return pda;
+}
+
+/**
+ * Derive the megadrop proof-buffer PDA at
+ * `["megadrop_proof_buffer", holder, payer]`. Same shape as the lazy-claim PDA
+ * but distinct seed prefix to keep the two programs isolated.
+ */
+export function megadropProofBufferPda(holder: PublicKey, payer: PublicKey): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("megadrop_proof_buffer"), holder.toBuffer(), payer.toBuffer()],
+    MEGADROP_PROGRAM_ID,
   );
   return pda;
 }
