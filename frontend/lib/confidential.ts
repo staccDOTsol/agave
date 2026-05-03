@@ -331,11 +331,17 @@ export function buildDepositInstruction(args: DepositIxArgs): TransactionInstruc
   if (args.decimals < 0 || args.decimals > 0xff) {
     throw new RangeError(`decimals out of u8 range: ${args.decimals}`);
   }
-  const data = new Uint8Array(2 + 8 + 1);
+  const DEPOSIT_IX_DATA_LEN = 2 + 8 + 1; // [27, 5, amount:u64 LE, decimals:u8]
+  const data = new Uint8Array(DEPOSIT_IX_DATA_LEN);
   data[0] = CT_EXT_TAG;
   data[1] = CT_IX.Deposit;
   data.set(u64Le(args.amount), 2);
   data[10] = args.decimals;
+  if (data.length !== DEPOSIT_IX_DATA_LEN) {
+    throw new RangeError(
+      `Deposit ix data layout drift: ${data.length} != ${DEPOSIT_IX_DATA_LEN}`,
+    );
+  }
   return new TransactionInstruction({
     programId: TOKEN_2022_PROGRAM_ID,
     keys: [
@@ -384,11 +390,17 @@ export function buildApplyPendingBalanceInstruction(
       `newDecryptableAvailableBalance must be ${AE_CIPHERTEXT_LEN} bytes (got ${args.newDecryptableAvailableBalance.length})`,
     );
   }
-  const data = new Uint8Array(2 + 8 + AE_CIPHERTEXT_LEN);
+  const APPLY_IX_DATA_LEN = 2 + 8 + AE_CIPHERTEXT_LEN; // [27, 8, ctr:u64 LE, ae:36]
+  const data = new Uint8Array(APPLY_IX_DATA_LEN);
   data[0] = CT_EXT_TAG;
   data[1] = CT_IX.ApplyPendingBalance;
   data.set(u64Le(args.expectedPendingBalanceCreditCounter), 2);
   data.set(args.newDecryptableAvailableBalance, 10);
+  if (data.length !== APPLY_IX_DATA_LEN) {
+    throw new RangeError(
+      `ApplyPendingBalance ix data layout drift: ${data.length} != ${APPLY_IX_DATA_LEN}`,
+    );
+  }
   return new TransactionInstruction({
     programId: TOKEN_2022_PROGRAM_ID,
     keys: [
@@ -808,13 +820,19 @@ export async function buildConfigureAccountInstruction(
   );
 
   // ConfigureAccount data: [27, 2, decryptable_zero_balance:36, max_pending:u64 LE, proof_offset:i8]
-  const data = new Uint8Array(2 + AE_CIPHERTEXT_LEN + 8 + 1);
+  const CONFIGURE_IX_DATA_LEN = 2 + AE_CIPHERTEXT_LEN + 8 + 1;
+  const data = new Uint8Array(CONFIGURE_IX_DATA_LEN);
   data[0] = CT_EXT_TAG;
   data[1] = CT_IX.ConfigureAccount;
   data.set(args.decryptableZeroBalance, 2);
   data.set(u64Le(args.maximumPendingBalanceCreditCounter), 2 + AE_CIPHERTEXT_LEN);
   // i8 proofInstructionOffset = +1 (the verify ix follows immediately).
   data[2 + AE_CIPHERTEXT_LEN + 8] = 1;
+  if (data.length !== CONFIGURE_IX_DATA_LEN) {
+    throw new RangeError(
+      `ConfigureAccount ix data layout drift: ${data.length} != ${CONFIGURE_IX_DATA_LEN}`,
+    );
+  }
 
   // Account ordering for the inline-instruction-offset form (per
   // `inner_configure_account` in the SPL Rust source):
@@ -1225,7 +1243,22 @@ export async function buildTransferInstruction(
   //    equality_proof_offset:i8,
   //    ciphertext_validity_proof_offset:i8,
   //    range_proof_offset:i8]
-  const data = new Uint8Array(2 + AE_CIPHERTEXT_LEN + 64 + 64 + 1 + 1 + 1);
+  //
+  // Total budget: 2 + 36 + 64 + 64 + 3 = 169 bytes.
+  //
+  // Wallet-side serialization (web3.js Message::serialize) passes the
+  // ix data through `Buffer.write*` checks with byte-budget assertions
+  // (`offset + ext > buf.length` ⇒ `RangeError: Index out of range`).
+  // If any input above silently came back the wrong length we'd write
+  // out of bounds here and either truncate or stomp adjacent fields.
+  // The per-input length checks already throw `RangeError` upstream;
+  // the final assertion below converts any layout drift into a loud,
+  // catch-able error so the caller in `SecretBalancePanel.tsx` falls
+  // through to the public `TransferChecked` path instead of bubbling a
+  // `WalletSendTransactionError: Index out of range` from the wallet.
+  const TRANSFER_IX_DATA_LEN =
+    2 + AE_CIPHERTEXT_LEN + 64 + 64 + 1 + 1 + 1;
+  const data = new Uint8Array(TRANSFER_IX_DATA_LEN);
   let p = 0;
   data[p++] = CT_EXT_TAG;
   data[p++] = CT_IX.Transfer;
@@ -1238,6 +1271,13 @@ export async function buildTransferInstruction(
   data[p++] = 1; // equality at +1
   data[p++] = 2; // validity at +2
   data[p++] = 3; // range at +3
+  if (p !== TRANSFER_IX_DATA_LEN || data.length !== TRANSFER_IX_DATA_LEN) {
+    throw new RangeError(
+      `Transfer ix data layout drift: wrote ${p} of ${TRANSFER_IX_DATA_LEN} bytes ` +
+        `(buffer length ${data.length}). Inputs: newSrcDecryptable=${args.newSourceDecryptableAvailableBalance.length}, ` +
+        `auditorLo=${auditorCtLo.length}, auditorHi=${auditorCtHi.length}.`,
+    );
+  }
 
   // Account ordering for the inline-instruction-offset form (per
   // `inner_transfer` in the SPL Rust source):

@@ -748,11 +748,17 @@ export function buildEmptyAccountIxRaw(args: {
   owner: PublicKey;
   proofInstructionOffset?: number;
 }): TransactionInstruction {
+  const EMPTY_ACCOUNT_IX_DATA_LEN = 3; // [27, 4, proof_offset:i8]
   const data = new Uint8Array([
     CT_EXT_TAG,
     CT_IX.EmptyAccount,
     (args.proofInstructionOffset ?? 1) & 0xff,
   ]);
+  if (data.length !== EMPTY_ACCOUNT_IX_DATA_LEN) {
+    throw new RangeError(
+      `EmptyAccount ix data layout drift: ${data.length} != ${EMPTY_ACCOUNT_IX_DATA_LEN}`,
+    );
+  }
   return new TransactionInstruction({
     programId: TOKEN_2022_PROGRAM_ID,
     keys: [
