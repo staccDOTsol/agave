@@ -100,7 +100,7 @@ export const MEMO_PROGRAM_ID = new PublicKey(
 );
 
 /** Default megadrop allocations URL. Override via NEXT_PUBLIC_MEGADROP_URL. */
-const DEFAULT_MEGADROP_URL = "https://snapshot.mp.fun/megadrop/allocations.json";
+const DEFAULT_MEGADROP_URL = "/megadrop/allocations.json";
 
 /** Resolved megadrop allocations URL. */
 export const MEGADROP_URL = process.env.NEXT_PUBLIC_MEGADROP_URL ?? DEFAULT_MEGADROP_URL;
@@ -126,7 +126,7 @@ export const SYSVAR_INSTRUCTIONS_ID = new PublicKey("Sysvar1nstructions111111111
 const DEFAULT_RPC_URL = "https://rpc.mp.fun/";
 
 /** Default snapshot URL when NEXT_PUBLIC_SNAPSHOT_URL is unset. */
-const DEFAULT_SNAPSHOT_URL = "https://snapshot.mp.fun/genesis-output.json";
+const DEFAULT_SNAPSHOT_URL = "/snapshot/genesis-output.json";
 
 /** Default explorer URL when NEXT_PUBLIC_EXPLORER_URL is unset. */
 const DEFAULT_EXPLORER_URL = "https://explorer.mp.fun";

@@ -82,16 +82,28 @@ The program verifies the proof and the signature, then writes the account into s
 
 **Gas exemption**: the `claim` instruction is fee-exempt by genesis rule (the lazy-claim program covers the fee from the treasury). Otherwise users face a chicken-and-egg problem: claim requires gas, gas requires claim.
 
-### Confidential transfer gates ON
+### Confidential transfer gates ON (+ Token-22 v8 syscall prerequisites)
 
-The ZK ElGamal Proof program (`ZkE1Gama1Proof11111111111111111111111111111`) ships as a live builtin — it's already a path-dep in classic v1's Cargo.toml as `programs/zk-elgamal-proof = 2.3.0`. Genesis activates these feature gates at slot 0:
+The ZK ElGamal Proof program (`ZkE1Gama1Proof11111111111111111111111111111`) ships as a live builtin — it's already a path-dep in classic v1's Cargo.toml as `programs/zk-elgamal-proof = 2.3.0`. Genesis activates **9 feature gates** at slot 0 (see `staccana_genesis::CTE_FEATURE_GATES_AT_GENESIS`):
+
+**ZK / confidential transfer (4 gates):**
 
 - `zk1snxsc6Fh3wsGNbbHAJNHiJoYgF29mMnTSusGx5EJ` — enable Zk Token proof program and syscalls
 - `zkesAyFB19sTkX8i9ReoKaMNDA4YNTPYJpZKPDt7FMW` — re-enable zk-elgamal-proof program
 - `zkNLP7EQALfC1TYeB3biDU7akDckj8iPkvh9y2Mt2K3` — enable Zk Token proof program transfer with fee
 - `zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8` — proof from accounts instead of ix data
 
-All four are **inactive on mainnet, devnet, and testnet** as of fork time — Token-22 mints opting into Confidential Transfer can't actually do anything on Solana itself today, but they will work on staccana from slot 0.
+**Token-22 v8 syscall prerequisites (5 gates):**
+
+The spl-token-2022 v8 ELF references `sol_curve_group_op`, `sol_alt_bn128_*`, `sol_big_mod_exp`, and `sol_poseidon` directly. With those gates inactive at deploy time, the BPF loader fails with `Unresolved symbol (sol_curve_group_op)` and the program never lands. Token-22 v8 is the version that ships the on-chain proof verifier we need — it must be deployable from slot 0.
+
+- `7rcw5UtqgDTBBv2EcynNfYckgdAaH1MAsCjKgXMkN7Ri` — curve25519 syscalls (`sol_curve_group_op`, `sol_curve_multiscalar_mul`, `sol_curve_validate_point`)
+- `A16q37opZdQMCbe5qJ6xpBB9usykfv8jZaMkxvZQi4GJ` — alt_bn128 syscalls (`sol_alt_bn128_group_op`)
+- `EJJewYSddEEtSZHiqugnvhQHiWyZKjkFDQASd7oKSagn` — big_mod_exp syscall (`sol_big_mod_exp`)
+- `EeyoXa3AyQuHkhRmT9mhKtTPrLNPBuNQbLEvyt5VrYxv` — alt_bn128 compression syscall (`sol_alt_bn128_compression`)
+- `EaQpmC6GtRssaZ3PCUM5YksGqUdMLeZ46BQXYtHYakDS` — poseidon syscall (`sol_poseidon`)
+
+All 9 are **inactive on mainnet, devnet, and testnet** as of fork time — Token-22 mints opting into Confidential Transfer don't work on vanilla Solana today, but they work on staccana from slot 0 with no governance vote and no waiting for an epoch-boundary activation.
 
 ### Classic v1 defaults inherited
 

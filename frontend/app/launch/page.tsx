@@ -188,7 +188,7 @@ export default function PumpPage(): JSX.Element {
             encrypted, structurally defeating sniper bots and copy-trading.
           </p>
         </div>
-        <Link href="/pump/create">
+        <Link href="/launch/create">
           <Button size="lg" className="gap-2">
             <Plus className="h-4 w-4" />
             Launch a token
@@ -291,7 +291,7 @@ function EmptyState({ query, sort }: { query: string; sort: Sort }): JSX.Element
             curve PDA — and you get the entire virtual allocation seeded into the AMM
             automatically.
           </p>
-          <Link href="/pump/create">
+          <Link href="/launch/create">
             <Button className="gap-2">
               <Plus className="h-4 w-4" />
               Launch the first token

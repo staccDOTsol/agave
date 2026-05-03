@@ -17,6 +17,7 @@ members = [
     "tools/bridge-init",
     "tools/bridge-vault-init",
     "tools/megadrop-init",
+    "tools/wssol-init",
     "tools/federation-attestor",
     "tools/megadrop-merkle",
     "tools/megadrop-snapshot",

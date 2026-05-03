@@ -21,8 +21,8 @@ export function SiteHeader(): JSX.Element {
             <Link href="/bridge" className="hover:text-foreground">
               Bridge
             </Link>
-            <Link href="/pump" className="hover:text-foreground">
-              Pump
+            <Link href="/launch" className="hover:text-foreground">
+              Launch
             </Link>
             <Link href="/megadrop" className="hover:text-foreground">
               Megadrop

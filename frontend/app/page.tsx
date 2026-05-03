@@ -69,14 +69,14 @@ export default function HomePage(): JSX.Element {
 
         <Card>
           <CardHeader>
-            <CardTitle>Pump</CardTitle>
+            <CardTitle>Launch</CardTitle>
             <CardDescription>
-              Launch a confidential-by-default token on the staccana secret-pump bonding curve.
+              Launch a confidential-by-default token on the staccana bonding-curve launchpad.
               No leaderboard, no sniper bots.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Link href="/pump">
+            <Link href="/launch">
               <Button variant="secondary" className="w-full">
                 Open pump
               </Button>
