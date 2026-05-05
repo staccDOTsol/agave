@@ -19,16 +19,22 @@ use anchor_lang::prelude::*;
 /// generous headroom; bumping requires a redeploy. The registry is iterated linearly in
 /// `distribute_yield`, so the upper bound also caps distribution-ix CU cost.
 ///
-/// Set to 16 (down from 64) so `ValidatorRegistry` is small enough that it +
-/// `SubsidyConfig` both fit on SBPF's 4 KB stack frame at once. With 64 the
-/// combined deserialize-on-stack footprint exceeded the budget and crashed
-/// `init_subsidy` with `Access violation in stack frame 3`.
-pub const MAX_VALIDATORS: usize = 8;
+/// Originally cranked down to 8 to dodge SBPF's 4 KB stack frame —
+/// `Account<ValidatorRegistry>` deserializes the entire `[Pubkey; MAX]`
+/// onto the stack, and at 64 that pushed `init_subsidy` /
+/// `register_validator` over the per-frame budget (`Access violation in
+/// stack frame 3`). Now safe at 64 because `ValidatorRegistry` is
+/// `#[account(zero_copy)]` — the array lives in the account-data buffer,
+/// not on the stack.
+pub const MAX_VALIDATORS: usize = 256;
 
-/// Hard cap on federation set size. Was 32 (mirror of bridge); reduced to 16
-/// for the same SBPF stack-frame reason as `MAX_VALIDATORS`. Bridge can stay
-/// at 32 — staccana subsidy doesn't share the federation set wire-form with
-/// bridge, only the ed25519 attestation message format.
+/// Hard cap on federation set size. Capped at 16 (down from 32) because
+/// `SubsidyConfig` is still a borsh `#[account]` (not zero_copy — its
+/// borsh-dense layout differs from `repr(C)` due to u32→u64 padding,
+/// and there's already on-chain data we don't want to migrate). 16 is
+/// still 2x the production federation size (9-of-9). Keeps the
+/// stack-allocated SubsidyConfig under 700 bytes so `register_validator`
+/// + similar ixs don't blow the SBPF frame.
 pub const MAX_FEDERATION_MEMBERS: usize = 16;
 
 /// SPEC §7.3 constants pinned next to consumers. Values here are normative — if SPEC.md
@@ -40,6 +46,13 @@ pub const SUBSIDY_DISTRIBUTION_EVERY: u64 = 1;
 
 /// Global config for the subsidy machinery. Only one instance per chain — PDA derived
 /// from `["subsidy_config"]`.
+///
+/// Stays as `#[account]` (borsh) — converting to zero_copy would require
+/// migrating the existing on-chain bytes since `repr(C)` adds 4 bytes of
+/// padding between `productive_asset_id: u32` and `productive_deposit_total:
+/// u64` that borsh's dense layout doesn't have. With `MAX_FEDERATION_MEMBERS`
+/// shrunk to 16, the stack footprint here is ~655 bytes, fine for all
+/// handlers.
 #[account]
 pub struct SubsidyConfig {
     /// Governance multisig authority. All gated operations
@@ -124,31 +137,35 @@ impl Default for SubsidyConfig {
 /// Flat list of registered validator pubkeys. Order is insertion order. `distribute_yield`
 /// iterates this list and expects the caller to pass each `ValidatorRecord` (in the same
 /// order) via `remaining_accounts`.
-#[account]
+///
+/// Stored as `#[account(zero_copy)]` so the `[Pubkey; MAX_VALIDATORS]` array
+/// lives in the account-data buffer, NOT on SBPF's 4 KB stack frame.
+/// Earlier the regular `#[account]` form deserialized the entire registry
+/// onto the handler stack — at MAX=64 that pushed `register_validator` past
+/// the per-frame budget (`Stack offset of 4104 exceeded max offset of 4096`).
+/// zero_copy removes that pressure entirely.
+///
+/// The PDA bump is NOT cached (was previously a `bump: u8` field) — Anchor
+/// re-derives it via `find_program_address` on each call. Cost is ~1500 CU
+/// per ix that touches the registry, well under any reasonable budget.
+/// Removing the cached bump also keeps the layout migration trivial: the
+/// new (larger) struct is bytemuck-compatible with the existing on-chain
+/// bytes after a simple `realloc` to the new size.
+#[account(zero_copy(unsafe))]
+#[repr(C)]
 pub struct ValidatorRegistry {
     /// Number of validators currently in the registry (`<= MAX_VALIDATORS`).
     pub count: u32,
 
     /// Backing storage. Slots beyond `count` are zero-filled.
+    /// Pubkey is `[u8; 32]` underneath (1-byte aligned) so no padding is
+    /// needed between `count` (u32, 4-aligned) and `validators`.
     pub validators: [Pubkey; MAX_VALIDATORS],
-
-    /// PDA bump cache.
-    pub bump: u8,
 }
 
 impl ValidatorRegistry {
-    /// Anchor discriminator (8) + count (4) + validators (32 * 64) + bump (1).
-    pub const SPACE: usize = 8 + 4 + (32 * MAX_VALIDATORS) + 1;
-}
-
-impl Default for ValidatorRegistry {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            validators: [Pubkey::default(); MAX_VALIDATORS],
-            bump: 0,
-        }
-    }
+    /// Anchor discriminator (8) + count (4) + validators (32 * MAX_VALIDATORS).
+    pub const SPACE: usize = 8 + 4 + (32 * MAX_VALIDATORS);
 }
 
 /// Per-validator metrics and lifetime totals. Updated by federation-attested

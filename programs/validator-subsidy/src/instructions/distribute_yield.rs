@@ -57,9 +57,9 @@ pub struct DistributeYield<'info> {
 
     #[account(
         seeds = [b"validator_registry"],
-        bump = validator_registry.bump,
+        bump,
     )]
-    pub validator_registry: Account<'info, ValidatorRegistry>,
+    pub validator_registry: AccountLoader<'info, ValidatorRegistry>,
 
     #[account(
         mut,
@@ -102,7 +102,9 @@ pub fn handler(
     require!(!accrual_distributed, SubsidyError::EpochAlreadyDistributed);
     require!(yield_observed > 0, SubsidyError::YieldNotPopulated);
 
-    let registry_count = ctx.accounts.validator_registry.count as usize;
+    let registry_loader = &ctx.accounts.validator_registry;
+    let registry = registry_loader.load()?;
+    let registry_count = registry.count as usize;
     let expected_remaining = registry_count
         .checked_mul(2)
         .ok_or(SubsidyError::BadInstructionData)?;
@@ -126,7 +128,7 @@ pub fn handler(
             crate::ID,
             SubsidyError::BadValidatorRecordPda
         );
-        let expected_validator = ctx.accounts.validator_registry.validators[k];
+        let expected_validator = registry.validators[k];
         require_keys_eq!(
             *identity_ai.key,
             expected_validator,

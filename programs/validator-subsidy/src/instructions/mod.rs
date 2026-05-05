@@ -22,6 +22,7 @@ pub mod distribute_yield;
 pub mod init_subsidy;
 pub mod register_validator;
 pub mod stake_to_productive;
+pub mod unregister_validator;
 pub mod unstake_from_productive;
 pub mod update_validator_metrics;
 
@@ -30,5 +31,6 @@ pub use distribute_yield::*;
 pub use init_subsidy::*;
 pub use register_validator::*;
 pub use stake_to_productive::*;
+pub use unregister_validator::*;
 pub use unstake_from_productive::*;
 pub use update_validator_metrics::*;

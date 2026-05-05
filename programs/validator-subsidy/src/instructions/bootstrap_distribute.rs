@@ -54,9 +54,9 @@ pub struct BootstrapDistribute<'info> {
 
     #[account(
         seeds = [b"validator_registry"],
-        bump = validator_registry.bump,
+        bump,
     )]
-    pub validator_registry: Account<'info, ValidatorRegistry>,
+    pub validator_registry: AccountLoader<'info, ValidatorRegistry>,
 
     /// `EpochAccrual` PDA. `init_if_needed` so the relayer can allocate it inline if
     /// the attestor hasn't pre-created it (which is the common case for bootstrap
@@ -128,7 +128,9 @@ pub fn handler(
     let to_distribute = nominal_per_epoch.min(cfg_remaining);
     require!(to_distribute > 0, SubsidyError::BootstrapReserveExhausted);
 
-    let registry_count = ctx.accounts.validator_registry.count as usize;
+    let registry_loader = &ctx.accounts.validator_registry;
+    let registry = registry_loader.load()?;
+    let registry_count = registry.count as usize;
     let expected_remaining = registry_count.checked_mul(2).ok_or(SubsidyError::BadInstructionData)?;
     require!(
         ctx.remaining_accounts.len() == expected_remaining,
@@ -148,7 +150,7 @@ pub fn handler(
             crate::ID,
             SubsidyError::BadValidatorRecordPda
         );
-        let expected_validator = ctx.accounts.validator_registry.validators[k];
+        let expected_validator = registry.validators[k];
         require_keys_eq!(
             *identity_ai.key,
             expected_validator,

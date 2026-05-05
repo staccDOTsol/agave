@@ -82,6 +82,19 @@ enum Cmd {
         #[arg(long)]
         validator: String,
     },
+
+    /// Remove a validator identity pubkey from the registry. Closes the
+    /// per-validator `ValidatorRecord` PDA and refunds rent to the signer.
+    UnregisterValidator {
+        /// Validator identity pubkey.
+        #[arg(long)]
+        validator: String,
+    },
+}
+
+#[derive(BorshSerialize)]
+struct UnregisterValidatorArgs {
+    validator: [u8; 32],
 }
 
 #[derive(BorshSerialize)]
@@ -248,6 +261,38 @@ fn main() -> anyhow::Result<()> {
             let sig = rpc.send_and_confirm_transaction(&tx)?;
             println!("[done] {}", sig);
             println!("validator_record: {}", rec_pda);
+        }
+        Cmd::UnregisterValidator { validator } => {
+            let validator_pk = Pubkey::from_str(&validator)?;
+            let cfg_pda = pda(&[b"subsidy_config"], &program_id);
+            let reg_pda = pda(&[b"validator_registry"], &program_id);
+            let rec_pda = pda(&[b"validator", validator_pk.as_ref()], &program_id);
+            eprintln!("[subsidy-cli] validator:          {}", validator_pk);
+            eprintln!("[subsidy-cli] validator_record:   {}", rec_pda);
+
+            let args = UnregisterValidatorArgs {
+                validator: validator_pk.to_bytes(),
+            };
+            let mut data = discriminator("unregister_validator").to_vec();
+            args.serialize(&mut data)?;
+
+            let ix = Instruction {
+                program_id,
+                accounts: vec![
+                    AccountMeta::new(payer.pubkey(), true), // authority (signer + rent recipient)
+                    AccountMeta::new_readonly(cfg_pda, false), // subsidy_config
+                    AccountMeta::new(reg_pda, false),       // validator_registry (mut for slot mutation)
+                    AccountMeta::new(rec_pda, false),       // validator_record (mut + close)
+                ],
+                data,
+            };
+
+            let bh = rpc.get_latest_blockhash()?;
+            let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[&payer], bh);
+            eprintln!("[subsidy-cli] sending unregister_validator tx…");
+            let sig = rpc.send_and_confirm_transaction(&tx)?;
+            println!("[done] {}", sig);
+            println!("closed validator_record: {}", rec_pda);
         }
     }
     let _ = SYSVAR_INSTRUCTIONS_ID; // keep the unused-import lint quiet for future flows

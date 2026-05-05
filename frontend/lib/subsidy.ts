@@ -39,19 +39,19 @@ import { SYSTEM_PROGRAM_ID, VALIDATOR_SUBSIDY_PROGRAM_ID } from "./staccana";
 // and `subsidy.rs`.
 // ---------------------------------------------------------------------------
 
-/** Hard cap on validators in the registry.
- *
- * Lowered from 64 → 8 in `programs/validator-subsidy/src/state.rs` so
- * `Account<SubsidyConfig>` + `Account<ValidatorRegistry>` fit on SBPF's
- * 4 KB stack frame in `init_subsidy` / `register_validator` (both crashed
- * with `Access violation in stack frame 3` until this was reduced).
- * v1 only needs single-digit validators; bumping requires a program
- * redeploy + this FE constant updated in lockstep.
+/** Hard cap on validators in the registry. Bumped to 256 after the program
+ * was refactored to load `ValidatorRegistry` as `#[account(zero_copy(unsafe))]`
+ * — the array now lives in account data, not on the SBPF stack. The
+ * `bump: u8` field at the end of the registry was also dropped (Anchor
+ * re-derives canonical bump on each call), so the on-chain layout is now
+ * `disc(8) + count(4) + validators(32 * 256)` = 8204 bytes.
  */
-export const MAX_VALIDATORS = 8;
+export const MAX_VALIDATORS = 256;
 
-/** Hard cap on federation set size. Lowered from 32 → 16 in lockstep with
- * `MAX_VALIDATORS` for the same SBPF-stack reason. */
+/** Hard cap on federation set size. 16 (down from the original 32) keeps
+ * `SubsidyConfig` stack-borsh footprint under 700 bytes — it's NOT zero_copy
+ * because borsh's dense layout disagrees with repr(C)'s u32→u64 padding
+ * insertion, and the existing on-chain account would need migration. */
 export const MAX_FEDERATION_MEMBERS = 16;
 
 /** Productive position share of treasury, in bps. `state.rs::TREASURY_PRODUCTIVE_BPS`. */
@@ -268,7 +268,6 @@ export function decodeSubsidyConfig(bytes: Uint8Array): SubsidyConfigState {
 export interface ValidatorRegistryState {
   count: number;
   validators: PublicKey[];
-  bump: number;
 }
 
 /**
@@ -284,7 +283,10 @@ export interface ValidatorRegistryState {
  *
  * Returns only the `count` populated entries; the trailing slots are dropped.
  */
-export const VALIDATOR_REGISTRY_LEN = 8 + 4 + 32 * MAX_VALIDATORS + 1;
+// New layout (zero_copy(unsafe), no trailing bump):
+//   disc(8) + count(4) + validators(32 * MAX_VALIDATORS).
+// At MAX_VALIDATORS = 256 this is 8204 bytes.
+export const VALIDATOR_REGISTRY_LEN = 8 + 4 + 32 * MAX_VALIDATORS;
 
 export function decodeValidatorRegistry(bytes: Uint8Array): ValidatorRegistryState {
   if (bytes.length < VALIDATOR_REGISTRY_LEN) {
@@ -305,12 +307,7 @@ export function decodeValidatorRegistry(bytes: Uint8Array): ValidatorRegistrySta
   for (let i = 0; i < count; i++) {
     validators.push(new PublicKey(bytes.slice(12 + i * 32, 12 + (i + 1) * 32)));
   }
-  const bumpOffset = 12 + 32 * MAX_VALIDATORS;
-  return {
-    count,
-    validators,
-    bump: bytes[bumpOffset],
-  };
+  return { count, validators };
 }
 
 /** Decoded view of a per-validator `ValidatorRecord` PDA. */

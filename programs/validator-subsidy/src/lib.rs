@@ -134,6 +134,16 @@ pub mod staccana_validator_subsidy {
         instructions::register_validator::handler(ctx, args)
     }
 
+    /// Governance-gated removal of a validator from the registry. Closes the
+    /// per-validator `ValidatorRecord` PDA and refunds rent to the
+    /// governance authority. See [`instructions::unregister_validator`].
+    pub fn unregister_validator(
+        ctx: Context<UnregisterValidator>,
+        args: UnregisterValidatorArgs,
+    ) -> Result<()> {
+        instructions::unregister_validator::handler(ctx, args)
+    }
+
     /// Federation-attested update of a validator's per-epoch metrics
     /// (`uptime_bps`, `delegated_stake`, `votes_cast`). Verifies M ed25519 precompile
     /// signatures over the canonical `STACCANA_VALIDATOR_METRICS_V1` message.

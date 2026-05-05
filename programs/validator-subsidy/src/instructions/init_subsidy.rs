@@ -85,7 +85,7 @@ pub struct InitSubsidy<'info> {
         seeds = [b"validator_registry"],
         bump,
     )]
-    pub validator_registry: Account<'info, ValidatorRegistry>,
+    pub validator_registry: AccountLoader<'info, ValidatorRegistry>,
 
     pub system_program: Program<'info, System>,
 }
@@ -127,9 +127,14 @@ pub fn handler(ctx: Context<InitSubsidy>, args: InitSubsidyArgs) -> Result<()> {
     }
     cfg.bump = ctx.bumps.subsidy_config;
 
-    let reg = &mut ctx.accounts.validator_registry;
+    // zero_copy account: load_init() returns a `RefMut<T>` that views the
+    // raw account-data bytes directly (no stack copy). Anchor's
+    // `init` constraint already wrote the discriminator + zeroed the
+    // backing buffer, so count starts at 0 and validators is all zero.
+    let mut reg = ctx.accounts.validator_registry.load_init()?;
     reg.count = 0;
-    reg.bump = ctx.bumps.validator_registry;
+    // No cached `bump` field anymore — Anchor re-derives via
+    // find_program_address on each call.
 
     Ok(())
 }
