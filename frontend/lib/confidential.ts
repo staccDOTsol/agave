@@ -95,6 +95,7 @@
 
 import {
   type Connection,
+  Keypair,
   PublicKey,
   SystemProgram,
   TransactionInstruction,
@@ -103,7 +104,11 @@ import {
 import {
   elgamalDecryptHandle,
   joinCiphertext,
+  leBytesToBigInt,
   randScalar,
+  RistrettoPoint,
+  RISTRETTO255_ORDER,
+  scalarToLeBytes,
 } from "./elgamal-client";
 import { SYSVAR_INSTRUCTIONS_ID, TOKEN_2022_PROGRAM_ID } from "./staccana";
 
@@ -646,8 +651,10 @@ export async function generateClientSideProof(
  * Wire format: `[discriminator:u8, ...contextBytes, ...proofBytes]`.
  *
  * Account list: empty (the inline-data form takes no accounts; the program
- * pulls everything from `data`). When we want context-state-account flow this
- * helper would need extending, but we don't tonight.
+ * pulls everything from `data`). For the context-state-account flow used by
+ * the Send UI to fit a confidential transfer in 4 small txs, see
+ * [`buildVerifyProofWithContextStateInstruction`] which adds the writable
+ * context state account + readonly authority.
  */
 export function buildVerifyProofInstruction(
   variantDiscriminator: number,
@@ -664,6 +671,130 @@ export function buildVerifyProofInstruction(
     data: Buffer.from(data),
   });
 }
+
+/**
+ * Token-22 `Reallocate` ix discriminator. Spec:
+ * `spl-token-2022/src/instruction.rs::TokenInstruction::Reallocate`.
+ * Wire format: `[29, ...extensionTypes:u16 LE]`. Accounts: `[ata(w),
+ * payer(w,s), systemProgram, owner(s)]`. Idempotent only when the
+ * extension isn't already allocated (errors otherwise) — call this only
+ * after confirming the extension is missing.
+ */
+export const TOKEN_2022_INSTRUCTION_REALLOCATE = 29;
+
+/**
+ * Build Token-22 `Reallocate` to add the requested account extensions to
+ * an existing token account (e.g. promoting a vanilla 165-byte SPL Token
+ * account to one that has space for `ConfidentialTransferAccount`). The
+ * SPL Associated Token Account program's `Create` ix doesn't auto-allocate
+ * CT space when the mint has the extension, so wallets that minted via
+ * the bridge land with cleartext-only ATAs that need this preamble before
+ * any CT operation works.
+ */
+export function buildReallocateInstruction(args: {
+  ata: PublicKey;
+  payer: PublicKey;
+  owner: PublicKey;
+  /** Extension type values from `spl_token_2022::extension::ExtensionType`. */
+  extensionTypes: number[];
+}): TransactionInstruction {
+  const data = new Uint8Array(1 + args.extensionTypes.length * 2);
+  data[0] = TOKEN_2022_INSTRUCTION_REALLOCATE;
+  for (let i = 0; i < args.extensionTypes.length; i++) {
+    const v = args.extensionTypes[i];
+    data[1 + i * 2] = v & 0xff;
+    data[1 + i * 2 + 1] = (v >> 8) & 0xff;
+  }
+  return new TransactionInstruction({
+    programId: TOKEN_2022_PROGRAM_ID,
+    keys: [
+      { pubkey: args.ata, isSigner: false, isWritable: true },
+      { pubkey: args.payer, isSigner: true, isWritable: true },
+      {
+        pubkey: new PublicKey("11111111111111111111111111111111"),
+        isSigner: false,
+        isWritable: false,
+      },
+      { pubkey: args.owner, isSigner: true, isWritable: false },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+/**
+ * Same wire format as [`buildVerifyProofInstruction`] but with the two-account
+ * "context state" form: the program writes the verified `ProofContextState<T>`
+ * to `contextStateAccount` instead of returning it inline.
+ *
+ * `contextStateAccount` MUST already exist (allocated via
+ * `SystemProgram.createAccount` with the right `space` and owned by
+ * `ZkE1Gama1Proof…`). `contextStateAuthority` is recorded in the stored
+ * context state and is the ONLY pubkey allowed to later submit a
+ * `CloseContextState` ix to refund the rent.
+ *
+ * Why this matters for Send: the inline form forces all 1867 bytes of proof
+ * data into the same tx as `TransferChecked` (~2037 bytes total — over the
+ * 1232-byte ceiling). The context state form lets us split each proof into
+ * its own small tx (~400-1100 bytes), then a tiny `Transfer` tx that just
+ * references the 3 context state accounts by pubkey.
+ */
+export function buildVerifyProofWithContextStateInstruction(
+  variantDiscriminator: number,
+  contextStateAccount: PublicKey,
+  contextStateAuthority: PublicKey,
+  contextBytes: Uint8Array,
+  proofBytes: Uint8Array,
+): TransactionInstruction {
+  const data = new Uint8Array(1 + contextBytes.length + proofBytes.length);
+  data[0] = variantDiscriminator;
+  data.set(contextBytes, 1);
+  data.set(proofBytes, 1 + contextBytes.length);
+  return new TransactionInstruction({
+    programId: ZK_ELGAMAL_PROOF_PROGRAM_ID,
+    keys: [
+      { pubkey: contextStateAccount, isSigner: false, isWritable: true },
+      { pubkey: contextStateAuthority, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+/**
+ * `CloseContextState` (discriminator 0). Closes a previously-allocated proof
+ * context state account and refunds its rent lamports to `destination`.
+ * Authority must be a signer.
+ */
+export function buildCloseContextStateInstruction(
+  contextStateAccount: PublicKey,
+  destination: PublicKey,
+  authority: PublicKey,
+): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: ZK_ELGAMAL_PROOF_PROGRAM_ID,
+    keys: [
+      { pubkey: contextStateAccount, isSigner: false, isWritable: true },
+      { pubkey: destination, isSigner: false, isWritable: true },
+      { pubkey: authority, isSigner: true, isWritable: false },
+    ],
+    data: Buffer.from([ZK_PROOF_IX.CloseContextState]),
+  });
+}
+
+/**
+ * Byte sizes for `ProofContextState<T>` accounts, computed as
+ * `32 (authority pubkey) + 1 (proof_type) + size_of::<T>` for each variant.
+ * Numbers come from `solana-zk-sdk`'s `ProofContextState<T>` layout — pinned
+ * here so a future change in upstream sizes surfaces as an account-data-mismatch
+ * error from the validator instead of a confusing "wrong size" downstream.
+ */
+export const PROOF_CONTEXT_STATE_SIZE = {
+  /** `CiphertextCommitmentEqualityProofContext` = 32 (pubkey) + 64 (ct) + 32 (commitment) = 128. */
+  ciphertextCommitmentEquality: 32 + 1 + 32 + 64 + 32, // 161
+  /** `BatchedGroupedCiphertext3HandlesValidityProofContext` = 32*3 (pubkeys) + 128*2 (3-handle cts) = 352. */
+  batchedGroupedCiphertext3HandlesValidity: 32 + 1 + 32 * 3 + 128 * 2, // 385
+  /** `BatchedRangeProofContext` = 32*8 (commitments) + 8 (bit lengths). */
+  batchedRangeProofU128: 32 + 1 + 32 * 8 + 8, // 297
+} as const;
 
 /** Decode a base64 string to bytes — works in both browser and node. */
 function base64ToBytes(b64: string): Uint8Array {
@@ -927,6 +1058,18 @@ export interface TransferIxArgs {
    * shows a decrypted amount); see `SecretBalancePanel.tsx`.
    */
   currentAvailablePlaintext?: bigint;
+  /**
+   * On-chain `available_balance` ciphertext (64 bytes) read from the source
+   * ATA's `ConfidentialTransferAccount` extension RIGHT BEFORE building the
+   * proof. When present, `buildTransferInstruction` switches to the
+   * **general-case** path: it computes `sourceCt = current_available -
+   * combined_lo_hi` via client-side Ristretto subtraction so it byte-equals
+   * what Token-22 will compute on chain — for ANY prior CT history, not just
+   * the "fresh deposit, no transfers" case the synthesize-from-opening path
+   * handles. Without it, the equality proof's `new_source_ciphertext` only
+   * matches when `current_available.handle == identity`.
+   */
+  currentAvailableCiphertext?: Uint8Array;
   /** Optional fetch override. */
   fetchImpl?: typeof fetch;
 }
@@ -1071,11 +1214,34 @@ export async function buildTransferInstruction(
     }
     newBalPlain = resolvedNewBalPlain;
 
-    // Generate fresh openings — one for the new available-balance ciphertext
-    // and two for the lo/hi halves of the transfer amount.
-    newBalOpen = randScalar();
+    // Generate fresh openings for the lo/hi halves of the transfer amount.
     openingLo = randScalar();
     openingHi = randScalar();
+    // **`newBalOpen` is NOT random — it has to byte-cancel against the
+    //  on-chain math.** Token-22's `Transfer` ix derives the post-transfer
+    //  source ciphertext as `current_available - combined_lo_hi` and
+    //  byte-equality-checks it against the equality proof's
+    //  `new_source_ciphertext` (= our `sourceCt`). For the H-component
+    //  contributions to match, with `current_available = (m*G, identity)`
+    //  (true after a fresh ConfigureAccount + Deposit + ApplyPending
+    //  cycle, before any prior CT transfers), we need:
+    //    newBalOpen = -(opening_lo + 2^16 * opening_hi)  mod L
+    //  Then `newBalCommit = pedersen(newBalPlain, newBalOpen) = newBalPlain*G
+    //  + newBalOpen*H`, and our synthesized `sourceCt =
+    //  (newBalCommit, newBalOpen*pk)` matches `current_available -
+    //  combined` byte-for-byte. Random `newBalOpen` produces a proof the
+    //  on-chain verifier rejects with `Custom(27) = BalanceMismatch`.
+    //
+    //  Caveat: this special-cases "current_available has zero H-component"
+    //  which holds for the first encrypted send post-Configure+Deposit.
+    //  Subsequent sends without a fresh re-deposit need the general
+    //  approach (read on-chain `available_balance`, compute `sourceCt =
+    //  on_chain - combined` via client-side Ristretto subtraction).
+    const loBig = leBytesToBigInt(openingLo);
+    const hiBig = leBytesToBigInt(openingHi);
+    const combinedOp = (loBig + (1n << 16n) * hiBig) % RISTRETTO255_ORDER;
+    const newOpenScalar = (RISTRETTO255_ORDER - combinedOp) % RISTRETTO255_ORDER;
+    newBalOpen = scalarToLeBytes(newOpenScalar);
 
     // Compute the new source ciphertext = (commitment_new, handle_new)
     // under the SENDER's pubkey, with `r = newBalOpen` shared between the
@@ -1100,6 +1266,86 @@ export async function buildTransferInstruction(
     newBalCommit = commitBytes;
     const handleBytes = elgamalDecryptHandle(args.senderElgamalPubkey, newBalOpen);
     sourceCt = joinCiphertext(commitBytes, handleBytes);
+
+    // **General-case override.** When the caller provides the actual on-chain
+    // `available_balance` ciphertext, recompute `sourceCt` as the byte-exact
+    // result of `current - combined_lo_hi` so it matches what Token-22's
+    // `process_source_for_transfer` will compute. This works for any prior
+    // CT history (multiple deposits, prior transfers, whatever) — unlike
+    // the `newBalOpen = -combined_op` byte-cancellation trick above which
+    // only handles the specific case where `current_available.handle ==
+    // identity` (= no prior transfers since the last fresh Configure or
+    // Apply-from-zero).
+    //
+    // The equality proof's algebraic check holds regardless of whether
+    // `(sourceCt, newBalCommit)` share the same randomness — the proof binds
+    // them to the same plaintext via the keypair. So we leave `newBalOpen` /
+    // `newBalCommit` random (well, the synthesized values from above) and
+    // ONLY override `sourceCt`. The wasm prover will reject with
+    // `InconsistentInput` if the supplied ciphertext doesn't decrypt to
+    // `newBalPlain` under the keypair, which it always will here because
+    // `current_available` encrypts `currentAvailablePlaintext` and we
+    // subtract `args.amount`.
+    if (args.currentAvailableCiphertext) {
+      if (args.currentAvailableCiphertext.length !== ELGAMAL_CIPHERTEXT_LEN) {
+        throw new RangeError(
+          `currentAvailableCiphertext must be ${ELGAMAL_CIPHERTEXT_LEN} bytes (got ${args.currentAvailableCiphertext.length})`,
+        );
+      }
+      // Compute `combined_lo_hi` = source-side(transfer_lo) + 2^16 *
+      // source-side(transfer_hi). Source-side ciphertext = (commitment,
+      // opening * sender_pk).
+      const SHIFT = 1n << 16n;
+      // Pull pedersenLo/pedersenHi from the server BEFORE the override —
+      // we need them to compute the combined commitment client-side.
+      const _amtLoEarly = args.amount & 0xffffn;
+      const _amtHiEarly = args.amount >> 16n;
+      const _commitLoResp = await requestServerSideProof(
+        "pedersen_commit",
+        {
+          amount: _amtLoEarly.toString(),
+          opening: bytesToBase64(openingLo),
+        },
+        fetchImpl,
+      );
+      const _commitHiResp = await requestServerSideProof(
+        "pedersen_commit",
+        {
+          amount: _amtHiEarly.toString(),
+          opening: bytesToBase64(openingHi),
+        },
+        fetchImpl,
+      );
+      const _pedLoBytes = base64ToBytes(_commitLoResp.proofData);
+      const _pedHiBytes = base64ToBytes(_commitHiResp.proofData);
+      const _loCommitPt = RistrettoPoint.fromBytes(_pedLoBytes);
+      const _hiCommitPt = RistrettoPoint.fromBytes(_pedHiBytes);
+      const _combinedCommitPt = _loCommitPt.add(_hiCommitPt.multiply(SHIFT));
+      // Combined handle = (opening_lo + 2^16 * opening_hi) * sender_pk.
+      const loBigForHandle = leBytesToBigInt(openingLo);
+      const hiBigForHandle = leBytesToBigInt(openingHi);
+      const combinedOpenScalar =
+        (loBigForHandle + SHIFT * hiBigForHandle) % RISTRETTO255_ORDER;
+      const combinedOpenBytes = scalarToLeBytes(combinedOpenScalar);
+      const _combinedHandleBytes = elgamalDecryptHandle(
+        args.senderElgamalPubkey,
+        combinedOpenBytes,
+      );
+      const _combinedHandlePt = RistrettoPoint.fromBytes(_combinedHandleBytes);
+      // Read on-chain current_available.
+      const _curCommitPt = RistrettoPoint.fromBytes(
+        args.currentAvailableCiphertext.slice(0, 32),
+      );
+      const _curHandlePt = RistrettoPoint.fromBytes(
+        args.currentAvailableCiphertext.slice(32, 64),
+      );
+      // Subtract: new = current - combined.
+      const _newCommitPt = _curCommitPt.subtract(_combinedCommitPt);
+      const _newHandlePt = _curHandlePt.subtract(_combinedHandlePt);
+      sourceCt = new Uint8Array(64);
+      sourceCt.set(_newCommitPt.toBytes(), 0);
+      sourceCt.set(_newHandlePt.toBytes(), 32);
+    }
   }
 
   if (sourceCt.length !== ELGAMAL_CIPHERTEXT_LEN) {
@@ -1194,14 +1440,52 @@ export async function buildTransferInstruction(
     );
   }
 
-  const rangeCommitments = new Uint8Array(32 * 3);
-  const rangeOpenings = new Uint8Array(32 * 3);
+  // Token-22's `Transfer` ix expects a **4-commitment** batched range proof
+  // with the canonical bit-length layout, matching the constants in
+  // `spl-token-confidential-transfer-proof-extraction::transfer.rs`:
+  //
+  //   [0] new_source_balance:        REMAINING_BALANCE_BIT_LENGTH    = 64
+  //   [1] transfer_amount_lo:        TRANSFER_AMOUNT_LO_BIT_LENGTH   = 16
+  //   [2] transfer_amount_hi:        TRANSFER_AMOUNT_HI_BIT_LENGTH   = 32
+  //   [3] padding (commits to 0):    PADDING_BIT_LENGTH              = 16
+  //                                                            sum = 128
+  //
+  // The verifier explicitly checks: bit_lengths == [64, 16, 32, 16] AND
+  // commitments[0..3] match the eq-proof / validity-proof outputs (the
+  // padding commitment isn't checked against anything specific). Earlier
+  // versions of this code shipped 3 commitments + [64,16,48], which
+  // produced `Custom(62) = ProofRangeProofLengthMismatch` from
+  // spl-token-2022.
+  //
+  // Note: `amountHi = amount >> 16` MUST fit in 32 bits, so the largest
+  // representable transfer amount is 2^48 - 1 ≈ 281 trillion (post-decimals
+  // base units). Our 6-decimal Staccana mirror caps at ~281M tokens, which
+  // is plenty for typical sends.
+  const paddingOpen = randScalar();
+  const padCommitResp = await requestServerSideProof(
+    "pedersen_commit",
+    { amount: "0", opening: bytesToBase64(paddingOpen) },
+    fetchImpl,
+  );
+  const paddingCommit = base64ToBytes(padCommitResp.proofData);
+  if (paddingCommit.length !== 32) {
+    throw new ProofUnavailableError(
+      "pedersen_commit",
+      "invalid_response",
+      `pedersen_commit (padding) returned ${paddingCommit.length}-byte commitment, expected 32`,
+    );
+  }
+
+  const rangeCommitments = new Uint8Array(32 * 4);
+  const rangeOpenings = new Uint8Array(32 * 4);
   rangeCommitments.set(newBalCommit, 0);
   rangeCommitments.set(pedersenLo, 32);
   rangeCommitments.set(pedersenHi, 64);
+  rangeCommitments.set(paddingCommit, 96);
   rangeOpenings.set(newBalOpen, 0);
   rangeOpenings.set(openingLo, 32);
   rangeOpenings.set(openingHi, 64);
+  rangeOpenings.set(paddingOpen, 96);
 
   const range = await requestServerSideProof(
     "batched_range_proof_u128",
@@ -1209,11 +1493,13 @@ export async function buildTransferInstruction(
       elgamalSeed: seedB64,
       commitments: bytesToBase64(rangeCommitments),
       openings: bytesToBase64(rangeOpenings),
-      // `batched_range_proof_u128` takes the cleartext amounts each
-      // commitment encodes (NOT the commitments themselves) — the wasm
-      // generator re-derives openings ⇄ commitments and asserts equality.
-      amounts: [args.amount.toString(), amountLo.toString(), amountHi.toString()],
-      bitLengths: [64, 16, 48],
+      amounts: [
+        newBalPlain.toString(),
+        amountLo.toString(),
+        amountHi.toString(),
+        "0",
+      ],
+      bitLengths: [64, 16, 32, 16],
     },
     fetchImpl,
   );
@@ -1299,6 +1585,225 @@ export async function buildTransferInstruction(
   });
 
   return [transferIx, verifyEq, verifyValidity, verifyRange];
+}
+
+// ---------------------------------------------------------------------------
+// Transfer — context-state-account form.
+//
+// The inline form above produces a bundle that's ~2037 bytes of ix data —
+// too big for any single tx (legacy/v0 cap = 1232 bytes), and there is no
+// LUT trick that compresses ix data. The fix per Solana's Token-2022 docs:
+// pre-stage each proof in its own context state account, then submit a tiny
+// `Transfer` ix that references those accounts by pubkey.
+//
+// `prepareConfidentialTransferIxs` returns four batches:
+//
+//   setupTxs[0] = [createAccount(eqCtxKp), verifyEqualityWithCtx]
+//   setupTxs[1] = [createAccount(validityCtxKp), verifyValidityWithCtx]
+//   setupTxs[2] = [createAccount(rangeCtxKp),    verifyRangeWithCtx]
+//   finalTxIxs  = [transferIx, closeEq, closeValidity, closeRange]
+//
+// The caller signs each setupTx[i] with both `owner` (via the wallet) and
+// `setupKeypairs[i]` (via `Transaction.partialSign`). The final tx is signed
+// only by `owner`. The close ixs refund the rent (~0.002 SOL each) so the
+// 4-tx flow is net-zero on lamports.
+// ---------------------------------------------------------------------------
+
+export interface PreparedConfidentialTransfer {
+  /** Setup tx ix arrays. Each tx must be partial-signed by `setupSigners[i]`. */
+  setupTxs: TransactionInstruction[][];
+  /** Per-tx ctx-state-account keypairs. setupTxs[i] is partial-signed by EVERY keypair
+   *  in setupSigners[i]. The validity tx carries TWO signers since it doubles as
+   *  the range account's createAccount tx (the range verify tx alone fits 1232B). */
+  setupSigners: Keypair[][];
+  /** Pubkeys for the 3 context state accounts. Useful for tracking/cleanup. */
+  contextStatePubkeys: { equality: PublicKey; validity: PublicKey; range: PublicKey };
+  /** [transferIx, closeEq, closeValidity, closeRange] — single final tx, signed by owner. */
+  finalTxIxs: TransactionInstruction[];
+}
+
+export async function prepareConfidentialTransferIxs(
+  args: TransferIxArgs,
+  rpc: Connection,
+): Promise<PreparedConfidentialTransfer> {
+  // Build the inline form first — gives us the 4 ixs `[transferInline,
+  // verifyEq, verifyValidity, verifyRange]`. We extract the proof + context
+  // bytes from each `verify*` ix's data (`[disc, ...context, ...proof]`),
+  // discard the inline transferIx (we'll re-issue with offsets=0), and
+  // wrap the proof bytes in context-state-mode `Verify*` ixs.
+  const inlineIxs = await buildTransferInstruction(args);
+  const [inlineTransfer, verifyEq, verifyValidity, verifyRange] = inlineIxs;
+
+  // The verify ixs each have data layout `[disc, ...contextBytes, ...proofBytes]`
+  // but we don't know the split a priori — we DO know the context length per
+  // proof type from `solana-zk-sdk` though, so we slice on that. Rest is proof.
+  function splitVerifyData(
+    ix: TransactionInstruction,
+    contextSize: number,
+  ): { context: Uint8Array; proof: Uint8Array } {
+    const data = new Uint8Array(ix.data);
+    if (data.length < 1 + contextSize) {
+      throw new RangeError(
+        `verify ix data is too short: ${data.length} bytes < 1 disc + ${contextSize} ctx`,
+      );
+    }
+    return {
+      context: data.slice(1, 1 + contextSize),
+      proof: data.slice(1 + contextSize),
+    };
+  }
+  // ProofContextState payload sizes (= account size minus 32 authority - 1 type byte).
+  const EQ_CTX = PROOF_CONTEXT_STATE_SIZE.ciphertextCommitmentEquality - 33; // 128
+  const VALIDITY_CTX =
+    PROOF_CONTEXT_STATE_SIZE.batchedGroupedCiphertext3HandlesValidity - 33; // 352
+  const RANGE_CTX = PROOF_CONTEXT_STATE_SIZE.batchedRangeProofU128 - 33; // 264
+  const eqParts = splitVerifyData(verifyEq, EQ_CTX);
+  const validityParts = splitVerifyData(verifyValidity, VALIDITY_CTX);
+  const rangeParts = splitVerifyData(verifyRange, RANGE_CTX);
+
+  // Fresh keypairs for the 3 context state accounts. Throwaway — they live
+  // for ~3 txs then get closed for refund.
+  const eqKp = Keypair.generate();
+  const validityKp = Keypair.generate();
+  const rangeKp = Keypair.generate();
+
+  // One rent quote per size — the validator's rent calculation is identical
+  // for accounts of the same size, so we batch the lookups.
+  const [rentEq, rentValidity, rentRange] = await Promise.all([
+    rpc.getMinimumBalanceForRentExemption(
+      PROOF_CONTEXT_STATE_SIZE.ciphertextCommitmentEquality,
+    ),
+    rpc.getMinimumBalanceForRentExemption(
+      PROOF_CONTEXT_STATE_SIZE.batchedGroupedCiphertext3HandlesValidity,
+    ),
+    rpc.getMinimumBalanceForRentExemption(
+      PROOF_CONTEXT_STATE_SIZE.batchedRangeProofU128,
+    ),
+  ]);
+
+  function buildSetup(
+    discriminator: number,
+    kp: Keypair,
+    space: number,
+    lamports: number,
+    parts: { context: Uint8Array; proof: Uint8Array },
+  ): TransactionInstruction[] {
+    return [
+      SystemProgram.createAccount({
+        fromPubkey: args.owner,
+        newAccountPubkey: kp.publicKey,
+        lamports,
+        space,
+        programId: ZK_ELGAMAL_PROOF_PROGRAM_ID,
+      }),
+      buildVerifyProofWithContextStateInstruction(
+        discriminator,
+        kp.publicKey,
+        args.owner, // authority — only `owner` can later submit CloseContextState
+        parts.context,
+        parts.proof,
+      ),
+    ];
+  }
+
+  const setupEq = buildSetup(
+    ZK_PROOF_IX.VerifyCiphertextCommitmentEquality,
+    eqKp,
+    PROOF_CONTEXT_STATE_SIZE.ciphertextCommitmentEquality,
+    rentEq,
+    eqParts,
+  );
+  // The validity tx has ~370 bytes of slack; the range tx alone (1001 bytes
+  // verify-data) overflows when paired with createAccount(rangeKp). Move the
+  // range account allocation into the validity tx so the range tx stays
+  // verify-only (~1210 bytes — under the 1232 ceiling). Same total of 3
+  // setup txs.
+  const setupValidity = [
+    ...buildSetup(
+      ZK_PROOF_IX.VerifyBatchedGroupedCiphertext3HandlesValidity,
+      validityKp,
+      PROOF_CONTEXT_STATE_SIZE.batchedGroupedCiphertext3HandlesValidity,
+      rentValidity,
+      validityParts,
+    ),
+    SystemProgram.createAccount({
+      fromPubkey: args.owner,
+      newAccountPubkey: rangeKp.publicKey,
+      lamports: rentRange,
+      space: PROOF_CONTEXT_STATE_SIZE.batchedRangeProofU128,
+      programId: ZK_ELGAMAL_PROOF_PROGRAM_ID,
+    }),
+  ];
+  // setupRange now ONLY contains the verify ix — the account was created
+  // above. setupKeypairs[2] is still rangeKp because tx 2 (validity) signs
+  // both `validityKp` and `rangeKp` for the createAccount ixs.
+  const setupRange = [
+    buildVerifyProofWithContextStateInstruction(
+      ZK_PROOF_IX.VerifyBatchedRangeProofU128,
+      rangeKp.publicKey,
+      args.owner,
+      rangeParts.context,
+      rangeParts.proof,
+    ),
+  ];
+
+  // Re-build the Transfer ix, but with offsets=0 (= "the proofs are in
+  // context state accounts, look them up in the account list") and the 3
+  // context state pubkeys appended between `destination` and `owner`.
+  // The data layout is identical to the inline form except the trailing
+  // 3 offset bytes are all zero. We copy the existing `inlineTransfer.data`
+  // and rewrite just those 3 bytes — saves re-computing the auditor cts.
+  const transferData = new Uint8Array(inlineTransfer.data);
+  // [bytes total - 3 .. -2 .. -1] = [eqOffset, validityOffset, rangeOffset]
+  transferData[transferData.length - 3] = 0;
+  transferData[transferData.length - 2] = 0;
+  transferData[transferData.length - 1] = 0;
+
+  const transferIx = new TransactionInstruction({
+    programId: TOKEN_2022_PROGRAM_ID,
+    keys: [
+      { pubkey: args.ata, isWritable: true, isSigner: false },
+      { pubkey: args.mint, isWritable: false, isSigner: false },
+      { pubkey: args.destinationAta, isWritable: true, isSigner: false },
+      // Account-list shape for context-state mode (per
+      // spl-token-2022::confidential_transfer::process_transfer):
+      //   [..., eq_ctx, validity_ctx, range_ctx, owner].
+      { pubkey: eqKp.publicKey, isWritable: false, isSigner: false },
+      { pubkey: validityKp.publicKey, isWritable: false, isSigner: false },
+      { pubkey: rangeKp.publicKey, isWritable: false, isSigner: false },
+      { pubkey: args.owner, isWritable: false, isSigner: true },
+    ],
+    data: Buffer.from(transferData),
+  });
+
+  // Refund rent on the 3 context state accounts in the same tx as the
+  // transfer — the verify ixs already wrote the verified context, the
+  // transfer just consumed it, so we don't need them anymore.
+  const closeEq = buildCloseContextStateInstruction(eqKp.publicKey, args.owner, args.owner);
+  const closeValidity = buildCloseContextStateInstruction(
+    validityKp.publicKey,
+    args.owner,
+    args.owner,
+  );
+  const closeRange = buildCloseContextStateInstruction(
+    rangeKp.publicKey,
+    args.owner,
+    args.owner,
+  );
+
+  return {
+    setupTxs: [setupEq, setupValidity, setupRange],
+    // Tx 0 needs eqKp; tx 1 needs validityKp AND rangeKp (it allocates BOTH
+    // accounts since the range verify tx couldn't fit createAccount); tx 2
+    // is verify-only, no extra signer.
+    setupSigners: [[eqKp], [validityKp, rangeKp], []],
+    contextStatePubkeys: {
+      equality: eqKp.publicKey,
+      validity: validityKp.publicKey,
+      range: rangeKp.publicKey,
+    },
+    finalTxIxs: [transferIx, closeEq, closeValidity, closeRange],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1613,6 +2118,47 @@ export function findConfidentialTransferAccountExtension(
  * mismatch can't happen. We accept `mint` in the signature for the sake of
  * future tighter checks.
  */
+/**
+ * Extract the recipient's ElGamal pubkey (32 bytes) from a Token-22
+ * `ConfidentialTransferAccount` extension blob.
+ *
+ * Layout (per `spl_token_2022::extension::confidential_transfer::ConfidentialTransferAccount`):
+ *
+ *   offset 0:  approved (PodBool, 1 byte)
+ *   offset 1:  elgamal_pubkey (PodElGamalPubkey, 32 bytes)  ← what we want
+ *   offset 33: pending_balance_lo (...)
+ *   ...
+ *
+ * Returns `null` if the extension is too short. The caller (Send flow) needs
+ * this for the BatchedGroupedCiphertext3HandlesValidity proof's `dest_pubkey`
+ * input — passing all-zeros there yields a Ristretto identity point which
+ * the validity-proof verifier rejects with `Transcript(ValidationError)`.
+ */
+export function extractElgamalPubkeyFromCtExtension(ext: Uint8Array): Uint8Array | null {
+  if (ext.length < 1 + 32) return null;
+  return ext.slice(1, 33);
+}
+
+/**
+ * Convenience: fetch a Token-22 token account and return its ConfigureAccount-
+ * registered ElGamal pubkey, or `null` if the account doesn't exist or hasn't
+ * configured CT yet. Used by the Send flow to decide whether the encrypted
+ * path is even feasible.
+ */
+export async function fetchRecipientElgamalPubkey(
+  connection: Connection,
+  ata: PublicKey,
+  tokenProgram: PublicKey = TOKEN_2022_PROGRAM_ID,
+): Promise<Uint8Array | null> {
+  const acct = await connection.getAccountInfo(ata, "confirmed");
+  if (!acct) return null;
+  if (!acct.owner.equals(tokenProgram)) return null;
+  const data = acct.data instanceof Uint8Array ? acct.data : new Uint8Array(acct.data);
+  const ext = findConfidentialTransferAccountExtension(data);
+  if (!ext) return null;
+  return extractElgamalPubkeyFromCtExtension(ext);
+}
+
 export async function hasConfidentialAccountState(
   connection: Connection,
   ata: PublicKey,

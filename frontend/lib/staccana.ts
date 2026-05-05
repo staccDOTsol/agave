@@ -148,7 +148,12 @@ export const SYSVAR_INSTRUCTIONS_ID = new PublicKey("Sysvar1nstructions111111111
  * Override via `NEXT_PUBLIC_MASTER_LUT` for local dev / re-bake testing.
  */
 export const STACCANA_MASTER_LUT = new PublicKey(
-  process.env.NEXT_PUBLIC_MASTER_LUT ?? "7bGgc4SxQzkkBJabk8mcXfoceoon3Lv55Gkds8453vun",
+  // 2026-05-03: post-rebake LUT created on staccana mainnet by upgrade-authority
+  // (sigs 3BshW8H3 create + 4Q5vECEZ extend with all 16 entries in the order
+  // documented above). The previous fallback `7bGgc4Sx...` was a stale pubkey
+  // from a pre-rebake cluster — references to it on the new chain throw
+  // "Master LUT not visible on chain" because the account doesn't exist.
+  process.env.NEXT_PUBLIC_MASTER_LUT ?? "3YCCcGN7HYjwkTxWNn4MMqxopm2VZvCteCqxj3V4skwL",
 );
 
 // --- Endpoint and URL Configuration ---
@@ -176,10 +181,16 @@ const DEFAULT_MAINNET_RPC_URL = "https://api.devnet.solana.com";
 export const MAINNET_RPC_URL =
   process.env.NEXT_PUBLIC_MAINNET_RPC_URL ?? DEFAULT_MAINNET_RPC_URL;
 
-/** Optional explorer base URL for mainnet (or devnet). */
-const DEFAULT_MAINNET_EXPLORER_URL = "https://explorer.solana.com";
-/** Cluster query suffix for the mainnet explorer (e.g. `?cluster=devnet`). */
-const DEFAULT_MAINNET_EXPLORER_CLUSTER = "?cluster=devnet";
+/** Optional explorer base URL for mainnet (or devnet). Defaults to Solscan since
+ *  it's friendlier for Token-22 + Confidential Transfer flows than the official
+ *  Solana explorer. Override with `NEXT_PUBLIC_MAINNET_EXPLORER_URL` to point at
+ *  any other explorer (e.g. `https://explorer.solana.com`). */
+const DEFAULT_MAINNET_EXPLORER_URL = "https://solscan.io";
+/** Cluster query suffix for the mainnet explorer. Empty string = mainnet. Set to
+ *  `?cluster=devnet` (the format both solscan + the official explorer accept) to
+ *  link into devnet instead. The bridge moved to mainnet on 2026-05-03 so the
+ *  default now points at mainnet. */
+const DEFAULT_MAINNET_EXPLORER_CLUSTER = "";
 export const MAINNET_EXPLORER_URL =
   process.env.NEXT_PUBLIC_MAINNET_EXPLORER_URL ?? DEFAULT_MAINNET_EXPLORER_URL;
 export const MAINNET_EXPLORER_CLUSTER =

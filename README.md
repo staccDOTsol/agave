@@ -45,6 +45,73 @@ Staccana is a sovereign Solana chain. Genesis is built from a snapshot of mainne
     └── SPEC.md              # Normative wire formats, invariants, constants
 ```
 
+## Run a validator
+
+Staccana ships as a single multi-arch Docker image (`linux/amd64` + `linux/arm64`). It's a slightly-patched `agave-validator` 3.1.14 plus a genesis seed and a run script that wires entrypoint / identity / vote / stake on first boot.
+
+### Minimum requirements
+
+- Linux host (kernel ≥ 5.10 for io_uring; the image gracefully falls back on older kernels and WSL2)
+- Docker (multi-arch manifest — pulls native arm64 on Apple Silicon / Graviton, native amd64 elsewhere)
+- ~50 GB disk for ledger + accounts (grows; depends on `--limit-ledger-size`)
+- Open inbound: TCP/UDP 8001 (gossip), TCP/UDP 8002–8027 (dynamic TVU/TPU range), TCP 8899 (RPC, optional)
+
+### Cluster constants (`mainnet-sigma`, devnet phase)
+
+| Field | Value |
+|---|---|
+| Genesis hash | `FFwiB5Dq3HshrfzPeQTCWAzVUFgw6r4kJLAmCYdLXLep` |
+| Validator binary version | `agave-validator 3.1.14` |
+| Bootstrap entrypoint | `84.32.220.211:8001` (val-1, identity `BtTrfSMeHSNJc8cfy3AAXEykjGPEuTFzL53Vfp8dsUcb`) |
+| Public RPC | `https://rpc.mp.fun` (or hit any of val-1/2/3/4 directly on `:8899`) |
+| Docker image | `jrsdunn/solana-classic-validator:latest` |
+
+### One-line bring-up
+
+```bash
+docker pull jrsdunn/solana-classic-validator:latest
+
+docker run -d --name staccana \
+  --restart unless-stopped \
+  -p 8001:8001/tcp -p 8001:8001/udp \
+  -p 8002-8027:8002-8027/udp \
+  -p 8899:8899/tcp \
+  -v staccana-ledger:/var/lib/staccana/ledger \
+  -v staccana-accounts:/var/lib/staccana/accounts \
+  -v staccana-keys:/etc/staccana/keys \
+  -e STACCANA_THIS_PUBLIC_IP=$(curl -s ifconfig.me) \
+  -e STACCANA_ENTRYPOINT=84.32.220.211:8001 \
+  -e STACCANA_KNOWN_VALIDATOR=BtTrfSMeHSNJc8cfy3AAXEykjGPEuTFzL53Vfp8dsUcb \
+  -e STACCANA_EXPECTED_GENESIS_HASH=FFwiB5Dq3HshrfzPeQTCWAzVUFgw6r4kJLAmCYdLXLep \
+  jrsdunn/solana-classic-validator:latest
+```
+
+On first boot the entrypoint script generates fresh `identity.json`, `vote.json`, `stake.json` keypairs into the `staccana-keys` volume and seeds the ledger from the baked-in `genesis.bin` (no external tarball needed — it's inside the image). `docker logs -f staccana` to follow.
+
+### Joining the validator subsidy
+
+Once your node is in gossip and catching up, register its identity pubkey with the on-chain `validator-subsidy` program so it receives epoch payouts:
+
+```bash
+# from the operator (governance key) end:
+staccana-subsidy-cli \
+  --keypair /path/to/upgrade-authority.json \
+  --rpc https://rpc.mp.fun \
+  register-validator \
+  --validator <your-identity-pubkey>
+```
+
+Distributions are pull-free — they land in the identity address whenever `distribute_yield` / `bootstrap_distribute` runs for the epoch (SPEC §7.2). Status visible at <https://app.mp.fun/validators>.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `assertion failed: io_uring_supported()` | Pull a newer image (`:latest` past sha256 `9eb83b…`) — patched to fall back to `std::fs` on WSL2 / older kernels. |
+| `Port range is too small` | Pull `:latest` past sha256 `9eb83b…` — bumped from 8002–8020 to 8002–8027 for agave 3.x's allocator. |
+| Bootstrap stuck on snapshot fetch | Confirm RPC port is open on the entrypoint (`curl -s -X POST http://84.32.220.211:8899 -H content-type:application/json -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'`). All four val-1/2/3/4 expose 8899; entrypoint connection alone is enough. |
+| `failed to open elf at /lib64/ld-linux-x86-64.so.2` | You pulled an amd64 manifest on an arm64 host. Re-pull — `:latest` is a multi-arch manifest list, Docker should pick the right platform automatically. |
+
 ## Status
 
 Pre-alpha scaffold. The matcher and genesis crates are the only compilable code; everything else is design docs and future crate stubs.

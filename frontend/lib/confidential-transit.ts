@@ -67,11 +67,13 @@ import {
   buildApplyPendingBalanceInstruction,
   buildConfigureAccountInstruction,
   buildDepositInstruction,
+  buildReallocateInstruction,
   buildTransferInstruction,
   buildVerifyProofInstruction,
   buildWithdrawInstruction,
   deriveElGamalPubkeyFromSeed,
   findConfidentialTransferAccountExtension,
+  prepareConfidentialTransferIxs,
 } from "./confidential";
 import { MEMO_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "./staccana";
 
@@ -519,6 +521,413 @@ export async function prepareTransitSendIxs(
   ixs.push(buildMemoInstruction(memoText));
 
   return { newAccount, instructions: ixs, transitSeed, randNonce };
+}
+
+/**
+ * Multi-tx variant of [`prepareTransitSendIxs`] that uses Token-22's
+ * `ProofContextStateAccount` flow so each tx fits under the 1232-byte
+ * legacy/v0 ceiling.
+ *
+ * Returns 5 batches:
+ *
+ *   setupTxs[0] = [createAccount(transitAccount), InitializeAccount3,
+ *                  ConfigureAccount, VerifyPubkeyValidity (inline)]
+ *                 ← partial-signed by `setupKeypairs[0]` = newAccount
+ *
+ *   setupTxs[1] = [createAccount(eqCtx),       VerifyEqualityWithCtx]
+ *   setupTxs[2] = [createAccount(validityCtx), VerifyValidityWithCtx]
+ *   setupTxs[3] = [createAccount(rangeCtx),    VerifyRangeWithCtx]
+ *                 ← partial-signed by `setupKeypairs[1..3]` (the ctx state kps)
+ *
+ *   finalTxIxs  = [Transfer(offsets=0,0,0), CloseEq, CloseValidity, CloseRange,
+ *                  SetAuthority(AccountOwner → recipient), Memo]
+ *                 ← signed only by sender
+ *
+ * Total: 5 wallet popups for one encrypted transit drop. The 3 close ixs
+ * refund the rent (~0.006 SOL) so net cost is just the rent on the transit
+ * account itself (refunded later when the recipient closes it during claim).
+ */
+export interface PreparedTransitSendCtsMode {
+  setupTxs: TransactionInstruction[][];
+  /** Per-tx ctx-state-account keypairs. Empty for txs that need only the
+   *  wallet's payer signature. */
+  setupSigners: Keypair[][];
+  finalTxIxs: TransactionInstruction[];
+  /** The transit account pubkey — recipient claims via this address. */
+  transitAccount: PublicKey;
+  transitSeed: Uint8Array;
+  randNonce: Uint8Array;
+}
+
+/**
+ * localStorage key for the "expected confidential available_balance plaintext"
+ * we track per (wallet, mint). This is the only way to reuse balance across
+ * sessions without bundling AES-128-GCM-SIV in the FE for `decryptable_available_balance`.
+ */
+function ctBalanceKey(wallet: PublicKey, mint: PublicKey): string {
+  return `staccana.ctBal.v1.${wallet.toBase58()}.${mint.toBase58()}`;
+}
+
+export function readTrackedConfidentialBalance(wallet: PublicKey, mint: PublicKey): bigint {
+  if (typeof localStorage === "undefined") return 0n;
+  const raw = localStorage.getItem(ctBalanceKey(wallet, mint));
+  if (!raw) return 0n;
+  try {
+    const v = BigInt(raw);
+    return v < 0n ? 0n : v;
+  } catch {
+    return 0n;
+  }
+}
+
+export function writeTrackedConfidentialBalance(
+  wallet: PublicKey,
+  mint: PublicKey,
+  balance: bigint,
+): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(ctBalanceKey(wallet, mint), balance.toString());
+}
+
+/**
+ * Standalone "Configure my CT account" ix bundle. The user's canonical Token-22
+ * ATA, as created by the bridge mint-relay (or any standard SPL ATA program
+ * `Create` ix), lands at 170 bytes — base 165 + 1 account_type byte + 4
+ * `ImmutableOwner` TLV header. That's missing the ~299 bytes needed for the
+ * `ConfidentialTransferAccount` extension. SPL ATA's `Create` doesn't
+ * auto-allocate that space even when the mint has the `ConfidentialTransferMint`
+ * extension. So we expose this as an explicit one-time setup the user runs
+ * before any encrypted operations.
+ *
+ * Returns 3 ixs in one tx (~480B, fits without LUT):
+ *   1. `Reallocate(senderAta, +ConfidentialTransferAccount)` — grows account
+ *      to ~469B, transfers rent diff from payer.
+ *   2. `ConfigureAccount(senderAta, elgamalPubkey, decryptableZero)` —
+ *      initializes the just-allocated extension fields under the user's
+ *      derived ElGamal keypair.
+ *   3. `VerifyPubkeyValidity` — small inline proof Token-22 requires for
+ *      `ConfigureAccount`.
+ */
+export async function buildConfigureSenderCtIxs(args: {
+  sender: PublicKey;
+  senderAta: PublicKey;
+  mint: PublicKey;
+  senderElgamalPubkey: Uint8Array;
+  senderElgamalSeed: Uint8Array;
+  fetchImpl?: typeof fetch;
+}): Promise<TransactionInstruction[]> {
+  return [
+    buildReallocateInstruction({
+      ata: args.senderAta,
+      payer: args.sender,
+      owner: args.sender,
+      extensionTypes: [EXT_TYPE_CONFIDENTIAL_TRANSFER_ACCOUNT],
+    }),
+    ...(await buildConfigureAccountInstruction({
+      payer: args.sender,
+      ata: args.senderAta,
+      mint: args.mint,
+      owner: args.sender,
+      maximumPendingBalanceCreditCounter: 65535n,
+      elgamalPubkey: args.senderElgamalPubkey,
+      decryptableZeroBalance: new Uint8Array(AE_CIPHERTEXT_LEN),
+      elgamalSeed: args.senderElgamalSeed,
+      fetchImpl: args.fetchImpl,
+    })),
+  ];
+}
+
+/**
+ * Standalone "Deposit + ApplyPending" ix bundle. Moves `amount` from the
+ * cleartext `Account.amount` field into the confidential `available_balance`
+ * (via `pending_balance` → `ApplyPendingBalance`) so the user can later
+ * encrypt-transfer it. Idempotent — caller can run this multiple times to
+ * accumulate confidential balance.
+ *
+ * Caller should update localStorage tracking via
+ * `writeTrackedConfidentialBalance(wallet, mint, prev + amount)` after the
+ * tx confirms, since we don't have client-side AES-GCM-SIV to read the
+ * on-chain `decryptable_available_balance` hint.
+ */
+export async function buildDepositAndApplyIxs(args: {
+  connection: Connection;
+  sender: PublicKey;
+  senderAta: PublicKey;
+  mint: PublicKey;
+  decimals: number;
+  amount: bigint;
+}): Promise<TransactionInstruction[]> {
+  const senderState = await fetchConfidentialAccountState(args.connection, args.senderAta);
+  if (!senderState) {
+    throw new Error(
+      "Sender ATA isn't CT-configured. Run the Configure action first.",
+    );
+  }
+  return [
+    buildDepositInstruction({
+      ata: args.senderAta,
+      mint: args.mint,
+      owner: args.sender,
+      amount: args.amount,
+      decimals: args.decimals,
+    }),
+    buildApplyPendingBalanceInstruction({
+      ata: args.senderAta,
+      owner: args.sender,
+      // Counter increments by 1 after our Deposit lands; ApplyPending checks
+      // `expected == on_chain_pending_credit_counter` at execution time.
+      expectedPendingBalanceCreditCounter:
+        senderState.pendingBalanceCreditCounter + 1n,
+      // 36 zero bytes — Token-22 stores verbatim and doesn't validate. We
+      // skip AES-GCM-SIV in the FE bundle; the localStorage tracker covers
+      // the wallet-readable balance hint.
+      newDecryptableAvailableBalance: new Uint8Array(AE_CIPHERTEXT_LEN),
+    }),
+  ];
+}
+
+/**
+ * If the sender's tracked confidential balance is < `amount`, build an
+ * idempotent Deposit + ApplyPendingBalance pair to top it up. Returns the
+ * setup ixs (or `null` if no top-up needed) plus the post-top-up balance
+ * the caller should pass as `currentAvailablePlaintext` to the proof
+ * generator.
+ *
+ * Idempotency strategy: localStorage tracks the "expected confidential
+ * available_balance plaintext" per (wallet, mint). On a retry where Deposit
+ * already landed but Transfer didn't, `readTracked` returns the post-deposit
+ * value and this helper skips re-depositing. On the success path, the caller
+ * is responsible for calling `writeTrackedConfidentialBalance(post - amount)`
+ * after the transfer lands.
+ */
+export async function buildDepositTopUpIxs(
+  args: {
+    connection: Connection;
+    sender: PublicKey;
+    senderAta: PublicKey;
+    mint: PublicKey;
+    decimals: number;
+    amount: bigint;
+    /** Sender's ElGamal pubkey, needed when ConfigureAccount has to run. */
+    senderElgamalPubkey: Uint8Array;
+    /** Sender's ElGamal secret seed for the PubkeyValidity proof. */
+    senderElgamalSeed: Uint8Array;
+    fetchImpl?: typeof fetch;
+  },
+): Promise<{
+  ixs: TransactionInstruction[] | null;
+  plaintextBalance: bigint;
+}> {
+  const tracked = readTrackedConfidentialBalance(args.sender, args.mint);
+  if (tracked >= args.amount) {
+    return { ixs: null, plaintextBalance: tracked };
+  }
+  const topUp = args.amount - tracked;
+  const senderState = await fetchConfidentialAccountState(args.connection, args.senderAta);
+
+  // If the senderAta has no `ConfidentialTransferAccount` extension, we
+  // have to prepend Reallocate (grow the account to fit the extension) +
+  // ConfigureAccount + VerifyPubkeyValidity. SPL ATA's `Create` ix for
+  // Token-22 doesn't allocate `ConfidentialTransferAccount` space even
+  // when the mint has the extension — the bridge mint-relay creates ATAs
+  // via that path and they land at 170 bytes (base 165 + 1 acct_type + 4
+  // ImmutableOwner header), missing the ~299 bytes needed for CT state.
+  // Reallocate adds those bytes; ConfigureAccount then initializes them.
+  const ixs: TransactionInstruction[] = [];
+  if (!senderState) {
+    ixs.push(
+      buildReallocateInstruction({
+        ata: args.senderAta,
+        payer: args.sender,
+        owner: args.sender,
+        // ExtensionType::ConfidentialTransferAccount = 5. Token-22 also
+        // requires ImmutableOwner to be present for ATA-style accounts;
+        // the bridge mint-relay's createATA already adds it (the 170-byte
+        // length confirms), so we only need to add CT here.
+        extensionTypes: [EXT_TYPE_CONFIDENTIAL_TRANSFER_ACCOUNT],
+      }),
+    );
+    const configureIxs = await buildConfigureAccountInstruction({
+      payer: args.sender,
+      ata: args.senderAta,
+      mint: args.mint,
+      owner: args.sender,
+      maximumPendingBalanceCreditCounter: 65535n,
+      elgamalPubkey: args.senderElgamalPubkey,
+      decryptableZeroBalance: new Uint8Array(AE_CIPHERTEXT_LEN),
+      elgamalSeed: args.senderElgamalSeed,
+      fetchImpl: args.fetchImpl,
+    });
+    ixs.push(...configureIxs);
+  }
+  // Right after ConfigureAccount, the pending counter is 0; right after
+  // any prior Deposit+Apply cycle it's whatever was left. Read it where
+  // we can (post-config it's reliably 0 since the account was just made).
+  const counterPre = senderState?.pendingBalanceCreditCounter ?? 0n;
+  ixs.push(
+    buildDepositInstruction({
+      ata: args.senderAta,
+      mint: args.mint,
+      owner: args.sender,
+      amount: topUp,
+      decimals: args.decimals,
+    }),
+  );
+  ixs.push(
+    buildApplyPendingBalanceInstruction({
+      ata: args.senderAta,
+      owner: args.sender,
+      // After our Deposit lands, the on-chain pending counter increments
+      // by exactly 1, so the expected counter we tell ApplyPendingBalance
+      // is `current + 1`. ApplyPendingBalance verifies
+      // `expected == pending_balance_credit_counter` at execution time.
+      expectedPendingBalanceCreditCounter: counterPre + 1n,
+      // Token-22 stores this verbatim as a UX hint and doesn't validate
+      // it. We don't bundle Aes128GcmSiv in the FE, so pass 36 zero
+      // bytes; the user loses the local-readable balance hint but the
+      // on-chain ElGamal ciphertext (the source of truth) tracks
+      // correctly.
+      newDecryptableAvailableBalance: new Uint8Array(AE_CIPHERTEXT_LEN),
+    }),
+  );
+  return {
+    ixs,
+    plaintextBalance: tracked + topUp,
+  };
+}
+
+export async function prepareTransitSendIxsContextStateMode(
+  args: PrepareTransitSendArgs,
+): Promise<PreparedTransitSendCtsMode> {
+  const randNonce = args.randNonce ?? new Uint8Array(4);
+  if (!args.randNonce) crypto.getRandomValues(randNonce);
+  if (randNonce.length !== 4) {
+    throw new RangeError(`randNonce must be 4 bytes (got ${randNonce.length})`);
+  }
+
+  const transitSeed = await deriveTransitElGamalSeed(
+    args.sender,
+    args.recipient,
+    args.mint,
+    randNonce,
+  );
+  const transitPk = await deriveElGamalPubkeyFromSeed(transitSeed, args.fetchImpl);
+  const newAccount = Keypair.generate();
+  const lamports = await args.connection.getMinimumBalanceForRentExemption(
+    TRANSIT_ACCOUNT_SIZE,
+  );
+
+  // ---- Setup tx 1: create transit account + initialize + configure ----
+  // ConfigureAccount needs a PubkeyValidity proof — it's small (~96B context +
+  // 96B proof) so we keep it INLINE here. Total tx ix data ~250B + accounts =
+  // well under 1232B even without LUT.
+  const decryptableZero = new Uint8Array(AE_CIPHERTEXT_LEN);
+  const configureIxs = await buildConfigureAccountInstruction({
+    payer: args.sender,
+    ata: newAccount.publicKey,
+    mint: args.mint,
+    owner: args.sender,
+    maximumPendingBalanceCreditCounter: 65535n,
+    elgamalPubkey: transitPk,
+    decryptableZeroBalance: decryptableZero,
+    elgamalSeed: transitSeed,
+    fetchImpl: args.fetchImpl,
+  });
+  const setupTransit: TransactionInstruction[] = [
+    SystemProgram.createAccount({
+      fromPubkey: args.sender,
+      newAccountPubkey: newAccount.publicKey,
+      lamports,
+      space: TRANSIT_ACCOUNT_SIZE,
+      programId: TOKEN_2022_PROGRAM_ID,
+    }),
+    createInitializeAccount3Instruction(
+      newAccount.publicKey,
+      args.mint,
+      args.sender,
+      TOKEN_2022_PROGRAM_ID,
+    ),
+    ...configureIxs,
+  ];
+
+  // Read senderAta's on-chain `available_balance` ciphertext now so the
+  // equality proof's `sourceCt` can be byte-derived from it (general-case
+  // path) instead of synthesized from a random `newBalOpen` (which only
+  // matches when `current_available.handle == identity`, i.e. fresh
+  // post-Configure / no prior transfers). Fetched once here so we don't
+  // pay the RPC round-trip again inside `buildTransferInstruction`.
+  const senderState = await fetchConfidentialAccountState(
+    args.connection,
+    args.senderAta,
+  );
+  if (!senderState) {
+    throw new Error(
+      "Sender ATA isn't CT-configured — Configure first via the sidepanel widget.",
+    );
+  }
+
+  // ---- The Transfer leg: defer to `prepareConfidentialTransferIxs` which
+  // already implements the eq/validity/range context-state-account split. The
+  // destination ATA is the new transit account and the destination ElGamal
+  // pubkey is the transit pubkey — the sender controls both, so the validity
+  // proof's `dest_pubkey` is non-identity (no Transcript(ValidationError)).
+  const ctsBundle = await prepareConfidentialTransferIxs(
+    {
+      ata: args.senderAta,
+      destinationAta: newAccount.publicKey,
+      mint: args.mint,
+      owner: args.sender,
+      amount: args.amount,
+      senderElgamalPubkey: args.senderElgamalPubkey,
+      recipientElgamalPubkey: transitPk,
+      // No-auditor sentinel = 32 zero bytes; matches the mint's
+      // `OptionalNonZeroElGamalPubkey::None` encoding so Token-22's
+      // byte-equal check passes. See SecretBalancePanel for the full note.
+      auditorElgamalPubkey: new Uint8Array(32),
+      newSourceDecryptableAvailableBalance:
+        args.newSourceDecryptableAvailableBalance,
+      elgamalSeed: args.senderElgamalSeed,
+      currentAvailablePlaintext: args.currentAvailablePlaintext,
+      currentAvailableCiphertext: senderState.availableBalance,
+      fetchImpl: args.fetchImpl,
+    },
+    args.connection,
+  );
+
+  // Final tx adds: SetAuthority (flip account owner to recipient) + Memo.
+  // ConfigureAccount above set the owner to `sender` so they could sign the
+  // Transfer; SetAuthority moves it to `recipient` after the funds land.
+  const { memoText } = await buildTransitMemoTextWithAmount(
+    args.sender,
+    args.recipient,
+    args.mint,
+    randNonce,
+    args.amount,
+  );
+  const finalTxIxs: TransactionInstruction[] = [
+    ...ctsBundle.finalTxIxs, // [transfer, closeEq, closeValidity, closeRange]
+    createSetAuthorityInstruction(
+      newAccount.publicKey,
+      args.sender,
+      AuthorityType.AccountOwner,
+      args.recipient,
+      [],
+      TOKEN_2022_PROGRAM_ID,
+    ),
+    buildMemoInstruction(memoText),
+  ];
+
+  return {
+    setupTxs: [setupTransit, ...ctsBundle.setupTxs],
+    // Tx 0 needs the new transit account keypair signature; subsequent txs
+    // mirror the ctsBundle's per-tx signer split (eq → tx 1, validity+range
+    // → tx 2, range-verify-only → tx 3 with no ctx-state signer).
+    setupSigners: [[newAccount], ...ctsBundle.setupSigners],
+    finalTxIxs,
+    transitAccount: newAccount.publicKey,
+    transitSeed,
+    randNonce,
+  };
 }
 
 // ---------------------------------------------------------------------------

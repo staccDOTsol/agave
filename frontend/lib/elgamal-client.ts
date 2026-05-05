@@ -52,6 +52,7 @@
  *     reducing 64 random bytes mod L — a textbook construction.
  */
 
+export { RistrettoPoint } from "@noble/curves/ed25519";
 import { RistrettoPoint } from "@noble/curves/ed25519";
 
 /**
@@ -74,7 +75,7 @@ const POINT_BYTES = 32;
  * Encode a scalar as 32-byte little-endian (canonical, < L).
  * Throws if `s >= L` or `s < 0`.
  */
-function scalarToLeBytes(s: bigint): Uint8Array {
+export function scalarToLeBytes(s: bigint): Uint8Array {
   if (s < 0n || s >= RISTRETTO255_ORDER) {
     throw new RangeError(`scalar out of range [0, L): ${s}`);
   }
@@ -91,7 +92,7 @@ function scalarToLeBytes(s: bigint): Uint8Array {
  * Decode a 32-byte little-endian buffer as a scalar bigint.
  * Does NOT validate < L (the caller wraps mod L if needed).
  */
-function leBytesToBigInt(bytes: Uint8Array): bigint {
+export function leBytesToBigInt(bytes: Uint8Array): bigint {
   let v = 0n;
   for (let i = bytes.length - 1; i >= 0; i--) {
     v = (v << 8n) | BigInt(bytes[i]);

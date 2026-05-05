@@ -41,16 +41,39 @@ import {
   buildTransferInstruction,
   deriveElGamalKeypair,
   deriveElGamalPubkeyFromSeed,
+  prepareConfidentialTransferIxs,
+  fetchRecipientElgamalPubkey,
 } from "@/lib/confidential";
+
+/**
+ * Marker error: thrown by the direct-CT path when the recipient ATA hasn't
+ * been CT-configured. The Send onSend handler catches it specifically and
+ * routes to the transit-account flow (sender opens a fresh Token-22 acct
+ * under a transit ElGamal keypair, transfers in confidentially, then
+ * SetAuthority to the recipient).
+ */
+class RecipientNotConfiguredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RecipientNotConfiguredError";
+  }
+}
 import {
   PendingTransitAccount,
   fetchConfidentialAccountState,
   findTransitMemoForAccountV2,
   prepareTransitClaimApplyPendingTx,
   prepareTransitClaimMigrationTx,
+  buildConfigureSenderCtIxs,
+  buildDepositAndApplyIxs,
+  buildDepositTopUpIxs,
   prepareTransitSendIxs,
+  prepareTransitSendIxsContextStateMode,
+  readTrackedConfidentialBalance,
   scanPendingTransitAccounts,
+  writeTrackedConfidentialBalance,
 } from "@/lib/confidential-transit";
+import { lookupBridgedTokenMetadata } from "@/lib/bridged-tokens";
 import {
   buildCreateAtaIdempotentInstruction,
   token22Ata,
@@ -159,11 +182,20 @@ function useOwnedToken22(): {
               "confirmed",
             );
             for (let i = 0; i < uniqueMints.length; i++) {
-              const acc = mintInfos[i];
-              if (!acc?.data) continue;
-              const sym = readTokenMetadataSymbol(acc.data);
-              if (!sym) continue;
               const mintB58 = uniqueMints[i].toBase58();
+              // First-pass: read Token-22 `TokenMetadata` extension off the mint.
+              // Bridge mirror mints don't have this populated (the bridge creates
+              // them bare to keep the mint CPI lean).
+              const acc = mintInfos[i];
+              let sym = acc?.data ? readTokenMetadataSymbol(acc.data) : null;
+              // Fallback: hand-maintained map of bridged tokens ⇒ source-chain
+              // metadata. Surfaces "Staccana" instead of "Unknown Token" for
+              // assets minted via /bridge.
+              if (!sym) {
+                const bridged = lookupBridgedTokenMetadata(mintB58);
+                if (bridged) sym = bridged.symbol;
+              }
+              if (!sym) continue;
               for (const t of out) {
                 if (t.mint.toBase58() === mintB58) t.symbol = sym;
               }
@@ -539,6 +571,308 @@ function formatTokenAmount(amount: bigint, decimals: number): string {
   return frac.length > 0 ? `${whole}.${frac}` : whole;
 }
 
+/**
+ * Confidential setup widget — explicit Configure / Deposit / Withdraw controls
+ * the user runs manually before encrypt-Sending. The encrypted Send flow
+ * previously tried to auto-handle all of this in a single multi-tx blast,
+ * which made silent on-chain reverts impossible to debug ("five txs confirm,
+ * sixth fails with BalanceMismatch — but senderAta is still 170 bytes").
+ * Surfacing each step as its own button gives the user precise feedback on
+ * which on-chain step is blocking and decouples the heavy encrypted-Send
+ * flow from one-time setup.
+ *
+ * Three actions:
+ *   1. Configure — Reallocate(senderAta, +CT extension) + ConfigureAccount +
+ *      VerifyPubkeyValidity. One-time, ~480 byte tx.
+ *   2. Deposit  — Deposit(amount) + ApplyPendingBalance. Moves cleartext
+ *      balance into the confidential available_balance bucket.
+ *   3. Withdraw — Withdraw(amount) + proofs. Moves confidential balance back
+ *      to cleartext. (TODO: requires the same context-state-account split as
+ *      Transfer; currently shows a "coming soon" placeholder.)
+ */
+function ConfidentialControls({
+  mint,
+  decimals,
+  onAfterAction,
+}: {
+  mint: PublicKey;
+  decimals: number;
+  onAfterAction?: () => void;
+}): JSX.Element {
+  const { connection } = useConnection();
+  const wallet = useWallet();
+  const { publicKey, sendTransaction } = wallet;
+  const { toast } = useToast();
+
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState<"none" | "configure" | "deposit">("none");
+  const [depositStr, setDepositStr] = useState("");
+  const [tracked, setTracked] = useState<bigint>(0n);
+
+  // Refresh the on-chain "configured?" state + localStorage tracker.
+  const refresh = useCallback(async () => {
+    if (!publicKey) {
+      setConfigured(null);
+      return;
+    }
+    const senderAta = token22Ata(publicKey, mint);
+    try {
+      const state = await fetchConfidentialAccountState(connection, senderAta);
+      setConfigured(state !== null);
+    } catch {
+      setConfigured(null);
+    }
+    setTracked(readTrackedConfidentialBalance(publicKey, mint));
+  }, [connection, publicKey, mint]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const onConfigure = useCallback(async () => {
+    if (!publicKey) return;
+    setBusy("configure");
+    try {
+      const senderAta = token22Ata(publicKey, mint);
+      const senderKeys = await deriveElGamalKeypair(
+        { publicKey, signMessage: wallet.signMessage },
+        mint,
+      );
+      const senderPk = await deriveElGamalPubkeyFromSeed(senderKeys.secretSeed);
+      const ixs = await buildConfigureSenderCtIxs({
+        sender: publicKey,
+        senderAta,
+        mint,
+        senderElgamalPubkey: senderPk,
+        senderElgamalSeed: senderKeys.secretSeed,
+      });
+      const lutResp = await connection.getAddressLookupTable(STACCANA_MASTER_LUT, {
+        commitment: "confirmed",
+      });
+      const bh = await connection.getLatestBlockhash("confirmed");
+      const msg = new TransactionMessage({
+        payerKey: publicKey,
+        recentBlockhash: bh.blockhash,
+        instructions: ixs,
+      }).compileToV0Message(lutResp.value ? [lutResp.value] : undefined);
+      const vtx = new VersionedTransaction(msg);
+      const sig = await sendTransaction(vtx, connection, { skipPreflight: false });
+      const status = await connection.confirmTransaction(
+        {
+          signature: sig,
+          blockhash: bh.blockhash,
+          lastValidBlockHeight: bh.lastValidBlockHeight,
+        },
+        "confirmed",
+      );
+      if (status.value.err) {
+        // eslint-disable-next-line no-console
+        console.error("[CT-controls] Configure failed on chain", {
+          sig,
+          err: status.value.err,
+        });
+        throw new Error(
+          `Configure failed: ${JSON.stringify(status.value.err)}`,
+        );
+      }
+      toast({
+        variant: "success",
+        title: "Confidential account configured",
+        description: (
+          <a
+            className="font-mono text-xs underline underline-offset-2"
+            href={explorerTxUrl(sig)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {truncatePubkey(sig, 8, 8)}
+          </a>
+        ),
+      });
+      await refresh();
+      onAfterAction?.();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast({ variant: "destructive", title: "Configure failed", description: msg });
+    } finally {
+      setBusy("none");
+    }
+  }, [
+    connection,
+    publicKey,
+    mint,
+    sendTransaction,
+    wallet.signMessage,
+    toast,
+    refresh,
+    onAfterAction,
+  ]);
+
+  const onDeposit = useCallback(async () => {
+    if (!publicKey) return;
+    let amount: bigint;
+    try {
+      amount = parseDecimalToBigInt(depositStr, decimals);
+    } catch {
+      toast({
+        variant: "destructive",
+        title: "Invalid amount",
+        description: "Enter a positive number with up to the mint's decimals.",
+      });
+      return;
+    }
+    if (amount <= 0n) {
+      toast({ variant: "destructive", title: "Enter an amount > 0" });
+      return;
+    }
+    setBusy("deposit");
+    try {
+      const senderAta = token22Ata(publicKey, mint);
+      const ixs = await buildDepositAndApplyIxs({
+        connection,
+        sender: publicKey,
+        senderAta,
+        mint,
+        decimals,
+        amount,
+      });
+      const lutResp = await connection.getAddressLookupTable(STACCANA_MASTER_LUT, {
+        commitment: "confirmed",
+      });
+      const bh = await connection.getLatestBlockhash("confirmed");
+      const msg = new TransactionMessage({
+        payerKey: publicKey,
+        recentBlockhash: bh.blockhash,
+        instructions: ixs,
+      }).compileToV0Message(lutResp.value ? [lutResp.value] : undefined);
+      const vtx = new VersionedTransaction(msg);
+      const sig = await sendTransaction(vtx, connection, { skipPreflight: false });
+      const status = await connection.confirmTransaction(
+        {
+          signature: sig,
+          blockhash: bh.blockhash,
+          lastValidBlockHeight: bh.lastValidBlockHeight,
+        },
+        "confirmed",
+      );
+      if (status.value.err) {
+        // eslint-disable-next-line no-console
+        console.error("[CT-controls] Deposit failed on chain", {
+          sig,
+          err: status.value.err,
+        });
+        throw new Error(
+          `Deposit failed: ${JSON.stringify(status.value.err)}`,
+        );
+      }
+      // Confirmed: bump tracked balance.
+      writeTrackedConfidentialBalance(publicKey, mint, tracked + amount);
+      toast({
+        variant: "success",
+        title: `Deposited ${depositStr} to confidential balance`,
+        description: (
+          <a
+            className="font-mono text-xs underline underline-offset-2"
+            href={explorerTxUrl(sig)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {truncatePubkey(sig, 8, 8)}
+          </a>
+        ),
+      });
+      setDepositStr("");
+      await refresh();
+      onAfterAction?.();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast({ variant: "destructive", title: "Deposit failed", description: msg });
+    } finally {
+      setBusy("none");
+    }
+  }, [
+    connection,
+    publicKey,
+    mint,
+    decimals,
+    depositStr,
+    sendTransaction,
+    toast,
+    refresh,
+    onAfterAction,
+    tracked,
+  ]);
+
+  if (!publicKey) return <></>;
+
+  return (
+    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-2">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="font-medium uppercase tracking-wide text-emerald-300/80">
+          Confidential balance
+        </span>
+        <span className="font-mono text-emerald-200">
+          {configured === null
+            ? "checking…"
+            : configured
+              ? `tracked: ${formatTokenAmount(tracked, decimals)}`
+              : "not configured"}
+        </span>
+      </div>
+      {configured === false ? (
+        <Button
+          onClick={onConfigure}
+          disabled={busy !== "none"}
+          variant="secondary"
+          className="w-full text-xs"
+        >
+          {busy === "configure" ? (
+            <>
+              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+              Configuring…
+            </>
+          ) : (
+            "Configure encrypted account"
+          )}
+        </Button>
+      ) : null}
+      {configured === true ? (
+        <div className="space-y-2">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              inputMode="decimal"
+              value={depositStr}
+              onChange={(e) => setDepositStr(e.target.value)}
+              placeholder="amount"
+              className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+            <Button
+              onClick={onDeposit}
+              disabled={busy !== "none" || !depositStr}
+              variant="secondary"
+              className="text-xs"
+            >
+              {busy === "deposit" ? (
+                <>
+                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  Depositing…
+                </>
+              ) : (
+                "Deposit → encrypted"
+              )}
+            </Button>
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            Moves cleartext balance into the encrypted available bucket so you
+            can encrypt-Send. Withdraw back to public coming soon.
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function SendPanelInner({
   mint,
   className,
@@ -637,7 +971,375 @@ function SendPanelInner({
         tx.instructions = tx.instructions.slice(0, pristineIxCount);
       };
 
+      // **Confidential transfer flow.** Inline-proof bundles can't fit in
+      // one tx (1867B of ZK proof data > 1232B tx ceiling). The fix is the
+      // ProofContextStateAccount split implemented in
+      // `prepareConfidentialTransferIxs`: 3 small setup txs (each = 1
+      // create-account + 1 verify-with-context, ~700-1100B) followed by a
+      // single transfer-and-close tx that references the staged proofs by
+      // pubkey. Total: 4 wallet popups, but the encrypted path actually
+      // works without burning an unfittable bundle at the wallet.
       if (confidential) {
+        try {
+          const senderKeysC = await deriveElGamalKeypair(
+            { publicKey, signMessage: wallet.signMessage },
+            mint,
+          );
+          const senderPkC = await deriveElGamalPubkeyFromSeed(senderKeysC.secretSeed);
+
+          // Fetch the recipient's ElGamal pubkey from their on-chain
+          // ConfidentialTransferAccount extension. The 3-handles validity
+          // proof rejects identity (= all-zero) pubkeys with `Transcript
+          // (ValidationError)`, so we MUST pass real points for both the
+          // recipient AND auditor handle.
+          //
+          // Branch:
+          //   - Recipient HAS configured CT → direct CT into their canonical
+          //     ATA (this block).
+          //   - Recipient has NOT configured CT → fall through to the
+          //     transit-account path below: open a fresh Token-22 account
+          //     under a sender-controlled ElGamal keypair, encrypt-transfer
+          //     into it, then SetAuthority the new account to the recipient
+          //     so they can claim later via the "Pending claims" UI.
+          const recipientPk = await fetchRecipientElgamalPubkey(
+            connection,
+            recipientAta,
+          );
+          if (!recipientPk) {
+            throw new RecipientNotConfiguredError(
+              "Recipient ATA is not CT-configured — using transit-account drop",
+            );
+          }
+          // For the auditor: when the mint has no auditor configured (this
+          // Staccana mirror's `OptionalNonZeroElGamalPubkey::None`, encoded
+          // on chain as 32 zero bytes), the proof's auditor pubkey MUST also
+          // be 32 zero bytes — Token-22's Transfer ix does a byte-equal
+          // check against the mint's stored value and rejects any mismatch
+          // with `ConfidentialTransferElGamalPubkeyMismatch (0x1a)`. Earlier
+          // I'd plugged the sender's pubkey here as a "self-auditor
+          // sentinel" worried that zero would break the validity proof's
+          // transcript validation, but solana-zk-sdk v4 only calls
+          // `validate_and_append_point` on Y_0/Y_1/Y_2 (which depend on
+          // source + dest pubkeys, both real here). Y_3 — the only Y
+          // affected by auditor — uses plain `append_point` on the verifier
+          // side, so an identity auditor passes through cleanly.
+          const auditorPk = new Uint8Array(32);
+
+          const prepared = await prepareConfidentialTransferIxs(
+            {
+              ata: senderAta,
+              destinationAta: recipientAta,
+              mint,
+              owner: publicKey,
+              amount,
+              senderElgamalPubkey: senderPkC,
+              recipientElgamalPubkey: recipientPk,
+              auditorElgamalPubkey: auditorPk,
+              newSourceDecryptableAvailableBalance: new Uint8Array(36),
+              elgamalSeed: senderKeysC.secretSeed,
+              currentAvailablePlaintext: maxBalance ?? 0n,
+            },
+            connection,
+          );
+
+          // Send the 3 setup txs sequentially. Each is small enough for a
+          // legacy tx but we use v0+LUT for header compression. Each tx is
+          // partial-signed by its corresponding context-state keypair (so
+          // SystemProgram::createAccount can prove ownership of the new
+          // account pubkey) before being handed to the wallet for the
+          // user's signature.
+          const lutResp = await connection.getAddressLookupTable(STACCANA_MASTER_LUT, {
+            commitment: "confirmed",
+          });
+          if (!lutResp.value) {
+            throw new Error("Master LUT not visible on chain");
+          }
+          for (let i = 0; i < prepared.setupTxs.length; i++) {
+            const setupBh = (await connection.getLatestBlockhash("confirmed"))
+              .blockhash;
+            const setupMsg = new TransactionMessage({
+              payerKey: publicKey,
+              recentBlockhash: setupBh,
+              instructions: prepared.setupTxs[i],
+            }).compileToV0Message([lutResp.value]);
+            const setupVtx = new VersionedTransaction(setupMsg);
+            // setupSigners[i] is per-tx: tx 0 needs eqKp, tx 1 needs both
+            // validityKp+rangeKp (it allocates BOTH ctx accounts), tx 2 is
+            // verify-only (no ctx kp signer needed beyond the wallet payer).
+            if (prepared.setupSigners[i].length > 0) {
+              setupVtx.sign(prepared.setupSigners[i]);
+            }
+            await sendTransaction(setupVtx, connection, { skipPreflight: false });
+          }
+
+          // Final tx: transfer + 3 close-context-state ixs (rent refund).
+          // Small bundle; v0+LUT keeps it well under the limit.
+          const finalBh = (await connection.getLatestBlockhash("confirmed"))
+            .blockhash;
+          const finalMsg = new TransactionMessage({
+            payerKey: publicKey,
+            recentBlockhash: finalBh,
+            instructions: [
+              buildCreateAtaIdempotentInstruction({
+                payer: publicKey,
+                owner: recipient,
+                mint,
+              }),
+              ...prepared.finalTxIxs,
+            ],
+          }).compileToV0Message([lutResp.value]);
+          const finalVtx = new VersionedTransaction(finalMsg);
+          const sigCt = await sendTransaction(finalVtx, connection, {
+            skipPreflight: false,
+          });
+          toast({
+            variant: "success",
+            title: "Encrypted transfer submitted",
+            description: (
+              <a
+                className="font-mono text-xs underline underline-offset-2"
+                href={explorerTxUrl(sigCt)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {truncatePubkey(sigCt, 8, 8)}
+              </a>
+            ),
+          });
+          setAmountStr("");
+          setRecipientStr("");
+          onAfterSend?.();
+          return;
+        } catch (err) {
+          // Recipient hasn't configured CT — kick to the transit path below
+          // (sender opens a fresh Token-22 acct under a transit ElGamal
+          // keypair, transfers in confidentially, then SetAuthority the
+          // account to the recipient who claims via "Pending claims"). For
+          // any other error we drop to public.
+          if (!(err instanceof RecipientNotConfiguredError)) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[send] context-state CT path failed, falling back to public",
+              err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+            );
+            resetTxToPristine();
+            // Skip the transit path; go straight to public.
+            // eslint-disable-next-line no-constant-condition
+            if (false) {
+              /* fallthrough */
+            }
+          } else {
+            // Transit path. Multi-tx flow: optionally a Deposit+ApplyPending
+            // top-up tx (only if tracked CT balance < amount) + 4 proof-
+            // staging setup txs + 1 final tx (transfer + close-ctx +
+            // setAuthority + memo). The picker shows the cleartext
+            // (`tokenAmount.amount`) but CT::Transfer pulls from the
+            // confidential `available_balance` ciphertext, which starts at 0
+            // post-ConfigureAccount. Without the Deposit+Apply preamble
+            // Token-22 errors with `Custom(27) = ConfidentialTransferBalance
+            // Mismatch` because the on-chain balance math doesn't match the
+            // proof's claim.
+            try {
+              const sk = await deriveElGamalKeypair(
+                { publicKey, signMessage: wallet.signMessage },
+                mint,
+              );
+              const spk = await deriveElGamalPubkeyFromSeed(sk.secretSeed);
+
+              // **Send no longer auto-Configures or auto-Deposits.** The user
+              // is expected to have run those via the `ConfidentialControls`
+              // widget at the top of the panel first — the auto-pipeline
+              // turned out to be impossible to debug when an inner ix
+              // silently reverted. Here we just assert preconditions and
+              // surface a clear error if they aren't met:
+              //   1. senderAta has the CT extension (else "Configure" first)
+              //   2. tracked balance >= amount (else "Deposit" first)
+              const senderState = await fetchConfidentialAccountState(
+                connection,
+                senderAta,
+              );
+              if (!senderState) {
+                throw new Error(
+                  "Encrypted account not configured. Click 'Configure encrypted account' at the top of the panel first.",
+                );
+              }
+              const trackedNow = readTrackedConfidentialBalance(publicKey, mint);
+              if (trackedNow < amount) {
+                throw new Error(
+                  `Confidential balance is ${trackedNow} (tracked), need ${amount}. Click 'Deposit → encrypted' first to top up.`,
+                );
+              }
+              // Stub matching the old `topUp` shape so the rest of the flow
+              // (which tracks `topUp.plaintextBalance` for the post-send
+              // localStorage decrement) keeps working without restructuring.
+              const topUp = {
+                ixs: null as TransactionInstruction[] | null,
+                plaintextBalance: trackedNow,
+              };
+
+              const transitBundle = await prepareTransitSendIxsContextStateMode({
+                connection,
+                sender: publicKey,
+                senderAta,
+                recipient,
+                mint,
+                amount,
+                senderElgamalSeed: sk.secretSeed,
+                senderElgamalPubkey: spk,
+                newSourceDecryptableAvailableBalance: new Uint8Array(36),
+                // Pass the post-top-up balance so the equality proof's
+                // `newBalancePlaintext = currentAvailablePlaintext - amount`
+                // matches what's on-chain after Deposit+Apply lands.
+                currentAvailablePlaintext: topUp.plaintextBalance,
+              });
+
+              const lutR = await connection.getAddressLookupTable(STACCANA_MASTER_LUT, {
+                commitment: "confirmed",
+              });
+              if (!lutR.value) throw new Error("Master LUT not visible on chain");
+
+              // If we have a top-up, prepend it as a separate small tx.
+              // Once it lands, immediately update the tracked balance — that
+              // way a retry after a downstream failure doesn't double-deposit.
+              if (topUp.ixs) {
+                const tBhResp = await connection.getLatestBlockhash("confirmed");
+                const tMsg = new TransactionMessage({
+                  payerKey: publicKey,
+                  recentBlockhash: tBhResp.blockhash,
+                  instructions: topUp.ixs,
+                }).compileToV0Message([lutR.value]);
+                const tVtx = new VersionedTransaction(tMsg);
+                const topUpSig = await sendTransaction(tVtx, connection, {
+                  skipPreflight: false,
+                });
+                // **Wait for confirmation BEFORE moving on.** The wallet
+                // adapter's `sendTransaction` returns as soon as the RPC
+                // accepts the tx; on-chain execution might still revert
+                // (Reallocate + Configure can fail in chain even if simulation
+                // passed). If we don't await, the next tx's simulation runs
+                // against stale state — masking failures and producing
+                // confusing downstream errors like Token-22's
+                // `BalanceMismatch` (the source ATA never actually got the CT
+                // extension or the deposit, so the post-transfer math fails).
+                const topUpStatus = await connection.confirmTransaction(
+                  {
+                    signature: topUpSig,
+                    blockhash: tBhResp.blockhash,
+                    lastValidBlockHeight: tBhResp.lastValidBlockHeight,
+                  },
+                  "confirmed",
+                );
+                if (topUpStatus.value.err) {
+                  // eslint-disable-next-line no-console
+                  console.error(
+                    "[send] top-up tx (Reallocate + Configure + Deposit + Apply) failed on chain",
+                    {
+                      sig: topUpSig,
+                      err: topUpStatus.value.err,
+                    },
+                  );
+                  throw new Error(
+                    `Top-up tx ${topUpSig.slice(0, 8)} failed on chain: ${JSON.stringify(topUpStatus.value.err)}`,
+                  );
+                }
+                writeTrackedConfidentialBalance(
+                  publicKey,
+                  mint,
+                  topUp.plaintextBalance,
+                );
+              }
+
+              for (let i = 0; i < transitBundle.setupTxs.length; i++) {
+                const sBhResp = await connection.getLatestBlockhash("confirmed");
+                const msg = new TransactionMessage({
+                  payerKey: publicKey,
+                  recentBlockhash: sBhResp.blockhash,
+                  instructions: transitBundle.setupTxs[i],
+                }).compileToV0Message([lutR.value]);
+                const vtx = new VersionedTransaction(msg);
+                if (transitBundle.setupSigners[i].length > 0) {
+                  vtx.sign(transitBundle.setupSigners[i]);
+                }
+                const setupSig = await sendTransaction(vtx, connection, {
+                  skipPreflight: false,
+                });
+                const setupStatus = await connection.confirmTransaction(
+                  {
+                    signature: setupSig,
+                    blockhash: sBhResp.blockhash,
+                    lastValidBlockHeight: sBhResp.lastValidBlockHeight,
+                  },
+                  "confirmed",
+                );
+                if (setupStatus.value.err) {
+                  // eslint-disable-next-line no-console
+                  console.error(`[send] setup tx ${i} failed on chain`, {
+                    sig: setupSig,
+                    err: setupStatus.value.err,
+                  });
+                  throw new Error(
+                    `Setup tx ${i} (sig ${setupSig.slice(0, 8)}) failed: ${JSON.stringify(setupStatus.value.err)}`,
+                  );
+                }
+              }
+
+              const finalBh = (await connection.getLatestBlockhash("confirmed"))
+                .blockhash;
+              const finalMsg = new TransactionMessage({
+                payerKey: publicKey,
+                recentBlockhash: finalBh,
+                instructions: transitBundle.finalTxIxs,
+              }).compileToV0Message([lutR.value]);
+              const finalVtx = new VersionedTransaction(finalMsg);
+              const sigT = await sendTransaction(finalVtx, connection, {
+                skipPreflight: false,
+              });
+              // Transfer landed → decrement tracked CT balance. (If the
+              // transfer fails, we leave the tracked value where it was so
+              // the next retry skips the redundant Deposit.)
+              writeTrackedConfidentialBalance(
+                publicKey,
+                mint,
+                topUp.plaintextBalance - amount,
+              );
+              toast({
+                variant: "success",
+                title: "Encrypted drop submitted (transit)",
+                description: (
+                  <a
+                    className="font-mono text-xs underline underline-offset-2"
+                    href={explorerTxUrl(sigT)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {truncatePubkey(sigT, 8, 8)}
+                  </a>
+                ),
+              });
+              setAmountStr("");
+              setRecipientStr("");
+              setUsedTransit(true);
+              onAfterSend?.();
+              return;
+            } catch (transitErr) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                "[send] transit-account path failed, falling back to public",
+                transitErr instanceof Error
+                  ? `${transitErr.name}: ${transitErr.message}`
+                  : String(transitErr),
+              );
+              resetTxToPristine();
+            }
+          }
+        }
+      }
+
+      // Legacy inline-CT bundles (kept disabled — kept here as documentation
+      // of why the old path can't work without the context-state split).
+      const CT_BUNDLE_DISABLED = true;
+      // eslint-disable-next-line no-constant-condition
+      if (false && confidential && !CT_BUNDLE_DISABLED) {
         try {
           const senderKeys = await deriveElGamalKeypair(
             { publicKey, signMessage: wallet.signMessage },
@@ -671,9 +1373,69 @@ function SendPanelInner({
             // full privacy-impact note.
             currentAvailablePlaintext: maxBalance ?? 0n,
           });
-          for (const ix of ixs) tx.add(ix);
-          usedConfidential = true;
-          pathTaken = "direct";
+
+          // The direct CT path is `[CreateAta, TransferChecked, VerifyEq,
+          // VerifyValidity, VerifyRange]`. The 3 verify ixs alone carry
+          // ~1900 bytes of inline ZK proof data — well past the 1232-byte
+          // legacy tx ceiling, which is what was throwing `RangeError:
+          // Index out of range` from web3.js's serialize bounds check.
+          //
+          // Send it as v0 + master LUT instead. The LUT eats the program
+          // ids + sysvars + token program, which is what brings us under
+          // the per-tx limit even with 5 ixs. Same pattern as the transit
+          // path below.
+          const blockhashV0 = (
+            await connection.getLatestBlockhash("confirmed")
+          ).blockhash;
+          const lutRespV0 = await connection.getAddressLookupTable(
+            STACCANA_MASTER_LUT,
+            { commitment: "confirmed" },
+          );
+          if (!lutRespV0.value) {
+            throw new Error(
+              "Master LUT not visible on chain — required for v0 CT send",
+            );
+          }
+          // Drop the createATA we already pushed onto the legacy tx — for
+          // the v0 path we re-build the ix list cleanly and prepend our
+          // own. Snapshot survives because we restore via resetTxToPristine
+          // on any failure further down.
+          resetTxToPristine();
+          const v0Ixs = [
+            buildCreateAtaIdempotentInstruction({
+              payer: publicKey,
+              owner: recipient,
+              mint,
+            }),
+            ...ixs,
+          ];
+          const messageV0 = new TransactionMessage({
+            payerKey: publicKey,
+            recentBlockhash: blockhashV0,
+            instructions: v0Ixs,
+          }).compileToV0Message([lutRespV0.value]);
+          const vtxV0 = new VersionedTransaction(messageV0);
+          const sigV0 = await sendTransaction(vtxV0, connection, {
+            skipPreflight: true,
+          });
+          toast({
+            variant: "success",
+            title: "Encrypted transfer submitted",
+            description: (
+              <a
+                className="font-mono text-xs underline underline-offset-2"
+                href={explorerTxUrl(sigV0)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {truncatePubkey(sigV0, 8, 8)}
+              </a>
+            ),
+          });
+          setAmountStr("");
+          setRecipientStr("");
+          onAfterSend?.();
+          return;
         } catch (err) {
           // Any failure in the confidential build chain (proof endpoint
           // unavailable, wasm input mismatch, web3.js Buffer-bounds error
@@ -692,13 +1454,18 @@ function SendPanelInner({
         }
       }
 
-      if (!usedConfidential && confidential) {
+      if (!usedConfidential && confidential && !CT_BUNDLE_DISABLED) {
         // Recipient hasn't pre-configured a ConfidentialTransferAccount on
         // their canonical ATA — open a non-canonical Token-22 account on
         // their behalf, transfer into it under a transit ElGamal keypair,
         // and SetAuthority the new account to them. They claim later via
         // the "Pending claims" UI. See lib/confidential-transit.ts for the
         // wire format + obfuscation trade-off.
+        //
+        // Same size constraint as the direct path — the transit bundle is
+        // 5 outer ixs + 4 verify ixs (~2200 bytes) and there is no LUT
+        // trick that compresses ix data. Disabled until we ship the
+        // ProofContextStateAccount split.
         try {
           const senderKeys = await deriveElGamalKeypair(
             { publicKey, signMessage: wallet.signMessage },
@@ -782,6 +1549,12 @@ function SendPanelInner({
         const { createTransferCheckedInstruction } = await import(
           "@solana/spl-token"
         );
+        // `decimals` MUST equal the on-chain mint's decimals or Token-22
+        // returns `MintDecimalsMismatch (0x12)` and the wallet rejects with
+        // -32002 in simulation. The panel was hardcoded to 9 for staccana-
+        // native mints; the bridged Staccana mirror is 6, and a stale 9
+        // here was the cause of the public-fallback "Solana error #-32002"
+        // we saw on the bridged token. Pull from the panel prop instead.
         tx.add(
           createTransferCheckedInstruction(
             senderAta,
@@ -789,7 +1562,7 @@ function SendPanelInner({
             recipientAta,
             publicKey,
             amount,
-            9,
+            decimals,
             [],
             TOKEN_2022_PROGRAM_ID,
           ),
@@ -889,6 +1662,11 @@ function SendPanelInner({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        <ConfidentialControls
+          mint={mint}
+          decimals={decimals}
+          onAfterAction={onAfterSend}
+        />
         <label className="block space-y-1">
           <span className="text-xs font-medium text-muted-foreground">
             Recipient (pubkey)
