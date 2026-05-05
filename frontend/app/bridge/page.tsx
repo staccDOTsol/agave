@@ -71,6 +71,13 @@ import {
   type DerivedDepositAccounts,
   type RatioState,
 } from "@/lib/bridge";
+import {
+  listPending,
+  pollMainnetReleases,
+  removePending,
+  stashBurnFromTx,
+  type PendingBurn,
+} from "@/lib/bridge-pending";
 import { prefetchMintMetadata } from "@/lib/helius";
 import { truncatePubkey } from "@/lib/utils";
 import { MainnetWalletContextProviders, useStaccanaWallet } from "@/lib/wallet";
@@ -148,6 +155,11 @@ export default function BridgePage(): JSX.Element {
   const [ratio, setRatio] = useState<RatioFetchState>({ kind: "idle" });
   const [submit, setSubmit] = useState<SubmitState>({ kind: "idle" });
   const [assetConfig, setAssetConfig] = useState<AssetConfigFetchState>({ kind: "idle" });
+  // Pending claims tracker — burns whose mainnet release we're watching for.
+  // `pendingTick` re-runs the load+poll effect; bumped by `onBurn` when a
+  // new burn lands so the panel doesn't have to wait for the next interval.
+  const [pendingTick, setPendingTick] = useState(0);
+  const [pendingBurns, setPendingBurns] = useState<PendingBurn[]>([]);
 
   const meta = useMemo(() => bridgeAssetById(asset), [asset]);
 
@@ -230,6 +242,34 @@ export default function BridgePage(): JSX.Element {
       setStaccanaDestStr(publicKey.toBase58());
     }
   }, [publicKey, staccanaDestStr]);
+
+  // Pending-claim tracker — load on mount + after each new burn (via
+  // `pendingTick`), then poll mainnet bridge-vault for matching
+  // ReleaseEvents every 30s so settlement shows up without manual refresh.
+  useEffect(() => {
+    if (!publicKey) {
+      setPendingBurns([]);
+      return;
+    }
+    let cancelled = false;
+    const tick = (): void => {
+      const list = listPending(publicKey);
+      if (!cancelled) setPendingBurns(list);
+    };
+    tick();
+    void pollMainnetReleases(publicKey).then(() => {
+      if (!cancelled) tick();
+    });
+    const id = window.setInterval(() => {
+      void pollMainnetReleases(publicKey).then(() => {
+        if (!cancelled) tick();
+      });
+    }, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [publicKey, pendingTick]);
 
   const baseAmount = useMemo<bigint | null>(() => {
     return parseToBaseUnits(amountStr, meta.decimals);
@@ -347,6 +387,27 @@ export default function BridgePage(): JSX.Element {
           </a>
         ),
       });
+      // Confirm + parse our own BurnEvent so the pending-claims panel can
+      // start watching mainnet for the matching ReleaseEvent. Don't block
+      // the success toast on this — fire and forget; the panel polls on
+      // its own cadence anyway.
+      void (async () => {
+        try {
+          await connection.confirmTransaction(
+            { signature: sig, blockhash, lastValidBlockHeight: 0 },
+            "confirmed",
+          );
+        } catch {
+          /* the tx already lands; confirmTransaction is just a barrier */
+        }
+        try {
+          await stashBurnFromTx(connection, sig, publicKey);
+          setPendingTick((n) => n + 1);
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn("[bridge] could not stash burn for pending tracking", e);
+        }
+      })();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setSubmit({ kind: "error", message });
@@ -572,7 +633,18 @@ export default function BridgePage(): JSX.Element {
             ) : null}
           </CardContent>
         </Card>
-      ) : (
+      ) : null}
+      {tab === "withdraw" && publicKey ? (
+        <PendingClaimsCard
+          user={publicKey}
+          pending={pendingBurns}
+          onDismiss={(burnSig: string): void => {
+            removePending(publicKey, burnSig);
+            setPendingTick((n) => n + 1);
+          }}
+        />
+      ) : null}
+      {tab === "withdraw" ? null : (
         <MainnetWalletContextProviders>
           <DepositPanel
             asset={asset}
@@ -1255,4 +1327,99 @@ function formatBaseUnits(value: bigint, decimals: number): string {
   let fracStr = fracPart.toString().padStart(decimals, "0");
   while (fracStr.endsWith("0")) fracStr = fracStr.slice(0, -1);
   return `${intPart.toString()}.${fracStr}`;
+}
+
+/**
+ * Renders the user's pending burn → mainnet release status. Local component
+ * (only used by this page) — keeps the parent's `useState` ergonomics
+ * without prop-drilling through a layer.
+ *
+ * Each row is one burn we observed via tx logs; status flips from "waiting"
+ * to "released" when `pollMainnetReleases` finds a `ReleaseEvent` with a
+ * matching nonce on mainnet.
+ */
+function PendingClaimsCard({
+  user,
+  pending,
+  onDismiss,
+}: {
+  user: PublicKey;
+  pending: PendingBurn[];
+  onDismiss: (burnSig: string) => void;
+}): JSX.Element | null {
+  void user; // currently unused — kept to disambiguate per-wallet state if we ever multi-wallet
+  if (pending.length === 0) return null;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Pending claims</CardTitle>
+        <CardDescription>
+          Burns you submitted on staccana, paired with their mainnet
+          release tx (issued by the federation attestor). Updates every 30s.
+          The first 9 attestor signers run on val-1 and auto-submit
+          <code> release_with_attestation</code> on mainnet — no manual claim
+          needed.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {pending.map((p) => {
+          const meta = bridgeAssetById(p.assetId as BridgeAsset);
+          const released = Boolean(p.releaseSig);
+          const ageMs = Date.now() - p.ts;
+          const ageMin = Math.floor(ageMs / 60_000);
+          const ageStr = ageMin < 1 ? "just now" : `${ageMin} min ago`;
+          const netHuman = formatBaseUnits(BigInt(p.netRelease), meta.decimals);
+          return (
+            <div
+              key={p.burnSig}
+              className="rounded-md border border-border/40 bg-secondary/20 px-3 py-2 text-xs space-y-1"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium">
+                  {released ? "✅" : "⏳"} {netHuman} {meta.label}
+                </span>
+                <span className="text-muted-foreground">{ageStr}</span>
+              </div>
+              <div className="text-muted-foreground">
+                → {truncatePubkey(p.mainnetDest, 4, 4)} · nonce{" "}
+                <span className="font-mono">{p.nonce}</span>
+              </div>
+              <div className="flex items-center gap-3 text-[11px]">
+                <a
+                  className="font-mono underline underline-offset-2"
+                  href={explorerTxUrl(p.burnSig)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  burn ↗
+                </a>
+                {p.releaseSig ? (
+                  <a
+                    className="font-mono text-emerald-300 underline underline-offset-2"
+                    href={mainnetExplorerTxUrl(p.releaseSig)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    release on mainnet ↗
+                  </a>
+                ) : (
+                  <span className="text-muted-foreground">
+                    waiting for federation…
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onDismiss(p.burnSig)}
+                  className="ml-auto text-muted-foreground hover:text-foreground"
+                  title="Hide from this list"
+                >
+                  dismiss
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
 }
