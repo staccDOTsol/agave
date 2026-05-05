@@ -47,17 +47,27 @@ use instructions::*;
 // SPEC.md §2.1 lists `SECRET_PUMP_ID = TBD`.
 declare_id!("SPump11111111111111111111111111111111111111");
 
-/// Placeholder bytes for the staccana treasury PDA. Production deployment must replace
-/// this with the address derived from
-/// `find_program_address(&[b"treasury"], TREASURY_PROGRAM_ID)` per `docs/SPEC.md` §2.1.
+/// The staccana genesis treasury PDA. All secret-pump curve fees are routed here.
 ///
-/// All curve fees are routed here. The placeholder is a deterministic pubkey constructed
-/// from the bytes of the ASCII string `"staccana_treasury_placeholder___"` (32 bytes); it
-/// is NOT a real PDA derivation. The placeholder will fail account-existence checks at
-/// runtime if not replaced before mainnet activation, surfacing the misconfiguration
-/// loudly rather than silently sending fees to a black hole.
+/// This is `find_program_address(&[b"treasury"], staccana_validator_subsidy::ID)`
+/// = `D3FcFs85BAzroHzwWp1CEgnjCku4bPKMFAScrtfAdo83`, the same PDA the
+/// `validator-subsidy` program owns + drains for `bootstrap_distribute` /
+/// `distribute_yield`. Per README and `docs/SPEC.md` §2.1: there's ONE
+/// genesis treasury (485M SOL pre-credited), funding ops + bonding-curve
+/// seed liquidity + validator subsidies. Secret-pump fees are an
+/// accretion source for it.
+///
+/// (Const name kept as `_PLACEHOLDER` for the moment so call-sites don't
+/// move; once that's not needed we can rename. The actual address is now
+/// the real PDA, not the ASCII string `"staccana_treasury_placeholder___"`
+/// it used to be — the rename of the binding stays a follow-up.)
 pub const TREASURY_PUBKEY_PLACEHOLDER: Pubkey =
-    Pubkey::new_from_array(*b"staccana_treasury_placeholder___");
+    Pubkey::new_from_array([
+        0xb2, 0xdf, 0xec, 0x01, 0xc6, 0xe1, 0x71, 0xbc,
+        0x18, 0x53, 0x48, 0x6a, 0xe0, 0xc0, 0x10, 0x6a,
+        0x11, 0xe6, 0x02, 0x2c, 0xc0, 0x89, 0x4d, 0xdb,
+        0xdb, 0x39, 0x93, 0xf2, 0x3c, 0xf4, 0xb9, 0x40,
+    ]);
 
 #[program]
 pub mod staccana_secret_pump {

@@ -75,12 +75,22 @@ export const MEGADROP_PROGRAM_ID = new PublicKey("Megadrop1111111111111111111111
 export const VALIDATOR_SUBSIDY_PROGRAM_ID = new PublicKey("Subsidy111111111111111111111111111111111111");
 
 /**
- * Placeholder treasury pubkey for secret-pump curve fees. Mirrors
- * `programs/secret-pump/src/lib.rs::TREASURY_PUBKEY_PLACEHOLDER` — the ASCII
- * string `staccana_treasury_placeholder___` packed as a 32-byte pubkey.
- * TODO(prod): swap to the real treasury PDA once SPEC §2.1 fills it in.
+ * Staccana genesis treasury PDA — destination for secret-pump curve fees.
+ *
+ * = `find_program_address(&[b"treasury"], staccana_validator_subsidy::ID)`,
+ * which is the same PDA the `validator-subsidy` program owns + drains for
+ * `bootstrap_distribute` / `distribute_yield`. Per README + `docs/SPEC.md`
+ * §2.1: ONE genesis treasury (485M SOL pre-credited) funds ops + curve seed
+ * liquidity + validator subsidies. Secret-pump fees are an accretion source.
+ *
+ * Mirrors `programs/secret-pump/src/lib.rs::TREASURY_PUBKEY_PLACEHOLDER`,
+ * which now hardcodes this same address (was the ASCII placeholder
+ * `staccana_treasury_placeholder___` until program upgrade
+ * sig `eAh9ZDNPDDzGkktPhzxC5V1bm8Ej5A7KdUsDZhJCfWVLtPaBzPbjvuwbhvPUYm7BuKBVdeZQHc8KCwTsAUdQZRe`).
  */
-export const SECRET_PUMP_TREASURY = new PublicKey(new TextEncoder().encode("staccana_treasury_placeholder___"));
+export const SECRET_PUMP_TREASURY = new PublicKey(
+  "D3FcFs85BAzroHzwWp1CEgnjCku4bPKMFAScrtfAdo83",
+);
 
 /**
  * SPL Token-2022 program ID — canonical mainnet address. Baked at genesis on
