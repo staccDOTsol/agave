@@ -36,8 +36,17 @@ pub struct InitMegadropArgs {
 
 #[derive(Accounts)]
 pub struct InitMegadrop<'info> {
-    /// Pays for the singleton config PDA allocation.
-    #[account(mut)]
+    /// Must equal `crate::ADMIN_AUTHORITY` (staccana's BPF upgrade-authority).
+    /// Originally bare `Signer` — the doc claimed "any signer can call this
+    /// in v1, deployer's responsibility." But the singleton MegadropConfig
+    /// PDA isn't init'd at deploy time, so anyone could front-run with their
+    /// own `claimable_root` + `treasury_authority` and permanently siphon
+    /// the megadrop allocation. Mirrors the patch applied to
+    /// `init_subsidy` / `update_megadrop`.
+    #[account(
+        mut,
+        constraint = authority.key() == crate::ADMIN_AUTHORITY @ MegadropError::Unauthorized,
+    )]
     pub authority: Signer<'info>,
 
     #[account(

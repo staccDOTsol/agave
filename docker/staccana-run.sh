@@ -87,7 +87,7 @@ exec /usr/local/bin/agave-validator \
   --rpc-port "$RPC_PORT" \
   --rpc-bind-address 0.0.0.0 \
   --gossip-port "$GOSSIP_PORT" \
-  --dynamic-port-range 8002-8020 \
+  --dynamic-port-range 8002-8027 \
   --log "$LOG_DIR/validator.log" \
   "${ENTRYPOINT_FLAGS[@]}" \
   "${GOSSIP_HOST_FLAGS[@]}" \

@@ -95,4 +95,7 @@ pub enum BridgeError {
 
     #[msg("native SOL transfer to bridge escrow failed")]
     NativeSolTransferFailed = 27,
+
+    #[msg("signer is not the configured ADMIN_AUTHORITY for this privileged ix")]
+    Unauthorized = 28,
 }

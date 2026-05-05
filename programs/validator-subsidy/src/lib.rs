@@ -72,6 +72,28 @@ pub use instructions::*;
 // exactly 32 bytes (verified via `base58.b58decode("Subsidy1111...111").length == 32`).
 declare_id!("Subsidy111111111111111111111111111111111111");
 
+/// Hardcoded admin pubkey gating the one-shot `init_subsidy` ix.
+///
+/// The original handler accepted any signer and stored `args.governance`
+/// verbatim, intending the off-chain deploy script to pass the cold
+/// governance key. But on a live program with the SubsidyConfig PDA not
+/// yet created, ANY caller could front-run the deploy and bind their own
+/// pubkey as `governance` — which gates `register_validator`,
+/// `stake_to_productive`, and `unstake_from_productive`. The same auditor
+/// who flagged megadrop's `update_megadrop` flagged this.
+///
+/// Constraining `init_subsidy.authority` to this const closes the
+/// front-run hole. Once init succeeds the binding is locked (Anchor's
+/// `init` constraint blocks re-init) and `args.governance` is whatever
+/// the legitimate deployer chose to put there.
+///
+/// Same key as `staccana_megadrop::ADMIN_AUTHORITY` — staccana's BPF
+/// upgrade-authority. Keypair on val-1 at
+/// `/etc/staccana/keys/upgrade-authority.json`.
+// Anchor 1.x doesn't re-export `pubkey!` — use the const-fn path directly.
+pub const ADMIN_AUTHORITY: Pubkey =
+    Pubkey::from_str_const("HSwe2Y7i6CPuJGb27rBwUumt8HZ8sCpQvG4PBBiC5f4y");
+
 #[program]
 pub mod staccana_validator_subsidy {
     use super::*;

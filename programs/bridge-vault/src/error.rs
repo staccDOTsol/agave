@@ -75,4 +75,7 @@ pub enum VaultError {
 
     #[msg("fee bps exceeds 10000 (100%)")]
     BadFeeBps = 22,
+
+    #[msg("signer is not the configured ADMIN_AUTHORITY for this privileged ix")]
+    Unauthorized = 23,
 }

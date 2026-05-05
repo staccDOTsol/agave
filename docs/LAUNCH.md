@@ -106,7 +106,7 @@ Supermajority is 3-of-4 = 75%. The cluster tolerates one validator down.
 - **lazy-claim**         `BK95n7mFdF7Wk5T8oiSFLtmULprQe6bRcpgLMQGC3oeK` — the 85.6M claimable airdrop (root-embedded in genesis)
 - **bridge**             `LA7h3hjvD62MeTtdeE4h2vq3EGxbU1oqzHtewp4xb9b` — staccana-side bridge (wSOL R-locked + AMM-oracle-quoted native SOL, see `docs/BRIDGE.md`)
 - **secret-pump**        `3Pbv3bHBh7SvcMDZqBFjJ3T9jLdrpiednaTRdViitMWF` — Token-22 CTE bonding-curve launcher ("pump.fun, but every balance encrypted by default")
-- **validator-subsidy**  `Ef9YyzrsFx7sptmu8v3M6ju82krceHXhq6jfivw6BBgk` — treasury → validator runtime payouts
+- **validator-subsidy**  `Subsidy111111111111111111111111111111111111` — treasury → validator runtime payouts
 - **megadrop**           `Aicff1zk6b5ifYzFoyhenUD5ehhFYb8GiDbRCrWt9t34` — 30M SOL second drop (root `0x4cd7098e…` initialized post-boot at PDA `GSPLWBykuVJNjFyqeLKMDkpoi4rZSD4fkXzVVwL9xGpV`)
 
 ### SPL stack (deployed at fresh addresses; canonical IDs require Anza's keypairs)

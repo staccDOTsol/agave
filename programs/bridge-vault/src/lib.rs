@@ -53,6 +53,22 @@ pub use instructions::*;
 // was never keypair-backed so we couldn't deploy under that address.
 declare_id!("BwimCCoPP5of41ukG1wA1gLz5wXQ4mmbcmjdFT9M1mBL");
 
+/// Hardcoded admin pubkey gating the one-shot `init_vault` ix.
+///
+/// `init_vault` initializes per-asset `VaultConfig` + `NonceInCounter`
+/// PDAs and bootstraps the global `FederationSet` on first call. Bare
+/// `Signer` with no constraint was the same front-run hole the auditor
+/// flagged on the staccana-side `register_asset` / `update_megadrop` /
+/// `init_subsidy` — on a fresh deploy anyone could call `init_vault`
+/// first, bind their own federation set, and then sign their own
+/// release-attestations to drain every wSOL/stSOL/ssUSDC deposit.
+///
+/// Same key as `staccana_bridge::ADMIN_AUTHORITY` and friends —
+/// staccana's BPF upgrade-authority on val-1.
+// Anchor 1.x doesn't re-export `pubkey!` — use the const-fn path directly.
+pub const ADMIN_AUTHORITY: Pubkey =
+    Pubkey::from_str_const("HSwe2Y7i6CPuJGb27rBwUumt8HZ8sCpQvG4PBBiC5f4y");
+
 #[program]
 pub mod staccana_bridge_vault {
     use super::*;

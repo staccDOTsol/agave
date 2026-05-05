@@ -56,10 +56,17 @@ pub struct InitSubsidyArgs {
 #[derive(Accounts)]
 #[instruction(args: InitSubsidyArgs)]
 pub struct InitSubsidy<'info> {
-    /// Pays for both PDA allocations. v1 expects this signer == `args.governance`; the
-    /// handler does not enforce that since deploy-time tooling will use a hot key for
-    /// the deploy and a cold key for ongoing governance.
-    #[account(mut)]
+    /// Must equal `crate::ADMIN_AUTHORITY` (staccana's BPF upgrade-authority).
+    /// Originally any signer was accepted, with the comment claiming the
+    /// off-chain deploy tooling would coordinate this. But on a live
+    /// program with `SubsidyConfig` not yet initialized, anyone could
+    /// front-run and bind their own pubkey as `governance` — gating every
+    /// subsequent privileged ix (`register_validator`, `stake_to_productive`,
+    /// `unstake_from_productive`). The constraint below closes that hole.
+    #[account(
+        mut,
+        constraint = authority.key() == crate::ADMIN_AUTHORITY @ SubsidyError::Unauthorized,
+    )]
     pub authority: Signer<'info>,
 
     #[account(
@@ -108,13 +115,16 @@ pub fn handler(ctx: Context<InitSubsidy>, args: InitSubsidyArgs) -> Result<()> {
     cfg.federation_m = args.federation_m;
     cfg.federation_n = args.federation_n;
     // Storage is fixed-size [Pubkey; MAX_FEDERATION_MEMBERS], zero-padded.
-    // Copy the variable-length wire vec into the prefix; leave the tail as
-    // `Pubkey::default()` from the `init` zero-initialization.
-    let mut padded = [Pubkey::default(); MAX_FEDERATION_MEMBERS];
+    // Write each member directly into the account buffer — earlier this code
+    // built a 1024-byte `[Pubkey; 32]` buffer on the stack first, which when
+    // combined with Anchor's deserialized `SubsidyConfig` struct (1166 B)
+    // and other locals exceeded SBPF's 4 KB per-frame budget and triggered
+    // `Access violation in stack frame 3 at address 0x2000035a0 of size 8`
+    // at runtime. The `init` constraint already zero-initializes the
+    // account, so the unused tail slots stay `Pubkey::default()`.
     for (i, k) in args.federation_members.iter().enumerate() {
-        padded[i] = *k;
+        cfg.federation_members[i] = *k;
     }
-    cfg.federation_members = padded;
     cfg.bump = ctx.bumps.subsidy_config;
 
     let reg = &mut ctx.accounts.validator_registry;

@@ -60,6 +60,8 @@ const SUPPORTED_KINDS = new Set([
   "batched_range_proof_u128",
   "batched_grouped_ciphertext_3_handles_validity",
   "pedersen_commit",
+  "elgamal_decrypt_handle",
+  "transfer_new_source_ciphertext",
 ]);
 
 /**
@@ -69,7 +71,11 @@ const SUPPORTED_KINDS = new Set([
  * lo/hi inputs in `Transfer`. We accept (and ignore) `elgamalSeed` for these
  * kinds so the existing client wrapper can stay uniform.
  */
-const NO_SEED_KINDS = new Set(["pedersen_commit"]);
+const NO_SEED_KINDS = new Set([
+  "pedersen_commit",
+  "elgamal_decrypt_handle",
+  "transfer_new_source_ciphertext",
+]);
 
 interface ProofRequestBody {
   proofKind?: unknown;
@@ -264,6 +270,161 @@ export async function POST(request: Request): Promise<NextResponse> {
         const amount = decodeAmountU64("amount", params.amount);
         const commitment = zk.pedersen_commit(amount, opening);
         bundle = { proof: commitment, context: new Uint8Array(0) };
+        break;
+      }
+      case "transfer_new_source_ciphertext_debug":
+      case "transfer_new_source_ciphertext": {
+        // BEFORE running the math, optionally cross-check the FE-supplied
+        // `availableBalance` against a fresh server-side RPC fetch of the
+        // sender ATA's `ConfidentialTransferAccount.available_balance`.
+        // If the FE read was stale (e.g. an Apply landed between FE fetch
+        // and server invocation), this catches it before we generate a
+        // sourceCt that won't byte-match on-chain.
+        if (typeof params.senderAta === "string") {
+          try {
+            const rpcUrl =
+              process.env.NEXT_PUBLIC_STACCANA_RPC_URL ||
+              process.env.STACCANA_RPC_URL ||
+              "https://rpc.mp.fun";
+            const rpcResp = await fetch(rpcUrl, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "getAccountInfo",
+                params: [
+                  params.senderAta,
+                  { encoding: "base64", commitment: "processed" },
+                ],
+              }),
+            });
+            const rpcJson = (await rpcResp.json()) as {
+              result?: { value?: { data?: [string, string] } };
+            };
+            const dataB64 = rpcJson?.result?.value?.data?.[0];
+            if (dataB64) {
+              const acctBytes = new Uint8Array(Buffer.from(dataB64, "base64"));
+              // Token-22 ATA: 165 base + 1 account_type + TLV records.
+              // Walk TLVs to find ConfidentialTransferAccount (type=5).
+              let cursor = 166;
+              let availOnChain: Uint8Array | null = null;
+              while (cursor + 4 <= acctBytes.length) {
+                const t = acctBytes[cursor] | (acctBytes[cursor + 1] << 8);
+                const len = acctBytes[cursor + 2] | (acctBytes[cursor + 3] << 8);
+                cursor += 4;
+                if (t === 0 && len === 0) break;
+                if (cursor + len > acctBytes.length) break;
+                if (t === 5 && len >= 225) {
+                  // available_balance is at offset 161..225 within the ext data.
+                  availOnChain = acctBytes.slice(cursor + 161, cursor + 225);
+                  break;
+                }
+                cursor += len;
+              }
+              if (availOnChain) {
+                const fed = (params.availableBalance as string) ?? "";
+                const fedBytes = new Uint8Array(Buffer.from(fed, "base64"));
+                let match = availOnChain.length === fedBytes.length;
+                if (match) {
+                  for (let i = 0; i < availOnChain.length; i++) {
+                    if (availOnChain[i] !== fedBytes[i]) {
+                      match = false;
+                      break;
+                    }
+                  }
+                }
+                const aHex = (b: Uint8Array): string =>
+                  Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+                // eslint-disable-next-line no-console
+                console.log("[ct-debug] avail on-chain cross-check", {
+                  senderAta: params.senderAta,
+                  match,
+                  feAvail: aHex(fedBytes),
+                  onChainAvail: aHex(availOnChain),
+                });
+                if (!match) {
+                  return NextResponse.json(
+                    {
+                      error: "stale_available_balance",
+                      details:
+                        "FE-provided available_balance doesn't match on-chain at processed commitment. " +
+                        "Re-fetch and retry. " +
+                        `feAvail=${aHex(fedBytes)} onChainAvail=${aHex(availOnChain)}`,
+                    },
+                    { status: 409 },
+                  );
+                }
+              } else {
+                // eslint-disable-next-line no-console
+                console.log("[ct-debug] cross-check: no CT extension found", {
+                  senderAta: params.senderAta,
+                  acctLen: acctBytes.length,
+                });
+              }
+            } else {
+              // eslint-disable-next-line no-console
+              console.log("[ct-debug] cross-check: getAccountInfo returned no data", {
+                senderAta: params.senderAta,
+                rpc: rpcUrl,
+              });
+            }
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.log("[ct-debug] cross-check threw, continuing without:", String(e));
+          }
+        }
+        // Synthetic kind: returns the byte-exact 64-byte
+        // `new_source_ciphertext = available_balance - (xfer_lo + 2^16·xfer_hi)`
+        // computed via curve25519-dalek (same crypto stack as the on-chain
+        // `subtract_with_lo_hi` syscall). Eliminates byte-encoding mismatch
+        // bugs that surface as `Custom(27) BalanceMismatch` after proof
+        // verification succeeds.
+        const availableBalance = decodeB64(
+          "availableBalance",
+          params.availableBalance,
+          64,
+        );
+        const sourcePubkey = decodeB64("sourcePubkey", params.sourcePubkey, 32);
+        const amountLo = decodeAmountU64("amountLo", params.amountLo);
+        const amountHi = decodeAmountU64("amountHi", params.amountHi);
+        const openingLo = decodeB64("openingLo", params.openingLo, 32);
+        const openingHi = decodeB64("openingHi", params.openingHi, 32);
+        const newSource = zk.transfer_new_source_ciphertext(
+          availableBalance,
+          sourcePubkey,
+          amountLo,
+          amountHi,
+          openingLo,
+          openingHi,
+        );
+        const toHex = (b: Uint8Array): string =>
+          Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+        // eslint-disable-next-line no-console
+        console.log("[ct-debug] transfer_new_source_ciphertext", {
+          availableBalanceHex: toHex(availableBalance),
+          sourcePubkeyHex: toHex(sourcePubkey),
+          amountLo: amountLo.toString(),
+          amountHi: amountHi.toString(),
+          openingLoHex: toHex(openingLo),
+          openingHiHex: toHex(openingHi),
+          newSourceHex: toHex(newSource),
+        });
+        bundle = { proof: newSource, context: new Uint8Array(0) };
+        break;
+      }
+      case "elgamal_decrypt_handle": {
+        // Synthetic kind: returns the canonical 32-byte ElGamal "decrypt
+        // handle" `opening · pubkey` as a Ristretto-compressed point. Used
+        // by the Transfer byte-cancellation path to compute `sourceCt.handle
+        // = newBalOpen · pk` through the same `curve25519-dalek` stack as
+        // the on-chain `subtract_with_lo_hi` syscall — eliminates a class
+        // of canonical-encoding mismatch bugs that would surface as
+        // `Custom(27) BalanceMismatch` after proof verification succeeds.
+        const pubkey = decodeB64("pubkey", params.pubkey, 32);
+        const opening = decodeB64("opening", params.opening, 32);
+        const handle = zk.elgamal_decrypt_handle(pubkey, opening);
+        bundle = { proof: handle, context: new Uint8Array(0) };
         break;
       }
       case "batched_grouped_ciphertext_3_handles_validity": {

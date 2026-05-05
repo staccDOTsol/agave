@@ -35,7 +35,7 @@
 use crate::attestation::{
     apply_bps_fee, build_release_message, check_unique_indices,
 };
-use crate::ed25519::{parse_ed25519_at, require_instructions_sysvar};
+use crate::ed25519::{parse_ed25519_at, parse_ed25519_batch_at, require_instructions_sysvar};
 use crate::error::VaultError;
 use crate::state::{FederationSet, NonceOutConsumed, VaultConfig};
 use anchor_lang::prelude::*;
@@ -142,22 +142,52 @@ pub fn handler(ctx: Context<ReleaseWithAttestation>, args: ReleaseArgs) -> Resul
         .map_err(|_| VaultError::BadInstructionsSysvar)?;
     let m = fed.m as usize;
     require!(
-        (current_ix_index as usize) >= m,
+        (current_ix_index as usize) >= 1,
         VaultError::InsufficientFederationSignatures
     );
 
-    for (i, &member_idx) in args.federation_indices.iter().enumerate() {
-        let ix_index = (current_ix_index as usize) - m + i;
-        let parsed = parse_ed25519_at(sysvar, ix_index)?;
+    // Two acceptable layouts (same back-compat shape as the staccana-side `mint` ix):
+    // either M separate single-sig precompile ixs immediately preceding this one,
+    // or one batched precompile ix at index-1 carrying all M sigs. Try batched
+    // first since the publisher prefers that path (sub-1232-byte tx for 5-of-9).
+    let batched_ok = matches!(
+        parse_ed25519_batch_at(sysvar, (current_ix_index as usize) - 1),
+        Ok(ref batch) if batch.len() == m,
+    );
+
+    if batched_ok {
+        let batch = parse_ed25519_batch_at(sysvar, (current_ix_index as usize) - 1)
+            .expect("re-parse same ix");
+        for (i, &member_idx) in args.federation_indices.iter().enumerate() {
+            let parsed = &batch[i];
+            require!(
+                parsed.message == expected_msg,
+                VaultError::BadAttestationMessage
+            );
+            let expected_member = fed.members[member_idx as usize];
+            require!(
+                parsed.pubkey == expected_member.to_bytes(),
+                VaultError::BadFederationSigner
+            );
+        }
+    } else {
         require!(
-            parsed.message == expected_msg,
-            VaultError::BadAttestationMessage
+            (current_ix_index as usize) >= m,
+            VaultError::InsufficientFederationSignatures
         );
-        let expected_member = fed.members[member_idx as usize];
-        require!(
-            parsed.pubkey == expected_member.to_bytes(),
-            VaultError::BadFederationSigner
-        );
+        for (i, &member_idx) in args.federation_indices.iter().enumerate() {
+            let ix_index = (current_ix_index as usize) - m + i;
+            let parsed = parse_ed25519_at(sysvar, ix_index)?;
+            require!(
+                parsed.message == expected_msg,
+                VaultError::BadAttestationMessage
+            );
+            let expected_member = fed.members[member_idx as usize];
+            require!(
+                parsed.pubkey == expected_member.to_bytes(),
+                VaultError::BadFederationSigner
+            );
+        }
     }
 
     // Mark this nonce consumed (the `init` already created the PDA — populate the

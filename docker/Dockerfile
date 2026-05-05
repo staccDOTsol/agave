@@ -26,7 +26,18 @@
 # Build context: this Dockerfile expects to be built from /Users/stacc/staccana
 # with the genesis ledger pre-baked at /var/lib/staccana/ledger/. The
 # build-and-push.sh helper in this dir handles that.
-
+#
+# GLIBC CONSTRAINT — IMPORTANT.
+# The agave-validator binary in `bin/agave-validator` was compiled on val-1
+# (the build host). The base image below MUST provide a glibc version >= the
+# glibc on val-1, or you'll see at container start:
+#   "agave-validator: /lib/.../libc.so.6: version `GLIBC_2.38' not found"
+# Reference table: Ubuntu 22.04 = glibc 2.35, Ubuntu 24.04 = 2.39, Debian 12
+# bookworm = 2.36, Debian 13 trixie = 2.41. If val-1 is upgraded past this
+# image's glibc, EITHER bump the base image here OR switch to the multi-stage
+# Dockerfile.multiarch (which builds the validator in-image so glibc auto-
+# matches by construction). Last verified: val-1 on Ubuntu 24.04 (glibc 2.39),
+# matching the runtime base below.
 FROM ubuntu:24.04
 
 # All staccana validators expose the same Solana port topology.

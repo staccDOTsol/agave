@@ -214,6 +214,21 @@ export default function MegadropPage(): JSX.Element {
   const myAllocation = eligibility.kind === "eligible" ? eligibility.allocation : null;
   const proof = eligibility.kind === "eligible" ? eligibility.proof : null;
 
+  // **Defense-in-depth root check.** Compare the FE static-allocations.json
+  // root (returned alongside every inclusion proof from the edge fn) against
+  // the on-chain `MegadropConfig.claimable_root`. If they differ, claims will
+  // fail at the `inclusion proof root mismatch` check below — but more
+  // importantly, the discrepancy means SOMEONE has overwritten the on-chain
+  // root via `update_megadrop` (now gated, but historically open to
+  // anyone). We surface this loudly at page load so users don't see the
+  // attacker's root displayed as truth.
+  const onchainRootHex = config.kind === "ready" ? toHex(config.cfg.claimableRoot) : null;
+  const staticRootHex = proof && proof.root.length === 32 ? toHex(proof.root) : null;
+  const rootMismatch =
+    onchainRootHex !== null &&
+    staticRootHex !== null &&
+    onchainRootHex !== staticRootHex;
+
   // Load on-chain config (genesis_month, treasury_authority, claimable_root).
   useEffect(() => {
     let cancelled = false;
@@ -501,6 +516,26 @@ export default function MegadropPage(): JSX.Element {
             publicKey={publicKey?.toBase58() ?? null}
           />
           <ConfigReadout config={config} currentMonth={currentMonth} />
+          {rootMismatch ? (
+            <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm">
+              <p className="font-semibold text-red-400">
+                ⚠ Merkle root out of sync
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                The on-chain <code>MegadropConfig.claimable_root</code> doesn&apos;t
+                match the snapshot this site was built from. Claims will reject
+                with <code>BadMerkleProof</code> until the on-chain root is
+                rotated back via <code>update_megadrop</code> (now gated on the
+                program admin authority — historically open to anyone, which is
+                how this happened).
+              </p>
+              <p className="mt-1 font-mono text-xs">
+                static&nbsp;list: {staticRootHex}
+                <br />
+                on-chain&nbsp;:&nbsp;{onchainRootHex}
+              </p>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -559,7 +594,8 @@ export default function MegadropPage(): JSX.Element {
                 submit.kind === "signing" ||
                 submit.kind === "staging" ||
                 submit.kind === "submitting" ||
-                config.kind !== "ready"
+                config.kind !== "ready" ||
+                rootMismatch
               }
               className="w-full sm:w-auto"
             >

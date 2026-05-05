@@ -6,11 +6,13 @@ export const batched_grouped_ciphertext_3_handles_validity_proof: (a: number, b:
 export const batched_range_proof_u128: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const batched_range_proof_u64: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const ciphertext_commitment_equality_proof: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: bigint) => [number, number, number];
+export const elgamal_decrypt_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const elgamal_pubkey_from_seed: (a: number, b: number) => [number, number, number, number];
 export const pedersen_commit: (a: bigint, b: number, c: number) => [number, number, number, number];
 export const proofbundle_context: (a: number) => [number, number];
 export const proofbundle_proof: (a: number) => [number, number];
 export const pubkey_validity_proof: (a: number, b: number) => [number, number, number];
+export const transfer_new_source_ciphertext: (a: number, b: number, c: number, d: number, e: bigint, f: bigint, g: number, h: number, i: number, j: number) => [number, number, number, number];
 export const zero_ciphertext_proof: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const __wbg_aeciphertext_free: (a: number, b: number) => void;
 export const __wbg_aekey_free: (a: number, b: number) => void;

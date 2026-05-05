@@ -1,3 +1,4 @@
+import { Analytics } from "@vercel/analytics/next";
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 
@@ -82,6 +83,7 @@ export default function RootLayout({
           </WalletContextProviders>
         </ThemeProvider>
         <Toaster />
+        <Analytics />
       </body>
     </html>
   );

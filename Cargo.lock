@@ -9863,10 +9863,14 @@ name = "staccana-federation-attestor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "bincode",
+ "borsh 1.6.1",
  "bs58",
  "clap",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "solana-client",
  "solana-program",
  "solana-sdk",
@@ -9995,10 +9999,13 @@ dependencies = [
  "borsh 1.6.1",
  "clap",
  "hex",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "solana-client",
  "solana-program",
  "solana-sdk",
+ "staccana-megadrop-merkle",
 ]
 
 [[package]]
@@ -10058,6 +10065,21 @@ dependencies = [
  "tar",
  "tempfile",
  "zstd",
+]
+
+[[package]]
+name = "staccana-subsidy-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borsh 1.6.1",
+ "clap",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-client",
+ "solana-program",
+ "solana-sdk",
 ]
 
 [[package]]

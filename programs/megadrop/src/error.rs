@@ -94,4 +94,7 @@ pub enum MegadropError {
 
     #[msg("proof buffer total length disagrees with declared proof_len")]
     ProofBufferLengthMismatch = 27,
+
+    #[msg("signer is not the configured ADMIN_AUTHORITY for this privileged ix")]
+    Unauthorized = 28,
 }

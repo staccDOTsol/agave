@@ -37,9 +37,15 @@ VERSION_TAG="${VERSION_TAG:-v2.0.0-devnet-$(date -u +%Y%m%d)}"
 # the more natural name for a comma-separated list — and the env var name
 # `docker buildx` itself uses). Plural wins if both are set so a CI job that
 # exports PLATFORMS=... gets the expected behavior even if a stale PLATFORM
-# is left in the env from a prior step. Default still amd64-only so a bare
-# invocation doesn't kick off the slower multi-arch build.
-PLATFORM="${PLATFORMS:-${PLATFORM:-linux/amd64}}"
+# is left in the env from a prior step.
+#
+# Default depends on the Dockerfile chosen below:
+#   Dockerfile (single-arch, pre-built binaries) → linux/amd64 only
+#   Dockerfile.multiarch (in-image build)         → linux/amd64,linux/arm64
+# This way `./build-and-push.sh DOCKERFILE=…/Dockerfile.multiarch` produces a
+# real multi-arch manifest list by default — which is the whole point of the
+# multiarch Dockerfile. If you want a single arch with .multiarch (e.g. for a
+# faster smoke build), set PLATFORM=linux/amd64 explicitly.
 PUSH="${PUSH:-1}"
 
 LEDGER_SRC="${LEDGER_SRC:-/var/lib/staccana/ledger}"
@@ -58,6 +64,15 @@ USE_MULTIARCH=0
 if [[ "$(basename "$DOCKERFILE")" == "Dockerfile.multiarch" ]]; then
   USE_MULTIARCH=1
 fi
+
+# Pick the default platform list now that USE_MULTIARCH is known. An explicit
+# PLATFORM/PLATFORMS env var still wins.
+if [[ "$USE_MULTIARCH" == "1" ]]; then
+  DEFAULT_PLATFORM="linux/amd64,linux/arm64"
+else
+  DEFAULT_PLATFORM="linux/amd64"
+fi
+PLATFORM="${PLATFORMS:-${PLATFORM:-$DEFAULT_PLATFORM}}"
 
 echo "[docker] assembling build context at $CTX_DIR"
 echo "[docker] using Dockerfile: $DOCKERFILE (multiarch=$USE_MULTIARCH)"
@@ -87,15 +102,67 @@ else
   done
 fi
 
-# 2. Ledger seed (genesis.bin + rocksdb)
+# 2. Ledger seed.
+#
+# `genesis.bin` is small + arch-independent — always ship it.
+#
+# `rocksdb/` is large + LIVE on val-1 (the running validator rotates SST files
+# every few seconds), so a naive `cp -r` races the writer and bails with
+# `cp: cannot stat '.../001115.sst': No such file or directory`. Three modes:
+#
+#   INCLUDE_ROCKSDB=skip      (default): ship genesis.bin only. The container
+#                              boots from genesis at first run, catches up via
+#                              the gossip network, and has a fresh ledger.
+#                              Slower first boot but builds reproducibly.
+#   INCLUDE_ROCKSDB=snapshot:  run `agave-ledger-tool create-snapshot` first
+#                              to produce a point-in-time tarball, then ship
+#                              just the tarball. Validator stays running. Best
+#                              for offline/airgapped distribution.
+#   INCLUDE_ROCKSDB=live:      old behavior — `cp -r` the live rocksdb dir.
+#                              ONLY works when the validator is stopped.
+#                              Will likely fail on a running val-1.
+INCLUDE_ROCKSDB="${INCLUDE_ROCKSDB:-skip}"
+
 if [[ ! -f "$LEDGER_SRC/genesis.bin" ]]; then
   echo "[docker] FATAL: $LEDGER_SRC/genesis.bin not found — run step 30 first" >&2
   exit 1
 fi
 cp "$LEDGER_SRC/genesis.bin" "$CTX_DIR/ledger/genesis.bin"
-if [[ -d "$LEDGER_SRC/rocksdb" ]]; then
-  cp -r "$LEDGER_SRC/rocksdb" "$CTX_DIR/ledger/rocksdb"
-fi
+
+case "$INCLUDE_ROCKSDB" in
+  skip)
+    echo "[docker] INCLUDE_ROCKSDB=skip — shipping genesis.bin only (container boots from genesis + catches up over gossip)"
+    ;;
+  snapshot)
+    echo "[docker] INCLUDE_ROCKSDB=snapshot — creating point-in-time snapshot…"
+    if ! command -v agave-ledger-tool >/dev/null 2>&1; then
+      echo "[docker] FATAL: agave-ledger-tool not on PATH (needed for INCLUDE_ROCKSDB=snapshot)" >&2
+      exit 1
+    fi
+    SNAP_DIR=$(mktemp -d -t staccana-snap-XXXXXX)
+    trap 'rm -rf "$SNAP_DIR"' EXIT
+    SNAP_SLOT=$(agave-ledger-tool --ledger "$LEDGER_SRC" slot 2>/dev/null | tail -1)
+    if [[ -z "$SNAP_SLOT" ]]; then
+      echo "[docker] FATAL: couldn't read root slot from ledger" >&2
+      exit 1
+    fi
+    agave-ledger-tool --ledger "$LEDGER_SRC" \
+      create-snapshot "$SNAP_SLOT" "$SNAP_DIR" \
+      --snapshot-archive-format zstd >&2
+    cp "$SNAP_DIR"/snapshot-*.tar.zst "$CTX_DIR/ledger/" 2>/dev/null
+    echo "[docker] snapshot at slot $SNAP_SLOT bundled into context"
+    ;;
+  live)
+    echo "[docker] INCLUDE_ROCKSDB=live — copying live rocksdb (validator must be stopped)"
+    if [[ -d "$LEDGER_SRC/rocksdb" ]]; then
+      cp -r "$LEDGER_SRC/rocksdb" "$CTX_DIR/ledger/rocksdb"
+    fi
+    ;;
+  *)
+    echo "[docker] FATAL: unknown INCLUDE_ROCKSDB=$INCLUDE_ROCKSDB (expected skip|snapshot|live)" >&2
+    exit 1
+    ;;
+esac
 
 # 3. program-ids.json
 if [[ -f "$PROGRAM_IDS" ]]; then

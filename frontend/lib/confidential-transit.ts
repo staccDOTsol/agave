@@ -1007,19 +1007,21 @@ export async function scanPendingTransitAccounts(
       continue;
     }
 
-    // Skip accounts where the CT extension is fully zeroed out (empty after
-    // a previous claim). We treat any non-zero byte after the elgamal_pubkey
-    // (which covers pending_lo/hi + available + counters) as "still has
-    // funds in flight".
-    const tail = ext.slice(33);
-    let nonZero = false;
-    for (let i = 0; i < tail.length; i++) {
-      if (tail[i] !== 0) {
-        nonZero = true;
+    // Skip accounts that have no actual encrypted balance — only the
+    // BALANCE ciphertext fields matter (pending_lo, pending_hi, available).
+    // Earlier this checked everything after `elgamal_pubkey`, including
+    // the bool flags + counters which ConfigureAccount sets to non-zero
+    // even when balance is empty — so a fresh-Configure-but-Transfer-failed
+    // transit account leaked into "Pending claims" with 0 actual funds.
+    const balanceBytes = ext.slice(33, 225); // pending_lo(64) + pending_hi(64) + available(64)
+    let hasBalance = false;
+    for (let i = 0; i < balanceBytes.length; i++) {
+      if (balanceBytes[i] !== 0) {
+        hasBalance = true;
         break;
       }
     }
-    if (!nonZero) continue;
+    if (!hasBalance) continue;
 
     // Pull mint + public `amount` from the base account.
     let mintPk: PublicKey;
@@ -1340,7 +1342,14 @@ export async function fetchConfidentialAccountState(
   connection: Connection,
   account: PublicKey,
 ): Promise<ParsedConfidentialState | null> {
-  const acct = await connection.getAccountInfo(account, "confirmed");
+  // "finalized" reads from blocks that are locked in (won't roll back). For
+  // CT Transfer we feed avail into the equality proof — if our read is from
+  // a soft-confirmed state that gets reverted, the Transfer ix lands against
+  // a different avail and Token-22 errors with `Custom(27) BalanceMismatch`.
+  // After the user has explicitly clicked Configure / Deposit and waited for
+  // confirmation, those have had time to finalize, so reading at finalized
+  // is safe.
+  const acct = await connection.getAccountInfo(account, "finalized");
   if (!acct) return null;
   const data =
     acct.data instanceof Uint8Array ? acct.data : new Uint8Array(acct.data);

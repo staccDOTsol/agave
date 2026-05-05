@@ -3137,6 +3137,44 @@ export function ciphertext_commitment_equality_proof(seed, ciphertext, commitmen
 }
 
 /**
+ * Compute the ElGamal "decrypt handle" half of a twisted-ElGamal ciphertext:
+ * `handle = opening · pubkey` as compressed Ristretto bytes.
+ *
+ * This matches what the on-chain `subtract_with_lo_hi` math produces and what
+ * the validity proof's grouped ciphertexts contain at the source-pubkey index
+ * (per `GroupedElGamalCiphertext3Handles::encrypt_with_u64`'s third handle).
+ *
+ * We use this from the FE byte-cancellation path so the handle bytes go
+ * through `curve25519-dalek` (same stack as on-chain syscalls) instead of a
+ * separate JS curve library — eliminates a class of "canonical encoding
+ * mismatch" bugs that surface only at the post-verify byte-equality check
+ * in `process_source_for_transfer` (Token-22 returns `Custom(27)
+ * BalanceMismatch`).
+ *
+ * Inputs:
+ *   - `pubkey`  : 32 bytes (compressed Ristretto ElGamal pubkey)
+ *   - `opening` : 32 bytes (canonical scalar in [0, L), little-endian)
+ *
+ * Returns 32 bytes (compressed Ristretto handle).
+ * @param {Uint8Array} pubkey
+ * @param {Uint8Array} opening
+ * @returns {Uint8Array}
+ */
+export function elgamal_decrypt_handle(pubkey, opening) {
+    const ptr0 = passArray8ToWasm0(pubkey, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(opening, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.elgamal_decrypt_handle(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
  * Returns the ElGamal pubkey (32 bytes) derived from a secret seed.
  * Useful for callers that need to register the pubkey with
  * `ConfigureAccount` alongside the proof.
@@ -3207,6 +3245,57 @@ export function pubkey_validity_proof(seed) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return ProofBundle.__wrap(ret[0]);
+}
+
+/**
+ * Compute the byte-exact "post-transfer source ciphertext" the way Token-22's
+ * on-chain `process_source_for_transfer` does:
+ *
+ *   `new_source = available_balance - (xfer_lo + 2^16 · xfer_hi)`
+ *
+ * where `xfer_lo = (commitment_lo, source_handle_lo)` is the source-pubkey
+ * extraction of the validity proof's grouped_lo ciphertext (and hi
+ * analogously). This is the value that needs to byte-equal the equality
+ * proof's `new_source_ciphertext` field for the transfer to NOT bail with
+ * `Custom(27) BalanceMismatch` at the post-verify check (processor.rs:890).
+ *
+ * We expose this so the FE can drive `sourceCt` from the wasm/curve25519-dalek
+ * stack instead of re-deriving via byte-cancellation algebra in JS — by
+ * construction the bytes match what the on-chain syscall produces.
+ *
+ * Inputs:
+ *   - `available_balance` : 64 bytes (PodElGamalCiphertext: commit(32) || handle(32))
+ *   - `source_pubkey`     : 32 bytes (compressed Ristretto)
+ *   - `amount_lo`         : u64 (low 16 bits of transfer amount)
+ *   - `amount_hi`         : u64 (high 32 bits)
+ *   - `opening_lo`        : 32 bytes (canonical scalar)
+ *   - `opening_hi`        : 32 bytes (canonical scalar)
+ *
+ * Returns 64 bytes (PodElGamalCiphertext = `new_source.commit || new_source.handle`).
+ * @param {Uint8Array} available_balance
+ * @param {Uint8Array} source_pubkey
+ * @param {bigint} amount_lo
+ * @param {bigint} amount_hi
+ * @param {Uint8Array} opening_lo
+ * @param {Uint8Array} opening_hi
+ * @returns {Uint8Array}
+ */
+export function transfer_new_source_ciphertext(available_balance, source_pubkey, amount_lo, amount_hi, opening_lo, opening_hi) {
+    const ptr0 = passArray8ToWasm0(available_balance, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(source_pubkey, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(opening_lo, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passArray8ToWasm0(opening_hi, wasm.__wbindgen_malloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.transfer_new_source_ciphertext(ptr0, len0, ptr1, len1, amount_lo, amount_hi, ptr2, len2, ptr3, len3);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v5 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v5;
 }
 
 /**

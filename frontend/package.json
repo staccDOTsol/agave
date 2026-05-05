@@ -24,6 +24,7 @@
     "@solana/wallet-adapter-react-ui": "0.9.35",
     "@solana/web3.js": "1.95.4",
     "@staccoverflow/zk-proofs-wasm": "file:./vendor/zk-proofs-wasm",
+    "@vercel/analytics": "^2.0.1",
     "@vercel/blob": "^2.3.3",
     "bs58": "6.0.0",
     "class-variance-authority": "0.7.0",

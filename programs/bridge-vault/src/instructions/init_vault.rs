@@ -50,10 +50,16 @@ pub struct InitVaultArgs {
 #[derive(Accounts)]
 #[instruction(args: InitVaultArgs)]
 pub struct InitVault<'info> {
-    /// Governance authority. v1 just requires the signer pays for the new accounts;
-    /// real deployment will gate this further (e.g. multisig owning the upgrade
-    /// authority).
-    #[account(mut)]
+    /// Must equal `crate::ADMIN_AUTHORITY` (staccana's BPF upgrade-authority).
+    /// Originally bare `Signer` with the comment "real deployment will gate
+    /// this further" — but on a fresh deploy with the VaultConfig +
+    /// FederationSet PDAs not yet initialized, anyone could front-run and
+    /// bind their own federation set, then forge release-attestations to
+    /// drain every subsequent deposit. The constraint below closes that hole.
+    #[account(
+        mut,
+        constraint = authority.key() == crate::ADMIN_AUTHORITY @ VaultError::Unauthorized,
+    )]
     pub authority: Signer<'info>,
 
     #[account(

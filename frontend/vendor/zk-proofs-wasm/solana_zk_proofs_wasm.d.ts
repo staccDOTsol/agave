@@ -809,6 +809,29 @@ export function batched_range_proof_u64(commitments_packed: Uint8Array, openings
 export function ciphertext_commitment_equality_proof(seed: Uint8Array, ciphertext: Uint8Array, commitment: Uint8Array, opening: Uint8Array, amount: bigint): ProofBundle;
 
 /**
+ * Compute the ElGamal "decrypt handle" half of a twisted-ElGamal ciphertext:
+ * `handle = opening · pubkey` as compressed Ristretto bytes.
+ *
+ * This matches what the on-chain `subtract_with_lo_hi` math produces and what
+ * the validity proof's grouped ciphertexts contain at the source-pubkey index
+ * (per `GroupedElGamalCiphertext3Handles::encrypt_with_u64`'s third handle).
+ *
+ * We use this from the FE byte-cancellation path so the handle bytes go
+ * through `curve25519-dalek` (same stack as on-chain syscalls) instead of a
+ * separate JS curve library — eliminates a class of "canonical encoding
+ * mismatch" bugs that surface only at the post-verify byte-equality check
+ * in `process_source_for_transfer` (Token-22 returns `Custom(27)
+ * BalanceMismatch`).
+ *
+ * Inputs:
+ *   - `pubkey`  : 32 bytes (compressed Ristretto ElGamal pubkey)
+ *   - `opening` : 32 bytes (canonical scalar in [0, L), little-endian)
+ *
+ * Returns 32 bytes (compressed Ristretto handle).
+ */
+export function elgamal_decrypt_handle(pubkey: Uint8Array, opening: Uint8Array): Uint8Array;
+
+/**
  * Returns the ElGamal pubkey (32 bytes) derived from a secret seed.
  * Useful for callers that need to register the pubkey with
  * `ConfigureAccount` alongside the proof.
@@ -845,6 +868,34 @@ export function pedersen_commit(amount: bigint, opening: Uint8Array): Uint8Array
  * Returns `{ context: 32 bytes, proof: 64 bytes }`.
  */
 export function pubkey_validity_proof(seed: Uint8Array): ProofBundle;
+
+/**
+ * Compute the byte-exact "post-transfer source ciphertext" the way Token-22's
+ * on-chain `process_source_for_transfer` does:
+ *
+ *   `new_source = available_balance - (xfer_lo + 2^16 · xfer_hi)`
+ *
+ * where `xfer_lo = (commitment_lo, source_handle_lo)` is the source-pubkey
+ * extraction of the validity proof's grouped_lo ciphertext (and hi
+ * analogously). This is the value that needs to byte-equal the equality
+ * proof's `new_source_ciphertext` field for the transfer to NOT bail with
+ * `Custom(27) BalanceMismatch` at the post-verify check (processor.rs:890).
+ *
+ * We expose this so the FE can drive `sourceCt` from the wasm/curve25519-dalek
+ * stack instead of re-deriving via byte-cancellation algebra in JS — by
+ * construction the bytes match what the on-chain syscall produces.
+ *
+ * Inputs:
+ *   - `available_balance` : 64 bytes (PodElGamalCiphertext: commit(32) || handle(32))
+ *   - `source_pubkey`     : 32 bytes (compressed Ristretto)
+ *   - `amount_lo`         : u64 (low 16 bits of transfer amount)
+ *   - `amount_hi`         : u64 (high 32 bits)
+ *   - `opening_lo`        : 32 bytes (canonical scalar)
+ *   - `opening_hi`        : 32 bytes (canonical scalar)
+ *
+ * Returns 64 bytes (PodElGamalCiphertext = `new_source.commit || new_source.handle`).
+ */
+export function transfer_new_source_ciphertext(available_balance: Uint8Array, source_pubkey: Uint8Array, amount_lo: bigint, amount_hi: bigint, opening_lo: Uint8Array, opening_hi: Uint8Array): Uint8Array;
 
 /**
  * Generate a `ZeroCiphertext` proof — proves that `ciphertext` is an

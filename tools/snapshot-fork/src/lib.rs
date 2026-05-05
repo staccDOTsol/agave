@@ -28,6 +28,7 @@
 pub mod cli;
 pub mod mock;
 pub mod output;
+pub mod shards;
 pub mod solana;
 pub mod source;
 

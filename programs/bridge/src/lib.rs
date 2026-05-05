@@ -66,7 +66,27 @@ pub use instructions::*;
 
 // Placeholder program ID. Replace with the real deployed address before mainnet launch;
 // SPEC.md §2.1 lists `BRIDGE_PROGRAM_ID = TBD`.
-declare_id!("Bridge1111111111111111111111111111111111111");
+// Real deployed program ID (replaces the placeholder vanity address).
+declare_id!("LA7h3hjvD62MeTtdeE4h2vq3EGxbU1oqzHtewp4xb9b");
+
+/// Hardcoded admin pubkey gating the one-shot `register_asset` ix.
+///
+/// `register_asset` initializes per-asset config PDAs (`AssetConfig`,
+/// `RatioState`, `NonceOutCounter`) AND bootstraps the global
+/// `FederationSet` on first call. Originally bare `Signer` with no
+/// constraint — same front-run hole the auditor flagged for
+/// `update_megadrop` and `init_subsidy`: on a fresh deploy anyone could
+/// call `register_asset` first and bind their own pubkeys as the
+/// federation set, taking permanent control of every subsequent
+/// `update_ratio` and `mint` attestation.
+///
+/// Same key as `staccana_megadrop::ADMIN_AUTHORITY` /
+/// `staccana_validator_subsidy::ADMIN_AUTHORITY` — staccana's BPF
+/// upgrade-authority. Keypair on val-1 at
+/// `/etc/staccana/keys/upgrade-authority.json`.
+// Anchor 1.x doesn't re-export `pubkey!` — use the const-fn path directly.
+pub const ADMIN_AUTHORITY: Pubkey =
+    Pubkey::from_str_const("HSwe2Y7i6CPuJGb27rBwUumt8HZ8sCpQvG4PBBiC5f4y");
 
 #[program]
 pub mod staccana_bridge {

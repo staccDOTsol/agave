@@ -182,6 +182,26 @@ export const CT_IX = {
   ConfigureAccountWithRegistry: 14,
 } as const;
 
+/**
+ * **Historical**: in older standalone `spl-token-2022` (v3.x / v4.x) crates,
+ * variant 13 was `TransferWithSplitProofs` and `Transfer` (= 7) hard-coded
+ * inline-only proofs. We do NOT target that ABI.
+ *
+ * The deployed Token-22 on staccana is `spl-token-2022 8.0.1` →
+ * `spl-token-2022-interface 2.1.0` (vendored by `agave-feature-set 2.3.13`).
+ * In that version `TransferWithSplitProofs` was collapsed back into the
+ * plain `Transfer` opcode (selecting context-state mode via
+ * `proof_instruction_offset = 0` per docstring on `TransferInstructionData`),
+ * and variant 13 is now `TransferWithFee`. Using opcode 13 with a
+ * mint that has no fee config logs `TransferWithFee` and rejects with
+ * `InvalidInstructionData` at the dispatcher.
+ *
+ * This export is kept ONLY to flag the version skew; do not use it for
+ * the live wire format. See {@link prepareConfidentialTransferIxs} for the
+ * correct opcode-7 + offsets=0 path.
+ */
+export const CT_IX_TRANSFER_WITH_SPLIT_PROOFS_LEGACY_V3 = 13;
+
 /** `AeCiphertext` byte length — 12-byte nonce + 24-byte AES-128-GCM-SIV ct. */
 export const AE_CIPHERTEXT_LEN = 36;
 
@@ -491,7 +511,9 @@ export type ProofKind =
   | "batched_range_proof_u64"
   | "batched_range_proof_u128"
   | "batched_grouped_ciphertext_3_handles_validity"
-  | "pedersen_commit";
+  | "pedersen_commit"
+  | "elgamal_decrypt_handle"
+  | "transfer_new_source_ciphertext";
 
 /**
  * All six proof kinds the `/api/confidential/proof` route generates via
@@ -513,6 +535,8 @@ const SERVER_SIDE_KINDS: readonly ProofKind[] = [
   "batched_range_proof_u128",
   "batched_grouped_ciphertext_3_handles_validity",
   "pedersen_commit",
+  "elgamal_decrypt_handle",
+  "transfer_new_source_ciphertext",
 ];
 
 interface ProofResponse {
@@ -797,7 +821,7 @@ export const PROOF_CONTEXT_STATE_SIZE = {
 } as const;
 
 /** Decode a base64 string to bytes — works in both browser and node. */
-function base64ToBytes(b64: string): Uint8Array {
+export function base64ToBytes(b64: string): Uint8Array {
   if (typeof atob !== "undefined") {
     const bin = atob(b64);
     const out = new Uint8Array(bin.length);
@@ -1245,11 +1269,13 @@ export async function buildTransferInstruction(
 
     // Compute the new source ciphertext = (commitment_new, handle_new)
     // under the SENDER's pubkey, with `r = newBalOpen` shared between the
-    // commitment (from wasm) and handle (from noble-curves). This is the
-    // crucial bit: the equality proof binds (sourceCiphertext, commitment,
-    // opening, amount) all under the SAME randomness, so the wasm
-    // `pedersen_commit(amount, opening)` IS the commitment-half of the
-    // ciphertext by definition (twisted ElGamal == Pedersen + handle).
+    // commitment AND handle. BOTH halves go through the wasm (and therefore
+    // through curve25519-dalek — same crypto stack as the on-chain
+    // `subtract_with_lo_hi` syscall). Earlier this code computed the handle
+    // via `@noble/curves` Ristretto in JS, but a subtle canonical-encoding
+    // mismatch between @noble and curve25519-dalek surfaced as
+    // `Custom(27) BalanceMismatch` after proof verification succeeded —
+    // moving the handle into wasm eliminates that.
     const commitResp = await requestServerSideProof(
       "pedersen_commit",
       { amount: newBalPlain.toString(), opening: bytesToBase64(newBalOpen) },
@@ -1264,87 +1290,94 @@ export async function buildTransferInstruction(
       );
     }
     newBalCommit = commitBytes;
-    const handleBytes = elgamalDecryptHandle(args.senderElgamalPubkey, newBalOpen);
+    const handleResp = await requestServerSideProof(
+      "elgamal_decrypt_handle",
+      {
+        pubkey: bytesToBase64(args.senderElgamalPubkey),
+        opening: bytesToBase64(newBalOpen),
+      },
+      fetchImpl,
+    );
+    const handleBytes = base64ToBytes(handleResp.proofData);
+    if (handleBytes.length !== 32) {
+      throw new ProofUnavailableError(
+        "elgamal_decrypt_handle",
+        "invalid_response",
+        `elgamal_decrypt_handle returned ${handleBytes.length} bytes, expected 32`,
+      );
+    }
     sourceCt = joinCiphertext(commitBytes, handleBytes);
 
-    // **General-case override.** When the caller provides the actual on-chain
-    // `available_balance` ciphertext, recompute `sourceCt` as the byte-exact
-    // result of `current - combined_lo_hi` so it matches what Token-22's
-    // `process_source_for_transfer` will compute. This works for any prior
-    // CT history (multiple deposits, prior transfers, whatever) — unlike
-    // the `newBalOpen = -combined_op` byte-cancellation trick above which
-    // only handles the specific case where `current_available.handle ==
-    // identity` (= no prior transfers since the last fresh Configure or
-    // Apply-from-zero).
+    // **General-case path.** When the caller provides the on-chain
+    // `available_balance` ciphertext, override `sourceCt` with what the
+    // wasm helper computes via `subtract_with_lo_hi(avail, src_xfer_lo,
+    // src_xfer_hi)` — same crypto stack (curve25519-dalek) as the on-chain
+    // syscall, so the bytes match by construction regardless of whether
+    // `avail.handle` is identity (fresh post-Configure+Deposit+Apply) or
+    // non-identity (after prior CT transfers, which leave `avail.handle =
+    // -(prior_combined_op)·src_pk`).
     //
-    // The equality proof's algebraic check holds regardless of whether
-    // `(sourceCt, newBalCommit)` share the same randomness — the proof binds
-    // them to the same plaintext via the keypair. So we leave `newBalOpen` /
-    // `newBalCommit` random (well, the synthesized values from above) and
-    // ONLY override `sourceCt`. The wasm prover will reject with
-    // `InconsistentInput` if the supplied ciphertext doesn't decrypt to
-    // `newBalPlain` under the keypair, which it always will here because
-    // `current_available` encrypts `currentAvailablePlaintext` and we
-    // subtract `args.amount`.
+    // This works for ANY CT account state — no preconditions on
+    // `avail.handle` or `avail.commit` shape needed; the math is just
+    // `new = avail - combined`, byte-equal to what Token-22's
+    // `process_source_for_transfer` recomputes from chain state.
     if (args.currentAvailableCiphertext) {
       if (args.currentAvailableCiphertext.length !== ELGAMAL_CIPHERTEXT_LEN) {
         throw new RangeError(
           `currentAvailableCiphertext must be ${ELGAMAL_CIPHERTEXT_LEN} bytes (got ${args.currentAvailableCiphertext.length})`,
         );
       }
-      // Compute `combined_lo_hi` = source-side(transfer_lo) + 2^16 *
-      // source-side(transfer_hi). Source-side ciphertext = (commitment,
-      // opening * sender_pk).
-      const SHIFT = 1n << 16n;
-      // Pull pedersenLo/pedersenHi from the server BEFORE the override —
-      // we need them to compute the combined commitment client-side.
-      const _amtLoEarly = args.amount & 0xffffn;
-      const _amtHiEarly = args.amount >> 16n;
-      const _commitLoResp = await requestServerSideProof(
-        "pedersen_commit",
+
+      // **Override sourceCt with the wasm-computed `subtract_with_lo_hi`
+      // result.** Up to this point we've been computing sourceCt via
+      // byte-cancellation algebra in JS — which SHOULD produce bytes
+      // identical to what the on-chain syscall produces, but multiple
+      // attempts (with @noble Ristretto, then with the wasm
+      // `elgamal_decrypt_handle` helper) still hit `Custom(27)
+      // BalanceMismatch`. Rather than spending more cycles bisecting which
+      // algebraic step lost a byte somewhere, just delegate the WHOLE
+      // sourceCt computation to a wasm helper that runs the IDENTICAL math
+      // on-chain `process_source_for_transfer` runs (curve25519-dalek
+      // RistrettoPoint operations on the same `available_balance`,
+      // `(commit_lo, src_handle_lo)`, `(commit_hi, src_handle_hi)`
+      // inputs). If on-chain bytes match what we read into
+      // `currentAvailableCiphertext`, this is byte-equal by construction.
+      //
+      // The equality proof's algebraic check (`decrypt(sourceCt) ==
+      // newBalPlain`) still holds: this sourceCt also decrypts to
+      // `avail_plain - amount = newBalPlain` because
+      // `currentAvailablePlaintext - amount` was the basis for newBalPlain
+      // above. We keep newBalOpen/newBalCommit from the byte-cancellation
+      // path; they're a separate witness pair that the equality proof
+      // binds to the same plaintext (newBalPlain) — independent of
+      // sourceCt's randomness.
+      const newSourceResp = await requestServerSideProof(
+        "transfer_new_source_ciphertext",
         {
-          amount: _amtLoEarly.toString(),
-          opening: bytesToBase64(openingLo),
+          availableBalance: bytesToBase64(args.currentAvailableCiphertext),
+          sourcePubkey: bytesToBase64(args.senderElgamalPubkey),
+          amountLo: (args.amount & 0xffffn).toString(),
+          amountHi: (args.amount >> 16n).toString(),
+          openingLo: bytesToBase64(openingLo),
+          openingHi: bytesToBase64(openingHi),
+          // Pass the senderAta so the server can cross-check our supplied
+          // `availableBalance` against a fresh on-chain fetch at "processed"
+          // commitment. If they don't match (= our read was stale), we get
+          // a 409 here BEFORE wasting wallet popups and on-chain fees on a
+          // tx that would BalanceMismatch.
+          senderAta: args.ata.toBase58(),
         },
         fetchImpl,
       );
-      const _commitHiResp = await requestServerSideProof(
-        "pedersen_commit",
-        {
-          amount: _amtHiEarly.toString(),
-          opening: bytesToBase64(openingHi),
-        },
-        fetchImpl,
-      );
-      const _pedLoBytes = base64ToBytes(_commitLoResp.proofData);
-      const _pedHiBytes = base64ToBytes(_commitHiResp.proofData);
-      const _loCommitPt = RistrettoPoint.fromBytes(_pedLoBytes);
-      const _hiCommitPt = RistrettoPoint.fromBytes(_pedHiBytes);
-      const _combinedCommitPt = _loCommitPt.add(_hiCommitPt.multiply(SHIFT));
-      // Combined handle = (opening_lo + 2^16 * opening_hi) * sender_pk.
-      const loBigForHandle = leBytesToBigInt(openingLo);
-      const hiBigForHandle = leBytesToBigInt(openingHi);
-      const combinedOpenScalar =
-        (loBigForHandle + SHIFT * hiBigForHandle) % RISTRETTO255_ORDER;
-      const combinedOpenBytes = scalarToLeBytes(combinedOpenScalar);
-      const _combinedHandleBytes = elgamalDecryptHandle(
-        args.senderElgamalPubkey,
-        combinedOpenBytes,
-      );
-      const _combinedHandlePt = RistrettoPoint.fromBytes(_combinedHandleBytes);
-      // Read on-chain current_available.
-      const _curCommitPt = RistrettoPoint.fromBytes(
-        args.currentAvailableCiphertext.slice(0, 32),
-      );
-      const _curHandlePt = RistrettoPoint.fromBytes(
-        args.currentAvailableCiphertext.slice(32, 64),
-      );
-      // Subtract: new = current - combined.
-      const _newCommitPt = _curCommitPt.subtract(_combinedCommitPt);
-      const _newHandlePt = _curHandlePt.subtract(_combinedHandlePt);
-      sourceCt = new Uint8Array(64);
-      sourceCt.set(_newCommitPt.toBytes(), 0);
-      sourceCt.set(_newHandlePt.toBytes(), 32);
+      const newSourceBytes = base64ToBytes(newSourceResp.proofData);
+      if (newSourceBytes.length !== ELGAMAL_CIPHERTEXT_LEN) {
+        throw new ProofUnavailableError(
+          "transfer_new_source_ciphertext",
+          "invalid_response",
+          `transfer_new_source_ciphertext returned ${newSourceBytes.length} bytes, expected ${ELGAMAL_CIPHERTEXT_LEN}`,
+        );
+      }
+      sourceCt = newSourceBytes;
     }
   }
 
@@ -1542,6 +1575,69 @@ export async function buildTransferInstruction(
   // catch-able error so the caller in `SecretBalancePanel.tsx` falls
   // through to the public `TransferChecked` path instead of bubbling a
   // `WalletSendTransactionError: Index out of range` from the wallet.
+  // **Auditor ciphertext bytes for the ix data.**
+  //
+  // Token-22's `check_auditor_ciphertext` (lib.rs:154 in v8.0.1) does a
+  // byte-equality check of the `transfer_amount_auditor_ciphertext_{lo,hi}`
+  // bytes from the ix data against the auditor ciphertext extracted from
+  // the validity proof's grouped_lo/hi at index 2 (auditor pubkey index).
+  // **Mismatch returns `Custom(27) BalanceMismatch`** — the SAME error code
+  // as the post-subtract balance check at processor.rs:890, which
+  // misled us for many iterations (we kept assuming the failure was at the
+  // subtract check; tracing the actual call shows the auditor check fires
+  // first, line 677-682 in process_transfer).
+  //
+  // For our zero-auditor mint (`auditor_elgamal_pubkey == None`, encoded as
+  // 32 zeros), the auditor ciphertext is:
+  //   commit  = pedersen(amount_{lo,hi}, opening_{lo,hi})  // = pedersenLo/Hi above
+  //   handle  = opening_{lo,hi} · auditor_pk
+  //           = opening · identity_point
+  //           = identity   (32 zero bytes)
+  // So `auditorCt = pedersen(amount, opening) || 32 zeros`.
+  //
+  // (Earlier this code defaulted to all-64-zeros when `args.transferAmount
+  // AuditorCiphertext{Lo,Hi}` were absent, which is what was producing the
+  // mismatch — the commit half is non-zero for any non-zero amount.)
+  let resolvedAuditorCtLo: Uint8Array;
+  let resolvedAuditorCtHi: Uint8Array;
+  if (args.transferAmountAuditorCiphertextLo) {
+    if (args.transferAmountAuditorCiphertextLo.length !== ELGAMAL_CIPHERTEXT_LEN) {
+      throw new RangeError("transferAmountAuditorCiphertextLo must be 64 bytes");
+    }
+    resolvedAuditorCtLo = args.transferAmountAuditorCiphertextLo;
+  } else {
+    // Synthesize from pedersenLo + identity-handle. Verify the auditor pk
+    // is indeed the identity (zero bytes) — otherwise we'd need to compute
+    // `opening · auditor_pk` which is non-trivial without an auditor key.
+    const auditorIsIdentity = args.auditorElgamalPubkey.every((b) => b === 0);
+    if (!auditorIsIdentity) {
+      throw new Error(
+        "Mint has a non-zero auditor pubkey but caller didn't supply " +
+          "transferAmountAuditorCiphertextLo. Compute it via " +
+          "`auditorPk.encrypt_with(amount_lo, opening_lo).to_bytes()`.",
+      );
+    }
+    resolvedAuditorCtLo = new Uint8Array(64);
+    resolvedAuditorCtLo.set(pedersenLo, 0); // commit half
+    // handle half stays 32 zero bytes (identity)
+  }
+  if (args.transferAmountAuditorCiphertextHi) {
+    if (args.transferAmountAuditorCiphertextHi.length !== ELGAMAL_CIPHERTEXT_LEN) {
+      throw new RangeError("transferAmountAuditorCiphertextHi must be 64 bytes");
+    }
+    resolvedAuditorCtHi = args.transferAmountAuditorCiphertextHi;
+  } else {
+    const auditorIsIdentity = args.auditorElgamalPubkey.every((b) => b === 0);
+    if (!auditorIsIdentity) {
+      throw new Error(
+        "Mint has a non-zero auditor pubkey but caller didn't supply " +
+          "transferAmountAuditorCiphertextHi.",
+      );
+    }
+    resolvedAuditorCtHi = new Uint8Array(64);
+    resolvedAuditorCtHi.set(pedersenHi, 0);
+  }
+
   const TRANSFER_IX_DATA_LEN =
     2 + AE_CIPHERTEXT_LEN + 64 + 64 + 1 + 1 + 1;
   const data = new Uint8Array(TRANSFER_IX_DATA_LEN);
@@ -1550,9 +1646,9 @@ export async function buildTransferInstruction(
   data[p++] = CT_IX.Transfer;
   data.set(args.newSourceDecryptableAvailableBalance, p);
   p += AE_CIPHERTEXT_LEN;
-  data.set(auditorCtLo, p);
+  data.set(resolvedAuditorCtLo, p);
   p += 64;
-  data.set(auditorCtHi, p);
+  data.set(resolvedAuditorCtHi, p);
   p += 64;
   data[p++] = 1; // equality at +1
   data[p++] = 2; // validity at +2
@@ -1561,7 +1657,7 @@ export async function buildTransferInstruction(
     throw new RangeError(
       `Transfer ix data layout drift: wrote ${p} of ${TRANSFER_IX_DATA_LEN} bytes ` +
         `(buffer length ${data.length}). Inputs: newSrcDecryptable=${args.newSourceDecryptableAvailableBalance.length}, ` +
-        `auditorLo=${auditorCtLo.length}, auditorHi=${auditorCtHi.length}.`,
+        `auditorLo=${resolvedAuditorCtLo.length}, auditorHi=${resolvedAuditorCtHi.length}.`,
     );
   }
 
@@ -1747,17 +1843,87 @@ export async function prepareConfidentialTransferIxs(
     ),
   ];
 
-  // Re-build the Transfer ix, but with offsets=0 (= "the proofs are in
-  // context state accounts, look them up in the account list") and the 3
-  // context state pubkeys appended between `destination` and `owner`.
-  // The data layout is identical to the inline form except the trailing
-  // 3 offset bytes are all zero. We copy the existing `inlineTransfer.data`
-  // and rewrite just those 3 bytes — saves re-computing the auditor cts.
-  const transferData = new Uint8Array(inlineTransfer.data);
-  // [bytes total - 3 .. -2 .. -1] = [eqOffset, validityOffset, rangeOffset]
-  transferData[transferData.length - 3] = 0;
-  transferData[transferData.length - 2] = 0;
-  transferData[transferData.length - 1] = 0;
+  // Build the plain `Transfer` ix — opcode 7. In the deployed Token-22
+  // (agave 2.3.13 ships `spl-token-2022 8.0.1` → `spl-token-2022-interface
+  // 2.1.0`), the plain `Transfer` opcode supports BOTH inline and context-
+  // state-account modes via the proof-instruction-offset fields: per the
+  // doc-comment on `TransferInstructionData` (interface 2.1.0
+  // src/extension/confidential_transfer/instruction.rs:604-617), "If the
+  // offset is `0`, then use a context state account for the proof."
+  //
+  // Earlier versions of this file mistakenly believed that `Transfer`
+  // hard-codes inline-only and that opcode 13 is `TransferWithSplitProofs`.
+  // That's true in standalone `spl-token-2022 v3.x/v4.x` but NOT in the
+  // interface-2.1 split we're running against — there, opcode 13 is
+  // `TransferWithFee` (it was reordered when `TransferWithSplitProofs` was
+  // collapsed back into `Transfer`). Using opcode 13 on the live program
+  // would log "ConfidentialTransferInstruction::TransferWithFee" + fail
+  // with `InvalidInstructionData`.
+  //
+  // Wire format per `TransferInstructionData` in interface 2.1.0:
+  //   [0]        = CT_EXT_TAG (27)
+  //   [1]        = CT_IX.Transfer (7)
+  //   [2..38]    = new_source_decryptable_available_balance (36)
+  //   [38..102]  = transfer_amount_auditor_ciphertext_lo (64)
+  //   [102..166] = transfer_amount_auditor_ciphertext_hi (64)
+  //   [166]      = equality_proof_instruction_offset = 0  ⇒ context-state
+  //   [167]      = ciphertext_validity_proof_instruction_offset = 0
+  //   [168]      = range_proof_instruction_offset = 0
+  // Total: 169 bytes.
+  //
+  // Account list per the same doc-comment (single owner, all proofs in
+  // context-state mode → instructions sysvar IS still required to be
+  // present per the v8.0.1 processor's `next_account_info` ordering even
+  // when no inline proofs run; the optional/absent variant only applies
+  // when the program reads it for the inline path. We pass it; Token-22
+  // ignores it when offsets are zero):
+  //   0. source ATA       [writable]
+  //   1. mint             [readonly]
+  //   2. destination ATA  [writable]
+  //   3. instructions sysvar [readonly]   (placeholder for context-state mode)
+  //   4. equality_ctx     [readonly]
+  //   5. validity_ctx     [readonly]
+  //   6. range_ctx        [readonly]
+  //   7. owner            [signer]
+  // We supply the auditor ciphertexts straight from the inline-form ix
+  // since the equality/validity proofs already encoded them.
+  const inlineTransferData = new Uint8Array(inlineTransfer.data);
+  // inline layout: [27, 7, decryptable(36), auditor_lo(64), auditor_hi(64),
+  // eq_off, validity_off, range_off]. Pull the 64+64 auditor bytes out so
+  // we can rewrite offsets to zero.
+  if (inlineTransferData.length !== 2 + AE_CIPHERTEXT_LEN + 64 + 64 + 3) {
+    throw new RangeError(
+      `inline Transfer ix data unexpected length: ${inlineTransferData.length}`,
+    );
+  }
+  const decryptableBytes = inlineTransferData.slice(2, 2 + AE_CIPHERTEXT_LEN);
+  const auditorLoBytes = inlineTransferData.slice(
+    2 + AE_CIPHERTEXT_LEN,
+    2 + AE_CIPHERTEXT_LEN + 64,
+  );
+  const auditorHiBytes = inlineTransferData.slice(
+    2 + AE_CIPHERTEXT_LEN + 64,
+    2 + AE_CIPHERTEXT_LEN + 128,
+  );
+  const TRANSFER_CTX_DATA_LEN = 2 + AE_CIPHERTEXT_LEN + 64 + 64 + 3; // 169
+  const transferData = new Uint8Array(TRANSFER_CTX_DATA_LEN);
+  let p = 0;
+  transferData[p++] = CT_EXT_TAG;
+  transferData[p++] = CT_IX.Transfer;
+  transferData.set(decryptableBytes, p);
+  p += AE_CIPHERTEXT_LEN;
+  transferData.set(auditorLoBytes, p);
+  p += 64;
+  transferData.set(auditorHiBytes, p);
+  p += 64;
+  transferData[p++] = 0; // equality_proof_instruction_offset = 0 → context-state
+  transferData[p++] = 0; // ciphertext_validity_proof_instruction_offset = 0
+  transferData[p++] = 0; // range_proof_instruction_offset = 0
+  if (p !== TRANSFER_CTX_DATA_LEN) {
+    throw new RangeError(
+      `Transfer (ctx-state) ix data layout drift: wrote ${p} of ${TRANSFER_CTX_DATA_LEN}`,
+    );
+  }
 
   const transferIx = new TransactionInstruction({
     programId: TOKEN_2022_PROGRAM_ID,
@@ -1765,9 +1931,16 @@ export async function prepareConfidentialTransferIxs(
       { pubkey: args.ata, isWritable: true, isSigner: false },
       { pubkey: args.mint, isWritable: false, isSigner: false },
       { pubkey: args.destinationAta, isWritable: true, isSigner: false },
-      // Account-list shape for context-state mode (per
-      // spl-token-2022::confidential_transfer::process_transfer):
-      //   [..., eq_ctx, validity_ctx, range_ctx, owner].
+      // Note: NO instructions sysvar slot in pure context-state mode. Per
+      // `verify_transfer_proof` in spl-token-2022 v8.0.1
+      // (extension/confidential_transfer/verify_proof.rs lines 65-72), the
+      // sysvar `next_account_info()` consumption is conditional on
+      // `any(offsets) != 0`. With all three offsets = 0 the iterator
+      // advances directly to the equality context state account. Including
+      // a sysvar placeholder here would shift the iterator and make
+      // `verify_and_extract_context` read the sysvar pubkey as the
+      // equality-ctx account, fail `check_zk_elgamal_proof_program_account`,
+      // and bail with `IncorrectProgramId`.
       { pubkey: eqKp.publicKey, isWritable: false, isSigner: false },
       { pubkey: validityKp.publicKey, isWritable: false, isSigner: false },
       { pubkey: rangeKp.publicKey, isWritable: false, isSigner: false },
@@ -1996,7 +2169,7 @@ export async function encryptAvailableBalance(
 // Tiny base64 helper (works in node + browser without depending on Buffer).
 // ---------------------------------------------------------------------------
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   if (typeof btoa !== "undefined") {
     let s = "";
     for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);

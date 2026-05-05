@@ -18,12 +18,18 @@ use anchor_lang::prelude::*;
 /// Hard cap on validators in the registry. Sized for v1 (single-digit validators) plus
 /// generous headroom; bumping requires a redeploy. The registry is iterated linearly in
 /// `distribute_yield`, so the upper bound also caps distribution-ix CU cost.
-pub const MAX_VALIDATORS: usize = 64;
+///
+/// Set to 16 (down from 64) so `ValidatorRegistry` is small enough that it +
+/// `SubsidyConfig` both fit on SBPF's 4 KB stack frame at once. With 64 the
+/// combined deserialize-on-stack footprint exceeded the budget and crashed
+/// `init_subsidy` with `Access violation in stack frame 3`.
+pub const MAX_VALIDATORS: usize = 8;
 
-/// Hard cap on federation set size. Mirrors `staccana_bridge::state::MAX_FEDERATION_MEMBERS`
-/// (32) so attestations look identical across crates and a future shared
-/// `FederationSet` PDA is straightforward.
-pub const MAX_FEDERATION_MEMBERS: usize = 32;
+/// Hard cap on federation set size. Was 32 (mirror of bridge); reduced to 16
+/// for the same SBPF stack-frame reason as `MAX_VALIDATORS`. Bridge can stay
+/// at 32 — staccana subsidy doesn't share the federation set wire-form with
+/// bridge, only the ed25519 attestation message format.
+pub const MAX_FEDERATION_MEMBERS: usize = 16;
 
 /// SPEC §7.3 constants pinned next to consumers. Values here are normative — if SPEC.md
 /// changes, edit both in lockstep.

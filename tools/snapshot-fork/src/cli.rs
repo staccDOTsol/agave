@@ -7,10 +7,11 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use staccana_genesis::{build_genesis, GenesisOutput};
+use staccana_genesis::{build_genesis, build_genesis_with_tree, GenesisOutput};
 
 use crate::mock::MockSnapshot;
 use crate::output::{write_to_path, OutputFormat};
+use crate::shards::emit_shards;
 use crate::solana::SolanaSnapshot;
 use crate::source::SnapshotSource;
 
@@ -39,6 +40,18 @@ pub struct Args {
     /// Snapshot source implementation.
     #[arg(long, value_enum, default_value_t = SourceKind::Mock)]
     pub source: SourceKind,
+
+    /// If set, write 4096 sharded `.jsonl` files (one line per claimable
+    /// leaf, with its Merkle inclusion proof) into this directory.
+    ///
+    /// Shard filename: the first 3 hex chars of the leaf's pubkey bytes,
+    /// e.g. `7af.jsonl`. Empty shards are still written (zero-byte) so the
+    /// edge function can issue deterministic GETs for any shard id.
+    ///
+    /// This adds significant memory cost — see [`MerkleTreeWithLayers`] in
+    /// `staccana-genesis` — and only matters for the production index build.
+    #[arg(long)]
+    pub emit_shards_dir: Option<PathBuf>,
 }
 
 /// Output format flag, exposed as a clap-friendly enum so the help text
@@ -78,16 +91,39 @@ pub fn build_source(kind: SourceKind, snapshot: PathBuf) -> Box<dyn SnapshotSour
 }
 
 /// End-to-end pipeline. Loads accounts, partitions them, writes the result.
+///
+/// When `args.emit_shards_dir` is set, also retains the full Merkle tree and
+/// emits one `.jsonl` shard file per first-3-hex-char bucket of the leaf
+/// pubkey, each line carrying `{pubkey, lamports, leafIndex, proof}` so the
+/// edge function can serve a single-leaf inclusion proof from blob storage.
 pub fn run(args: Args) -> Result<RunReport> {
-    let source = build_source(args.source, args.snapshot);
+    let Args {
+        snapshot,
+        output: output_path,
+        format,
+        source,
+        emit_shards_dir,
+    } = args;
+
+    let source = build_source(source, snapshot);
     let accounts = source.accounts()?;
-    let output = build_genesis(accounts);
-    let format: OutputFormat = args.format.into();
-    write_to_path(&output, &args.output, format)?;
+    let format: OutputFormat = format.into();
+
+    let (output, shards_emitted) = match emit_shards_dir {
+        Some(dir) => {
+            let (output, tree) = build_genesis_with_tree(accounts);
+            let count = emit_shards(&dir, &tree)?;
+            (output, Some(count))
+        }
+        None => (build_genesis(accounts), None),
+    };
+
+    write_to_path(&output, &output_path, format)?;
     Ok(RunReport {
         output,
-        output_path: args.output,
+        output_path,
         format,
+        shards_emitted,
     })
 }
 
@@ -98,6 +134,9 @@ pub struct RunReport {
     pub output: GenesisOutput,
     pub output_path: PathBuf,
     pub format: OutputFormat,
+    /// Number of leaves written across all shards, when `--emit-shards-dir`
+    /// was set. `None` when shard emission was skipped.
+    pub shards_emitted: Option<usize>,
 }
 
 #[cfg(test)]
@@ -163,6 +202,7 @@ mod tests {
             output: out_file.path().to_path_buf(),
             format: Format::Json,
             source: SourceKind::Mock,
+            emit_shards_dir: None,
         };
 
         let report = run(args).expect("pipeline succeeds");
@@ -202,6 +242,7 @@ mod tests {
             output: out_file.path().to_path_buf(),
             format: Format::Bincode,
             source: SourceKind::Mock,
+            emit_shards_dir: None,
         };
 
         let report = run(args).expect("pipeline succeeds");
@@ -225,6 +266,7 @@ mod tests {
             output: out_file.path().to_path_buf(),
             format: Format::Bincode,
             source: SourceKind::Solana,
+            emit_shards_dir: None,
         };
         let err = run(args).unwrap_err();
         let msg = format!("{err:#}");
@@ -245,6 +287,61 @@ mod tests {
         assert_eq!(parsed.output, PathBuf::from("/tmp/o.json"));
         assert_eq!(parsed.format, Format::Json);
         assert_eq!(parsed.source, SourceKind::Mock);
+        assert_eq!(parsed.emit_shards_dir, None);
+    }
+
+    #[test]
+    fn args_parse_emit_shards_dir() {
+        let parsed = Args::try_parse_from([
+            "staccana-snapshot-fork",
+            "--snapshot",
+            "/tmp/s.json",
+            "--output",
+            "/tmp/o.json",
+            "--emit-shards-dir",
+            "/var/cache/lazy-claim-shards",
+        ])
+        .expect("parse");
+        assert_eq!(
+            parsed.emit_shards_dir,
+            Some(PathBuf::from("/var/cache/lazy-claim-shards"))
+        );
+    }
+
+    #[test]
+    fn end_to_end_emits_shards_when_requested() {
+        let token_program = pk(99);
+        let fixture = write_json_fixture(&[
+            (pk(1), SYSTEM_PROGRAM_ID, 0, 1_000),
+            (pk(2), SYSTEM_PROGRAM_ID, 0, 2_000),
+            (pk(3), token_program, 165, 2_039_280), // treasury
+            (pk(4), SYSTEM_PROGRAM_ID, 0, 4_000),
+        ]);
+        let out_file = out_tempfile(".json");
+        let shard_dir = tempfile::tempdir().expect("tempdir");
+        let args = Args {
+            snapshot: fixture.path().to_path_buf(),
+            output: out_file.path().to_path_buf(),
+            format: Format::Json,
+            source: SourceKind::Mock,
+            emit_shards_dir: Some(shard_dir.path().to_path_buf()),
+        };
+
+        let report = run(args).expect("pipeline succeeds");
+        assert_eq!(report.output.claimable_count, 3);
+        assert_eq!(report.shards_emitted, Some(3));
+
+        // 4096 shard files exist, but most are empty.
+        let entries: Vec<_> = std::fs::read_dir(shard_dir.path())
+            .expect("readdir")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 4096);
+        let total_size: u64 = entries
+            .iter()
+            .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+            .sum();
+        assert!(total_size > 0, "expected at least one non-empty shard");
     }
 
     #[test]

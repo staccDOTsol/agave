@@ -29,3 +29,7 @@
 # Genesis artifacts (large, regenerable from snapshot tooling)
 /genesis-out
 /snapshot-cache
+.vercel
+
+# Out-of-tree wasm package (built and published to npm separately)
+/proofs-pkg

@@ -19,7 +19,7 @@
 use crate::attestation::{
     apply_bps_fee, build_mint_message, check_unique_indices, mint_amount_for_value,
 };
-use crate::ed25519::{parse_ed25519_at, require_instructions_sysvar};
+use crate::ed25519::{parse_ed25519_at, parse_ed25519_batch_at, require_instructions_sysvar};
 use crate::error::BridgeError;
 use crate::state::{AssetConfig, FederationSet, NonceConsumed, RatioState};
 use anchor_lang::prelude::*;
@@ -121,23 +121,55 @@ pub fn handler(ctx: Context<BridgeMint>, args: MintArgs) -> Result<()> {
     let current_ix_index = solana_instructions_sysvar::load_current_index_checked(sysvar)
         .map_err(|_| BridgeError::BadInstructionsSysvar)?;
     let m = fed.m as usize;
+
+    // Two acceptable layouts (back-compat): the federation may have submitted M
+    // separate single-sig precompile ixs immediately preceding this one, OR a
+    // single batched precompile ix carrying all M sigs. Try the batched form
+    // first since it's the smaller-footprint path used by post-v1 relayers.
     require!(
-        (current_ix_index as usize) >= m,
+        (current_ix_index as usize) >= 1,
         BridgeError::InsufficientFederationSignatures
     );
 
-    for (i, &member_idx) in args.federation_indices.iter().enumerate() {
-        let ix_index = (current_ix_index as usize) - m + i;
-        let parsed = parse_ed25519_at(sysvar, ix_index)?;
+    let batched_ok = matches!(
+        parse_ed25519_batch_at(sysvar, (current_ix_index as usize) - 1),
+        Ok(ref batch) if batch.len() == m,
+    );
+
+    if batched_ok {
+        // SAFETY: matched the predicate above.
+        let batch = parse_ed25519_batch_at(sysvar, (current_ix_index as usize) - 1)
+            .expect("re-parse same ix");
+        for (i, &member_idx) in args.federation_indices.iter().enumerate() {
+            let parsed = &batch[i];
+            require!(
+                parsed.message == expected_msg,
+                BridgeError::BadAttestationMessage
+            );
+            let expected_member = fed.members[member_idx as usize];
+            require!(
+                parsed.pubkey == expected_member.to_bytes(),
+                BridgeError::BadFederationSigner
+            );
+        }
+    } else {
         require!(
-            parsed.message == expected_msg,
-            BridgeError::BadAttestationMessage
+            (current_ix_index as usize) >= m,
+            BridgeError::InsufficientFederationSignatures
         );
-        let expected_member = fed.members[member_idx as usize];
-        require!(
-            parsed.pubkey == expected_member.to_bytes(),
-            BridgeError::BadFederationSigner
-        );
+        for (i, &member_idx) in args.federation_indices.iter().enumerate() {
+            let ix_index = (current_ix_index as usize) - m + i;
+            let parsed = parse_ed25519_at(sysvar, ix_index)?;
+            require!(
+                parsed.message == expected_msg,
+                BridgeError::BadAttestationMessage
+            );
+            let expected_member = fed.members[member_idx as usize];
+            require!(
+                parsed.pubkey == expected_member.to_bytes(),
+                BridgeError::BadFederationSigner
+            );
+        }
     }
 
     let cfg = &ctx.accounts.asset_config;

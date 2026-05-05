@@ -10,11 +10,15 @@
 //! genesis. Both are heavy. This ix lets the update happen in-place via
 //! `solana program deploy`-style operator workflow.
 //!
-//! Authorization: any signer is accepted in v1, same convention as
-//! `init_megadrop`. Production deployments should gate this off the upgrade
-//! authority via the `solana program set-upgrade-authority` chain — i.e. the
-//! key that signs `update_megadrop` is the same key that signs program
-//! upgrades. There's no on-chain governance wired up yet for this program.
+//! Authorization: signer MUST equal `crate::ADMIN_AUTHORITY` (a hardcoded
+//! pubkey baked into the program at compile time — currently the staccana
+//! BPF upgrade-authority key). Originally this ix accepted any signer and
+//! the comment said "production deployments should gate this off the
+//! upgrade authority", but no enforcement existed on chain — anyone could
+//! call `update_megadrop` with their own `claimable_root` and replace the
+//! snapshot, siphoning the entire allocation through claims that match
+//! THEIR root. The constraint below now closes that hole.
+//!
 //! The `Option<...>` per field means callers can patch only the field(s)
 //! that actually changed, e.g. update only `claimable_root` while leaving
 //! `genesis_month` alone.
@@ -39,9 +43,12 @@ pub struct UpdateMegadropArgs {
 
 #[derive(Accounts)]
 pub struct UpdateMegadrop<'info> {
-    /// Signs the update. v1 places no restriction; production should gate via
-    /// program upgrade authority (i.e. only the cold key that can redeploy
-    /// the .so should be sending updates).
+    /// Must equal `crate::ADMIN_AUTHORITY`. The constraint below is what
+    /// gates this whole ix — originally absent, leading to the
+    /// "any-signer can rewrite the merkle root" CVE.
+    #[account(
+        constraint = authority.key() == crate::ADMIN_AUTHORITY @ MegadropError::Unauthorized,
+    )]
     pub authority: Signer<'info>,
 
     #[account(

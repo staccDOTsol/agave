@@ -63,7 +63,36 @@ pub use instructions::*;
 // padded with `1`s; decodes to exactly 32 bytes (verified via
 // `base58.b58decode("Megadrop1111...111").length == 32`). The 42-character form in the
 // task spec was one byte short, so this string is one `1` longer.
-declare_id!("Megadrop11111111111111111111111111111111111");
+// Real deployed program ID (replaces the placeholder vanity address).
+// Anchor 1.x's `#[program]` macro injects a runtime check that the runtime
+// `program_id` == `crate::id()`; mismatch returns `DeclaredProgramIdMismatch
+// (Anchor 4100)`. The original placeholder went out the door because the
+// previous Anchor toolchain didn't insert that check, but the upgrade we
+// just landed bumped to a newer expansion that does.
+declare_id!("Aicff1zk6b5ifYzFoyhenUD5ehhFYb8GiDbRCrWt9t34");
+
+/// Hardcoded admin pubkey gating privileged ixs (`update_megadrop`).
+///
+/// Originally `update_megadrop` accepted **any signer** — the comment said
+/// "production deployments should gate this off the upgrade authority via
+/// `solana program set-upgrade-authority`", but no such constraint was
+/// enforced on chain. A friendly auditor demonstrated the obvious
+/// consequence: anyone could call `update_megadrop` with their own
+/// `claimable_root` and replace the snapshot — siphoning the entire
+/// allocation through claims that match THEIR root. devnet, no real funds,
+/// but still a hard-coded ROFL.
+///
+/// This const is the staccana cluster's BPF program upgrade authority
+/// (the same key that signs `solana program deploy --buffer-authority …`).
+/// Future revisions can graduate to a runtime-stored field on
+/// `MegadropConfig` (set during init, rotatable via a separate ix gated by
+/// itself), but that needs a state migration on the existing PDA — for now
+/// the const lock-down avoids touching the deployed account layout.
+///
+/// Keypair lives at `/etc/staccana/keys/upgrade-authority.json` on val-1.
+// Anchor 1.x doesn't re-export `pubkey!` — use the const-fn path directly.
+pub const ADMIN_AUTHORITY: Pubkey =
+    Pubkey::from_str_const("HSwe2Y7i6CPuJGb27rBwUumt8HZ8sCpQvG4PBBiC5f4y");
 
 #[program]
 pub mod staccana_megadrop {

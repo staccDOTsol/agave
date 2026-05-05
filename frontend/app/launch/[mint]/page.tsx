@@ -845,7 +845,35 @@ function TradePanel({
             // Deposit the *minimum* (= guaranteed-received) so we never
             // over-deposit if the on-chain trade settles for fewer tokens
             // than our optimistic quote. Slippage between quote and exec.
-            const depositAmount = quote.minOut < tokensOut ? quote.minOut : tokensOut;
+            let depositAmount = quote.minOut < tokensOut ? quote.minOut : tokensOut;
+
+            // Token-22's `Deposit` ix caps amount at `2^48 - 1` base units —
+            // any one deposit larger than that fails atomically with
+            // `Custom(40) MaximumDepositAmountExceeded`, which would revert
+            // the entire buy. With the launchpad's 9-decimal mints that's
+            // ~281,474.976 tokens per deposit. Cap here, deposit only the
+            // first slice, leave the rest in the buyer's public balance —
+            // they can use the SecretBalancePanel "Deposit → encrypted"
+            // widget to deposit subsequent slices later.
+            const MAX_DEPOSIT_BASE_UNITS = (1n << 48n) - 1n;
+            const overflow = depositAmount > MAX_DEPOSIT_BASE_UNITS;
+            if (overflow) {
+              const remainingTokens = depositAmount - MAX_DEPOSIT_BASE_UNITS;
+              const remainingDisplay = (
+                Number(remainingTokens) / 1e9
+              ).toLocaleString("en-US", { maximumFractionDigits: 4 });
+              toast({
+                title: "Deposit capped at confidential-transfer limit",
+                description:
+                  `Token-22 caps a single Deposit at 2^48 − 1 base units (~281,474 tokens at 9 decimals). ` +
+                  `Buying the full amount; the first ~281,474.976 tokens land in pending_balance, ` +
+                  `the remaining ${remainingDisplay} tokens stay in your public balance. ` +
+                  `Use the Secret Balance panel to deposit them in slices once Apply lands.`,
+                variant: "default",
+              });
+              depositAmount = MAX_DEPOSIT_BASE_UNITS;
+            }
+
             if (depositAmount > 0n) {
               tx.add(
                 buildDepositInstruction({
@@ -1210,21 +1238,37 @@ function TradePanel({
         )}
 
         {side === "buy" ? (
-          <label className="flex items-center justify-between rounded-md border border-border/40 bg-secondary/20 px-3 py-2 text-xs">
-            <span className="flex items-center gap-1.5">
-              <span aria-hidden>🔒</span>
-              <span className="font-medium">Encrypted on receive</span>
-              <span className="text-muted-foreground">
-                — token balance hidden in pending_balance
+          <>
+            <label className="flex items-center justify-between rounded-md border border-border/40 bg-secondary/20 px-3 py-2 text-xs">
+              <span className="flex items-center gap-1.5">
+                <span aria-hidden>🔒</span>
+                <span className="font-medium">Encrypted on receive</span>
+                <span className="text-muted-foreground">
+                  — token balance hidden in pending_balance
+                </span>
               </span>
-            </span>
-            <input
-              type="checkbox"
-              checked={confidentialMode}
-              onChange={(e) => setConfidentialMode(e.target.checked)}
-              className="h-3.5 w-3.5 accent-emerald-500"
-            />
-          </label>
+              <input
+                type="checkbox"
+                checked={confidentialMode}
+                onChange={(e) => setConfidentialMode(e.target.checked)}
+                className="h-3.5 w-3.5 accent-emerald-500"
+              />
+            </label>
+            {confidentialMode &&
+            quote &&
+            "ok" in quote &&
+            quote.kind === "buy" &&
+            quote.ok.tokensOut > (1n << 48n) - 1n ? (
+              <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+                ⚠ Token-22 caps a single confidential <code>Deposit</code> at{" "}
+                <code>2⁴⁸ − 1</code> base units (~281,474.976 tokens at 9
+                decimals). Your buy is larger — the first slice will land in{" "}
+                <code>pending_balance</code>; the remainder stays in your public
+                balance. Deposit the rest in chunks via the Secret Balance
+                panel, with an Apply between each.
+              </p>
+            ) : null}
+          </>
         ) : null}
         <Button
           onClick={onSubmit}

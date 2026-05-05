@@ -100,4 +100,7 @@ pub enum SubsidyError {
 
     #[msg("bootstrap reserve has been fully drained")]
     BootstrapReserveExhausted = 29,
+
+    #[msg("signer is not the configured ADMIN_AUTHORITY for this privileged ix")]
+    Unauthorized = 30,
 }

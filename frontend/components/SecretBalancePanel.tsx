@@ -38,11 +38,16 @@ import {
 import { useToast } from "@/components/ui/use-toast";
 import {
   ProofUnavailableError,
+  bytesToBase64,
+  base64ToBytes,
   buildTransferInstruction,
+  buildWithdrawInstruction,
   deriveElGamalKeypair,
   deriveElGamalPubkeyFromSeed,
   prepareConfidentialTransferIxs,
   fetchRecipientElgamalPubkey,
+  randScalar,
+  requestServerSideProof,
 } from "@/lib/confidential";
 
 /**
@@ -605,8 +610,11 @@ function ConfidentialControls({
   const { toast } = useToast();
 
   const [configured, setConfigured] = useState<boolean | null>(null);
-  const [busy, setBusy] = useState<"none" | "configure" | "deposit">("none");
+  const [busy, setBusy] = useState<
+    "none" | "configure" | "deposit" | "withdraw"
+  >("none");
   const [depositStr, setDepositStr] = useState("");
+  const [withdrawStr, setWithdrawStr] = useState("");
   const [tracked, setTracked] = useState<bigint>(0n);
 
   // Refresh the on-chain "configured?" state + localStorage tracker.
@@ -803,6 +811,178 @@ function ConfidentialControls({
     tracked,
   ]);
 
+  const onWithdraw = useCallback(async () => {
+    if (!publicKey) return;
+    let amount: bigint;
+    try {
+      amount = parseDecimalToBigInt(withdrawStr, decimals);
+    } catch {
+      toast({
+        variant: "destructive",
+        title: "Invalid amount",
+        description: "Enter a positive number with up to the mint's decimals.",
+      });
+      return;
+    }
+    if (amount <= 0n) {
+      toast({ variant: "destructive", title: "Enter an amount > 0" });
+      return;
+    }
+    if (tracked < amount) {
+      toast({
+        variant: "destructive",
+        title: "Insufficient confidential balance",
+        description: `Tracked: ${tracked}, requested withdraw: ${amount}.`,
+      });
+      return;
+    }
+    setBusy("withdraw");
+    try {
+      const senderAta = token22Ata(publicKey, mint);
+      // Need: ElGamal seed + pubkey, fresh on-chain `available_balance`
+      // ciphertext, post-withdraw ciphertext, and a leftover-balance Pedersen
+      // commitment + opening that the equality + range proofs bind to.
+      const senderKeys = await deriveElGamalKeypair(
+        { publicKey, signMessage: wallet.signMessage },
+        mint,
+      );
+      const senderPk = await deriveElGamalPubkeyFromSeed(senderKeys.secretSeed);
+      const state = await fetchConfidentialAccountState(connection, senderAta);
+      if (!state) {
+        throw new Error(
+          "Sender ATA not CT-configured — Configure first before withdrawing.",
+        );
+      }
+
+      // Compute the post-withdraw `available_balance` ciphertext bytes via
+      // the same wasm helper Token-22's `subtract_from(avail, amount)`
+      // syscall produces. We feed amount split over the 16-bit lo / 32-bit
+      // hi shape with openings = 0, which collapses to:
+      //   combined = (amount·G, identity)
+      //   new = (avail.commit - amount·G, avail.handle)
+      // — byte-equal to what `subtract_from` produces on-chain.
+      const amountLo = amount & 0xffffn;
+      const amountHi = amount >> 16n;
+      const zeroOpen = new Uint8Array(32);
+      const newSourceResp = await requestServerSideProof(
+        "transfer_new_source_ciphertext",
+        {
+          availableBalance: bytesToBase64(state.availableBalance),
+          sourcePubkey: bytesToBase64(senderPk),
+          amountLo: amountLo.toString(),
+          amountHi: amountHi.toString(),
+          openingLo: bytesToBase64(zeroOpen),
+          openingHi: bytesToBase64(zeroOpen),
+        },
+      );
+      const sourceCt = base64ToBytes(newSourceResp.proofData);
+
+      const newBalPlain = tracked - amount;
+      const newBalOpen = randScalar();
+      const commitResp = await requestServerSideProof("pedersen_commit", {
+        amount: newBalPlain.toString(),
+        opening: bytesToBase64(newBalOpen),
+      });
+      const newBalCommit = base64ToBytes(commitResp.proofData);
+
+      const ixs = await buildWithdrawInstruction({
+        ata: senderAta,
+        mint,
+        owner: publicKey,
+        amount,
+        decimals,
+        elgamalPubkey: senderPk,
+        // Leave the on-chain decryptable hint as zeros — we don't bundle
+        // AES-128-GCM-SIV in the FE so we can't produce a real AeCiphertext.
+        // The hint is UX-only; the encrypted available_balance is what gets
+        // verified.
+        newDecryptableAvailableBalance: new Uint8Array(36),
+        elgamalSeed: senderKeys.secretSeed,
+        sourceCiphertext: sourceCt,
+        newBalanceCommitment: newBalCommit,
+        newBalanceOpening: newBalOpen,
+        newBalancePlaintext: newBalPlain,
+      });
+
+      const lutResp = await connection.getAddressLookupTable(
+        STACCANA_MASTER_LUT,
+        { commitment: "confirmed" },
+      );
+      const bh = await connection.getLatestBlockhash("confirmed");
+      const msg = new TransactionMessage({
+        payerKey: publicKey,
+        recentBlockhash: bh.blockhash,
+        instructions: ixs,
+      }).compileToV0Message(lutResp.value ? [lutResp.value] : undefined);
+      const vtx = new VersionedTransaction(msg);
+      const sig = await sendTransaction(vtx, connection, {
+        skipPreflight: false,
+      });
+      const status = await connection.confirmTransaction(
+        {
+          signature: sig,
+          blockhash: bh.blockhash,
+          lastValidBlockHeight: bh.lastValidBlockHeight,
+        },
+        "confirmed",
+      );
+      if (status.value.err) {
+        // eslint-disable-next-line no-console
+        console.error("[CT-controls] Withdraw failed on chain", {
+          sig,
+          err: status.value.err,
+        });
+        throw new Error(
+          `Withdraw failed: ${JSON.stringify(status.value.err)}`,
+        );
+      }
+      writeTrackedConfidentialBalance(publicKey, mint, newBalPlain);
+      toast({
+        variant: "success",
+        title: `Withdrew ${withdrawStr} to public balance`,
+        description: (
+          <a
+            className="font-mono text-xs underline underline-offset-2"
+            href={explorerTxUrl(sig)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {truncatePubkey(sig, 8, 8)}
+          </a>
+        ),
+      });
+      setWithdrawStr("");
+      await refresh();
+      onAfterAction?.();
+    } catch (err) {
+      const friendly =
+        err instanceof ProofUnavailableError
+          ? `${err.kind}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      toast({
+        variant: "destructive",
+        title: "Withdraw failed",
+        description: friendly,
+      });
+    } finally {
+      setBusy("none");
+    }
+  }, [
+    connection,
+    publicKey,
+    mint,
+    decimals,
+    withdrawStr,
+    sendTransaction,
+    wallet.signMessage,
+    toast,
+    refresh,
+    onAfterAction,
+    tracked,
+  ]);
+
   if (!publicKey) return <></>;
 
   return (
@@ -838,34 +1018,57 @@ function ConfidentialControls({
       ) : null}
       {configured === true ? (
         <div className="space-y-2">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              inputMode="decimal"
-              value={depositStr}
-              onChange={(e) => setDepositStr(e.target.value)}
-              placeholder="amount"
-              className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
-            />
-            <Button
-              onClick={onDeposit}
-              disabled={busy !== "none" || !depositStr}
-              variant="secondary"
-              className="text-xs"
-            >
-              {busy === "deposit" ? (
-                <>
-                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                  Depositing…
-                </>
-              ) : (
-                "Deposit → encrypted"
-              )}
-            </Button>
-          </div>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={depositStr}
+            onChange={(e) => setDepositStr(e.target.value)}
+            placeholder="Amount to move into encrypted balance"
+            className="w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          <Button
+            onClick={onDeposit}
+            disabled={busy !== "none" || !depositStr}
+            variant="secondary"
+            className="w-full text-xs"
+          >
+            {busy === "deposit" ? (
+              <>
+                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                Depositing…
+              </>
+            ) : (
+              "Deposit → encrypted"
+            )}
+          </Button>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={withdrawStr}
+            onChange={(e) => setWithdrawStr(e.target.value)}
+            placeholder="Amount to move back to public balance"
+            className="w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          <Button
+            onClick={onWithdraw}
+            disabled={busy !== "none" || !withdrawStr}
+            variant="secondary"
+            className="w-full text-xs"
+          >
+            {busy === "withdraw" ? (
+              <>
+                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                Withdrawing…
+              </>
+            ) : (
+              "Withdraw → public"
+            )}
+          </Button>
           <p className="text-[10px] text-muted-foreground">
-            Moves cleartext balance into the encrypted available bucket so you
-            can encrypt-Send. Withdraw back to public coming soon.
+            Deposit moves public → confidential available balance.
+            Withdraw moves confidential → public. Each generates an equality
+            + range proof on the leftover-balance commitment so the on-chain
+            program can verify the post-action ciphertext.
           </p>
         </div>
       ) : null}
@@ -1010,6 +1213,51 @@ function SendPanelInner({
               "Recipient ATA is not CT-configured — using transit-account drop",
             );
           }
+          // Direct CT path requires the same setup invariants as transit:
+          // 1) senderAta is CT-configured, and 2) tracked confidential balance
+          // covers the transfer amount. Without (2), `currentAvailablePlaintext`
+          // would be wrong (we used `maxBalance` = cleartext, not confidential)
+          // and the equality proof would generate a `sourceCt` that doesn't
+          // match the on-chain `available - combined_lo_hi` math → Token-22
+          // returns `Custom(27) BalanceMismatch`.
+          const senderStateD = await fetchConfidentialAccountState(
+            connection,
+            senderAta,
+          );
+          if (!senderStateD) {
+            throw new Error(
+              "Encrypted account not configured. Click 'Configure encrypted account' first.",
+            );
+          }
+          const trackedD = readTrackedConfidentialBalance(publicKey, mint);
+          // Verbose CT-debug logging: dump every input we feed into the
+          // proof-and-transfer pipeline so we can correlate browser console
+          // with on-chain state via `solana account <ata>` after a
+          // BalanceMismatch failure.
+          const _toHex = (b: Uint8Array | null | undefined): string =>
+            b ? Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("") : "<null>";
+          // eslint-disable-next-line no-console
+          console.log("[ct-debug] direct-CT inputs", {
+            senderAta: senderAta.toBase58(),
+            recipientAta: recipientAta.toBase58(),
+            mint: mint.toBase58(),
+            amount: amount.toString(),
+            trackedD: trackedD.toString(),
+            senderElgamalPubkey: _toHex(senderPkC),
+            availableBalance: _toHex(senderStateD.availableBalance),
+            decryptableAvailable: _toHex(senderStateD.decryptableAvailableBalance),
+            elgamalPubkeyOnChain: _toHex(senderStateD.elgamalPubkey),
+            pendingBalanceLo: _toHex(senderStateD.pendingBalanceLo),
+            pendingBalanceHi: _toHex(senderStateD.pendingBalanceHi),
+            pendingCounter: senderStateD.pendingBalanceCreditCounter.toString(),
+            expectedPendingCounter: senderStateD.expectedPendingBalanceCreditCounter.toString(),
+            actualPendingCounter: senderStateD.actualPendingBalanceCreditCounter.toString(),
+          });
+          if (trackedD < amount) {
+            throw new Error(
+              `Confidential balance is ${trackedD} (tracked), need ${amount}. Click 'Deposit → encrypted' first.`,
+            );
+          }
           // For the auditor: when the mint has no auditor configured (this
           // Staccana mirror's `OptionalNonZeroElGamalPubkey::None`, encoded
           // on chain as 32 zero bytes), the proof's auditor pubkey MUST also
@@ -1037,7 +1285,18 @@ function SendPanelInner({
               auditorElgamalPubkey: auditorPk,
               newSourceDecryptableAvailableBalance: new Uint8Array(36),
               elgamalSeed: senderKeysC.secretSeed,
-              currentAvailablePlaintext: maxBalance ?? 0n,
+              // Use tracked CONFIDENTIAL balance, NOT cleartext (maxBalance).
+              // CT::Transfer pulls from `available_balance` (encrypted), so the
+              // proof's `currentAvailablePlaintext` must match what's been
+              // Deposited+Applied into confidential — tracked in localStorage
+              // since we don't bundle Aes128GcmSiv to decrypt the on-chain
+              // hint client-side.
+              currentAvailablePlaintext: trackedD,
+              // **General-case sourceCt.** Pass the on-chain
+              // `available_balance` ciphertext so `buildTransferInstruction`
+              // computes `sourceCt = current - combined_lo_hi` byte-equal to
+              // what Token-22 derives in `process_source_for_transfer`.
+              currentAvailableCiphertext: senderStateD.availableBalance,
             },
             connection,
           );
@@ -1054,6 +1313,34 @@ function SendPanelInner({
           if (!lutResp.value) {
             throw new Error("Master LUT not visible on chain");
           }
+          // Dump the final transfer ix and the on-chain available_balance one
+          // more time, RIGHT before we send setups + final, to detect any
+          // staleness: if Configure/Deposit/Apply landed between the read
+          // above and this point, available_balance would have changed and
+          // sourceCt would be stale.
+          const _toHex2 = (b: Uint8Array | Buffer | null | undefined): string =>
+            b ? Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("") : "<null>";
+          const _transferIx = prepared.finalTxIxs[0];
+          const _stateNow = await fetchConfidentialAccountState(connection, senderAta);
+          // eslint-disable-next-line no-console
+          console.log("[ct-debug] pre-send state + transfer ix", {
+            availableBalanceNow: _toHex2(_stateNow?.availableBalance),
+            availableBalanceMatchesEarlier:
+              _toHex2(_stateNow?.availableBalance) ===
+              _toHex2(senderStateD.availableBalance),
+            transferIxDataLen: _transferIx.data.length,
+            transferIxDataHex: _toHex2(_transferIx.data as Buffer),
+            transferIxAccounts: _transferIx.keys.map((k) => ({
+              pubkey: k.pubkey.toBase58(),
+              isWritable: k.isWritable,
+              isSigner: k.isSigner,
+            })),
+            ctxState: {
+              equality: prepared.contextStatePubkeys.equality.toBase58(),
+              validity: prepared.contextStatePubkeys.validity.toBase58(),
+              range: prepared.contextStatePubkeys.range.toBase58(),
+            },
+          });
           for (let i = 0; i < prepared.setupTxs.length; i++) {
             const setupBh = (await connection.getLatestBlockhash("confirmed"))
               .blockhash;

@@ -39,11 +39,20 @@ import { SYSTEM_PROGRAM_ID, VALIDATOR_SUBSIDY_PROGRAM_ID } from "./staccana";
 // and `subsidy.rs`.
 // ---------------------------------------------------------------------------
 
-/** Hard cap on validators in the registry. SPEC §7.3 / `state.rs::MAX_VALIDATORS`. */
-export const MAX_VALIDATORS = 64;
+/** Hard cap on validators in the registry.
+ *
+ * Lowered from 64 → 8 in `programs/validator-subsidy/src/state.rs` so
+ * `Account<SubsidyConfig>` + `Account<ValidatorRegistry>` fit on SBPF's
+ * 4 KB stack frame in `init_subsidy` / `register_validator` (both crashed
+ * with `Access violation in stack frame 3` until this was reduced).
+ * v1 only needs single-digit validators; bumping requires a program
+ * redeploy + this FE constant updated in lockstep.
+ */
+export const MAX_VALIDATORS = 8;
 
-/** Hard cap on federation set size. `state.rs::MAX_FEDERATION_MEMBERS`. */
-export const MAX_FEDERATION_MEMBERS = 32;
+/** Hard cap on federation set size. Lowered from 32 → 16 in lockstep with
+ * `MAX_VALIDATORS` for the same SBPF-stack reason. */
+export const MAX_FEDERATION_MEMBERS = 16;
 
 /** Productive position share of treasury, in bps. `state.rs::TREASURY_PRODUCTIVE_BPS`. */
 export const TREASURY_PRODUCTIVE_BPS = 8000;

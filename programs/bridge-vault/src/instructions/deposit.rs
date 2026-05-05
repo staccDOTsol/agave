@@ -135,6 +135,9 @@ pub fn handler(ctx: Context<Deposit>, args: DepositArgs) -> Result<()> {
             to: ctx.accounts.vault_token_account.to_account_info(),
             authority: ctx.accounts.user.to_account_info(),
         };
+        // Anchor 1.x: `CpiContext::new` takes the program id (Pubkey), NOT
+        // AccountInfo. Verified by the failing compile when AccountInfo was
+        // tried — `.key()` is the right form.
         let cpi_ctx = CpiContext::new(ctx.accounts.token_program.key(), cpi_accounts);
         token_interface::transfer_checked(cpi_ctx, args.amount, decimals)?;
     }

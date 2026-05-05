@@ -537,13 +537,11 @@ export default function BridgePage(): JSX.Element {
               onChange={setMainnetDestStr}
               placeholder="recipient on mainnet"
               mono
-              disabledReason={BRIDGE_IS_DEVNET ? BRIDGE_DISABLED_TITLE : undefined}
             />
             <p className="text-sm text-muted-foreground">{previewLine}</p>
             <Button
               onClick={onBurn}
-              disabled={submit.kind === "submitting" || BRIDGE_IS_DEVNET}
-              title={BRIDGE_DISABLED_TITLE}
+              disabled={submit.kind === "submitting"}
               className="w-full sm:w-auto"
             >
               {submit.kind === "submitting" ? (
@@ -551,21 +549,10 @@ export default function BridgePage(): JSX.Element {
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Submitting
                 </>
-              ) : BRIDGE_IS_DEVNET ? (
-                <>Submit burn (disabled — devnet)</>
               ) : (
                 "Submit burn"
               )}
             </Button>
-            {BRIDGE_IS_DEVNET ? (
-              <span
-                className="ml-2 inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full border border-amber-500/40 bg-amber-500/10 text-[10px] font-bold text-amber-300"
-                title={BRIDGE_DISABLED_TITLE}
-                aria-label="Why is this disabled?"
-              >
-                ?
-              </span>
-            ) : null}
             {submit.kind === "success" ? (
               <p className="text-sm text-emerald-400">
                 Submitted.{" "}

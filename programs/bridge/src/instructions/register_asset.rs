@@ -48,10 +48,17 @@ pub struct RegisterAssetArgs {
 #[derive(Accounts)]
 #[instruction(args: RegisterAssetArgs)]
 pub struct RegisterAsset<'info> {
-    /// Governance authority. Real deployment will gate this further (e.g. multisig);
-    /// for v1 the runtime enforces only that the signer matches whatever key owns the
-    /// upgrade authority of the program.
-    #[account(mut)]
+    /// Must equal `crate::ADMIN_AUTHORITY` (staccana's BPF upgrade-authority).
+    /// Originally bare `Signer` with the comment "real deployment will gate this
+    /// further" — but on a fresh deploy with the AssetConfig + FederationSet
+    /// PDAs not yet initialized, anyone could front-run and bind their own
+    /// pubkeys as the federation set, taking permanent control of every
+    /// subsequent `update_ratio` and `mint` attestation. The constraint below
+    /// closes that hole.
+    #[account(
+        mut,
+        constraint = authority.key() == crate::ADMIN_AUTHORITY @ BridgeError::Unauthorized,
+    )]
     pub authority: Signer<'info>,
 
     #[account(

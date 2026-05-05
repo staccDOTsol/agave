@@ -28,5 +28,8 @@ fn main() -> Result<()> {
         "  inflation_disabled: {}",
         report.output.inflation_disabled
     );
+    if let Some(n) = report.shards_emitted {
+        println!("  shards_emitted   : {n} leaves");
+    }
     Ok(())
 }
