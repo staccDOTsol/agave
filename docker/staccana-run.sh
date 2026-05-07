@@ -8,6 +8,25 @@
 #
 # All knobs are env vars (override on `docker run` with -e):
 #   STACCANA_ENTRYPOINT   gossip entrypoint (default: 84.32.220.211:8001 = val-1)
+#   STACCANA_KNOWN_VALIDATOR  identity pubkey of a trusted RPC peer for snapshot
+#                             fetch (default: BtTrfSMeHSNJc8cfy3AAXEykjGPEuTFzL53Vfp8dsUcb
+#                             = val-1's identity). agave's `rpc_bootstrap` uses
+#                             this to pick a trusted RPC for the genesis-hash
+#                             check + snapshot download. Without it the
+#                             bootstrap falls back to gossip-discovered RPC
+#                             peers and routinely fails with "Connection
+#                             refused" against the entrypoint's gossip port
+#                             (8001 — gossip-only, no HTTP) — exactly the
+#                             "get_cluster_shred_version failed" error
+#                             new operators were hitting.
+#   STACCANA_EXPECTED_GENESIS_HASH  guards against forks (default:
+#                             FFwiB5Dq3HshrfzPeQTCWAzVUFgw6r4kJLAmCYdLXLep =
+#                             staccana mainnet-sigma genesis).
+#   STACCANA_NO_SNAPSHOT_FETCH  set to "1" to skip snapshot fetch and replay
+#                             from the embedded genesis (slow — hours/days —
+#                             but zero peer dependency). Default unset:
+#                             validator fetches a snapshot from the
+#                             known-validator's RPC.
 #   STACCANA_RPC_PORT     local RPC port    (default: 8899)
 #   STACCANA_GOSSIP_PORT  local gossip port (default: 8001)
 #   STACCANA_LIMIT_LEDGER_SIZE  ledger size cap in shreds (default: 200_000_000)
@@ -22,6 +41,9 @@
 set -euo pipefail
 
 ENTRYPOINT="${STACCANA_ENTRYPOINT:-84.32.220.211:8001}"
+KNOWN_VALIDATOR="${STACCANA_KNOWN_VALIDATOR:-BtTrfSMeHSNJc8cfy3AAXEykjGPEuTFzL53Vfp8dsUcb}"
+EXPECTED_GENESIS_HASH="${STACCANA_EXPECTED_GENESIS_HASH:-FFwiB5Dq3HshrfzPeQTCWAzVUFgw6r4kJLAmCYdLXLep}"
+NO_SNAPSHOT_FETCH="${STACCANA_NO_SNAPSHOT_FETCH:-}"
 RPC_PORT="${STACCANA_RPC_PORT:-8899}"
 GOSSIP_PORT="${STACCANA_GOSSIP_PORT:-8001}"
 LIMIT_LEDGER_SIZE="${STACCANA_LIMIT_LEDGER_SIZE:-200000000}"
@@ -67,6 +89,27 @@ if [[ -n "${STACCANA_PUBLIC_IP:-}" ]]; then
   GOSSIP_HOST_FLAGS=(--gossip-host "$STACCANA_PUBLIC_IP")
 fi
 
+# Bootstrap-trust flags. agave's `rpc_bootstrap` uses `--known-validator`
+# both as a genesis-hash cross-check AND as the candidate RPC peer for
+# snapshot fetch. Without it, the bootstrap can wedge for 30+ minutes
+# probing random gossip peers (or failing outright with "Connection
+# refused" if it tries to HTTP-GET shred-version against the entrypoint's
+# gossip port). `--expected-genesis-hash` is a fork-guard.
+TRUST_FLAGS=()
+if [[ -n "$KNOWN_VALIDATOR" && "$ENTRYPOINT" != "none" ]]; then
+  TRUST_FLAGS+=(--known-validator "$KNOWN_VALIDATOR")
+fi
+if [[ -n "$EXPECTED_GENESIS_HASH" && "$ENTRYPOINT" != "none" ]]; then
+  TRUST_FLAGS+=(--expected-genesis-hash "$EXPECTED_GENESIS_HASH")
+fi
+
+# Optional: skip snapshot fetch + replay from embedded genesis. Slower
+# (hours) but eliminates the snapshot-peer dependency entirely.
+SNAPSHOT_FLAGS=()
+if [[ "$NO_SNAPSHOT_FETCH" == "1" ]]; then
+  SNAPSHOT_FLAGS=(--no-snapshot-fetch)
+fi
+
 # shellcheck disable=SC2086  # STACCANA_EXTRA_ARGS intentional word-split
 exec /usr/local/bin/agave-validator \
   --identity "$KEY_DIR/identity.json" \
@@ -90,5 +133,7 @@ exec /usr/local/bin/agave-validator \
   --dynamic-port-range 8002-8027 \
   --log "$LOG_DIR/validator.log" \
   "${ENTRYPOINT_FLAGS[@]}" \
+  "${TRUST_FLAGS[@]}" \
+  "${SNAPSHOT_FLAGS[@]}" \
   "${GOSSIP_HOST_FLAGS[@]}" \
   ${STACCANA_EXTRA_ARGS:-}

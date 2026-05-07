@@ -79,12 +79,17 @@ docker run -d --name staccana \
   -v staccana-ledger:/var/lib/staccana/ledger \
   -v staccana-accounts:/var/lib/staccana/accounts \
   -v staccana-keys:/etc/staccana/keys \
-  -e STACCANA_THIS_PUBLIC_IP=$(curl -s ifconfig.me) \
-  -e STACCANA_ENTRYPOINT=84.32.220.211:8001 \
-  -e STACCANA_KNOWN_VALIDATOR=BtTrfSMeHSNJc8cfy3AAXEykjGPEuTFzL53Vfp8dsUcb \
-  -e STACCANA_EXPECTED_GENESIS_HASH=FFwiB5Dq3HshrfzPeQTCWAzVUFgw6r4kJLAmCYdLXLep \
+  -e STACCANA_PUBLIC_IP=$(curl -s ifconfig.me) \
   jrsdunn/solana-classic-validator:latest
 ```
+
+The image now defaults `STACCANA_ENTRYPOINT`, `STACCANA_KNOWN_VALIDATOR`,
+and `STACCANA_EXPECTED_GENESIS_HASH` to staccana mainnet-sigma values, so
+you only need `-e STACCANA_PUBLIC_IP=…` for the gossip-advertise. To run
+against a different cluster (your own private fork, etc.), override those
+three env vars. To skip snapshot fetch and replay from the embedded
+genesis (slow — hours/days, but no peer dependency), add
+`-e STACCANA_NO_SNAPSHOT_FETCH=1`.
 
 On first boot the entrypoint script generates fresh `identity.json`, `vote.json`, `stake.json` keypairs into the `staccana-keys` volume and seeds the ledger from the baked-in `genesis.bin` (no external tarball needed — it's inside the image). `docker logs -f staccana` to follow.
 
