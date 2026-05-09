@@ -93,6 +93,25 @@ genesis (slow — hours/days, but no peer dependency), add
 
 On first boot the entrypoint script generates fresh `identity.json`, `vote.json`, `stake.json` keypairs into the `staccana-keys` volume and seeds the ledger from the baked-in `genesis.bin` (no external tarball needed — it's inside the image). `docker logs -f staccana` to follow.
 
+### Building the validator from source
+
+The deployed binary is a thin patch on `anza-xyz/agave v3.1.14` — three `assert!(io_uring_supported())` calls in `fs/src/buffered_reader.rs` and `fs/src/dirs.rs` turned into `if/else` fallbacks that use `std::fs` on WSL2 / pre-5.10 kernels. **Zero consensus, ledger, FBA, or program-activation changes.** Published as a branch on a fork:
+
+```bash
+git clone https://github.com/staccDOTsol/agave staccana-agave
+cd staccana-agave
+git checkout staccana-3.1.14    # rebases cleanly on tag v3.1.14
+./cargo build --release          # ~25 min on a beefy box
+```
+
+The resulting `target/release/agave-validator` is byte-equivalent to what's running on val-1/2/3/4. Or use the convenience wrapper:
+
+```bash
+./infra/scripts/build-agave.sh    # in this (staccana) repo
+```
+
+If your build syncs cleanly past slot ~900K and then trips on `inconsistent program activation on snapshot restore`, you're almost certainly building **v2.x**, not v3.1.14 — the major-version gap covers many feature-gate activations baked into the snapshot.
+
 ### Joining the validator subsidy
 
 Once your node is in gossip and catching up, register its identity pubkey with the on-chain `validator-subsidy` program so it receives epoch payouts:
