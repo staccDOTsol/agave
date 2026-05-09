@@ -18,6 +18,10 @@ path = "src/bin/bridge_mint_relay.rs"
 name = "staccana-bridge-release-relay"
 path = "src/bin/bridge_release_relay.rs"
 
+[[bin]]
+name = "staccana-validator-metrics-relay"
+path = "src/bin/validator_metrics_relay.rs"
+
 [lib]
 name = "staccana_federation_attestor"
 path = "src/lib.rs"

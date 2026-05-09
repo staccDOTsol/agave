@@ -13,7 +13,7 @@
 //!
 //! Effect: writes new metrics + slot + nonce into the [`ValidatorRecord`].
 
-use crate::ed25519::{parse_ed25519_at, require_instructions_sysvar};
+use crate::ed25519::{parse_ed25519_batch_at, require_instructions_sysvar};
 use crate::error::SubsidyError;
 use crate::state::{SubsidyConfig, ValidatorRecord};
 use crate::subsidy::{build_metrics_message, check_unique_indices, check_uptime_bps};
@@ -87,19 +87,27 @@ pub fn handler(
         args.nonce,
     );
 
-    // Walk the M precompile ixs immediately preceding this one.
+    // Walk the SINGLE batched ed25519 precompile ix immediately preceding
+    // this one. The batched form (M sigs over a shared message in one ix)
+    // saves ~75 × (M-1) bytes of tx size vs. M individual precompile ixs;
+    // at M=5 the single-sig form overflows the 1232-byte tx ceiling.
     let sysvar = &ctx.accounts.instructions_sysvar;
     let current_ix_index = solana_instructions_sysvar::load_current_index_checked(sysvar)
         .map_err(|_| SubsidyError::BadInstructionsSysvar)?;
+    require!(
+        current_ix_index >= 1,
+        SubsidyError::InsufficientFederationSignatures
+    );
+    let precompile_ix_index = (current_ix_index as usize) - 1;
+    let parsed_sigs = parse_ed25519_batch_at(sysvar, precompile_ix_index)?;
     let m = cfg.federation_m as usize;
     require!(
-        (current_ix_index as usize) >= m,
+        parsed_sigs.len() == m,
         SubsidyError::InsufficientFederationSignatures
     );
 
     for (i, &member_idx) in args.federation_indices.iter().enumerate() {
-        let ix_index = (current_ix_index as usize) - m + i;
-        let parsed = parse_ed25519_at(sysvar, ix_index)?;
+        let parsed = &parsed_sigs[i];
         require!(
             parsed.message == expected_msg,
             SubsidyError::BadAttestationMessage
