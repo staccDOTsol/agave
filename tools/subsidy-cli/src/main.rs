@@ -91,6 +91,16 @@ enum Cmd {
         validator: String,
     },
 
+    /// Governance: retune the bootstrap-reserve per-epoch drip rate.
+    /// `bootstrap_distribute` will then pay `target_per_epoch` lamports
+    /// total per epoch (split pro-rata across registered validators).
+    SetBootstrapPerEpoch {
+        /// Target lamports/epoch (TOTAL — per-validator share is this divided
+        /// by the registered count weighted by metrics).
+        #[arg(long)]
+        target_per_epoch: u64,
+    },
+
     /// Admin-only: set per-validator metrics directly (bypasses federation
     /// attestation). Bootstrap-only escape hatch — see the on-chain ix doc.
     AdminSetMetrics {
@@ -151,6 +161,11 @@ enum Cmd {
 #[derive(BorshSerialize)]
 struct UnregisterValidatorArgs {
     validator: [u8; 32],
+}
+
+#[derive(BorshSerialize)]
+struct SetBootstrapPerEpochArgs {
+    target_per_epoch: u64,
 }
 
 #[derive(BorshSerialize)]
@@ -367,6 +382,29 @@ fn main() -> anyhow::Result<()> {
             let sig = rpc.send_and_confirm_transaction(&tx)?;
             println!("[done] {}", sig);
             println!("closed validator_record: {}", rec_pda);
+        }
+        Cmd::SetBootstrapPerEpoch { target_per_epoch } => {
+            let cfg_pda = pda(&[b"subsidy_config"], &program_id);
+            eprintln!("[subsidy-cli] subsidy_config:    {}", cfg_pda);
+            eprintln!("[subsidy-cli] target_per_epoch:  {} lamports", target_per_epoch);
+
+            let args = SetBootstrapPerEpochArgs { target_per_epoch };
+            let mut data = discriminator("set_bootstrap_per_epoch").to_vec();
+            args.serialize(&mut data)?;
+
+            let ix = Instruction {
+                program_id,
+                accounts: vec![
+                    AccountMeta::new(payer.pubkey(), true), // authority (governance signer)
+                    AccountMeta::new(cfg_pda, false),       // subsidy_config (mut)
+                ],
+                data,
+            };
+            let bh = rpc.get_latest_blockhash()?;
+            let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[&payer], bh);
+            eprintln!("[subsidy-cli] sending set_bootstrap_per_epoch tx…");
+            let sig = rpc.send_and_confirm_transaction(&tx)?;
+            println!("[done] {}", sig);
         }
         Cmd::AdminSetMetrics {
             validator,

@@ -144,6 +144,17 @@ pub mod staccana_validator_subsidy {
         instructions::unregister_validator::handler(ctx, args)
     }
 
+    /// Governance-gated. Retune the bootstrap-reserve per-epoch drip rate
+    /// after init_subsidy. Sets `bootstrap_reserve_initial = target *
+    /// BOOTSTRAP_EPOCHS` and clamps `reserve_remaining` to match. See
+    /// [`instructions::set_bootstrap_per_epoch`].
+    pub fn set_bootstrap_per_epoch(
+        ctx: Context<SetBootstrapPerEpoch>,
+        args: SetBootstrapPerEpochArgs,
+    ) -> Result<()> {
+        instructions::set_bootstrap_per_epoch::handler(ctx, args)
+    }
+
     /// Admin-only escape hatch. Sets a validator's metrics directly,
     /// bypassing federation attestation. Bootstrap-only — federation
     /// attestor for validator metrics isn't running yet, so without this
