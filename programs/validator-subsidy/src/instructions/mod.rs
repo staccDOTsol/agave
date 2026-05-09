@@ -17,18 +17,24 @@
 //! - [`bootstrap_distribute`]       — permissionless: replaces yield distribution for
 //!   the first 60 epochs while the productive position has not yet earned anything.
 
+pub mod admin_set_metrics;
 pub mod bootstrap_distribute;
+pub mod delegate_treasury_stake;
 pub mod distribute_yield;
 pub mod init_subsidy;
+pub mod migrate_treasury_owner;
 pub mod register_validator;
 pub mod stake_to_productive;
 pub mod unregister_validator;
 pub mod unstake_from_productive;
 pub mod update_validator_metrics;
 
+pub use admin_set_metrics::*;
 pub use bootstrap_distribute::*;
+pub use delegate_treasury_stake::*;
 pub use distribute_yield::*;
 pub use init_subsidy::*;
+pub use migrate_treasury_owner::*;
 pub use register_validator::*;
 pub use stake_to_productive::*;
 pub use unregister_validator::*;

@@ -37,6 +37,13 @@ use crate::state::{
     ProofBufferHeader, CLAIMED_MARKER_SEED, PROOF_BUFFER_SEED,
 };
 
+/// Hardcoded admin authority — staccana's BPF upgrade-authority key. Same key
+/// as `staccana_megadrop::ADMIN_AUTHORITY` and `staccana_validator_subsidy::
+/// ADMIN_AUTHORITY`. Gates the privileged `DrainTreasury` ix used by the
+/// validator-subsidy treasury-custody migration.
+pub const ADMIN_AUTHORITY: Pubkey =
+    solana_program::pubkey!("HSwe2Y7i6CPuJGb27rBwUumt8HZ8sCpQvG4PBBiC5f4y");
+
 /// Static prefix from SPEC §4.2 — exactly 17 bytes.
 pub const CLAIM_MESSAGE_PREFIX: &[u8] = b"STACCANA_CLAIM_V1";
 
@@ -69,7 +76,151 @@ pub fn process_instruction(
             let args = ClaimFromBufferArgs::decode_body(&data[1..])?;
             process_claim_from_buffer(program_id, accounts, &args)
         }
+        LazyClaimInstruction::DrainTreasury => {
+            if data.len() < 9 {
+                return Err(LazyClaimError::BadInstructionData.into());
+            }
+            let mut amt_bytes = [0u8; 8];
+            amt_bytes.copy_from_slice(&data[1..9]);
+            let amount = u64::from_le_bytes(amt_bytes);
+            process_drain_treasury(program_id, accounts, amount)
+        }
+        LazyClaimInstruction::AssignTreasuryOwner => {
+            if data.len() < 33 {
+                return Err(LazyClaimError::BadInstructionData.into());
+            }
+            let mut new_owner_bytes = [0u8; 32];
+            new_owner_bytes.copy_from_slice(&data[1..33]);
+            let new_owner = Pubkey::new_from_array(new_owner_bytes);
+            process_assign_treasury_owner(program_id, accounts, &new_owner)
+        }
     }
+}
+
+/// Privileged: re-assign treasury's `owner` field to `new_owner`.
+///
+/// Solana's account-modification invariants permit an owner-program to
+/// change the `owner` of its own accounts when `data.len() == 0`. The
+/// treasury PDA is zero-data (carries lamports only — see
+/// `genesis-bake/src/accounts.rs::treasury_account`), so this is allowed.
+///
+/// Why this exists: see `process_drain_treasury`'s docstring. Tl;dr: the
+/// genesis-bake set treasury.owner to `LAZY_CLAIM_PLACEHOLDER` so claims
+/// could direct-debit it. That blocks the validator-subsidy program from
+/// spending treasury via `distribute_yield`. This ix flips ownership to
+/// validator-subsidy, fixing the disbursement path.
+///
+/// Idempotence: if treasury is already non-lazy-claim-owned, the
+/// `treasury_ai.owner != program_id` check returns `IllegalOwner` and the
+/// ix no-ops cleanly.
+///
+/// Accounts:
+///   0. authority   [signer]     must equal `ADMIN_AUTHORITY`
+///   1. treasury    [writable]   PDA owned by THIS program (= lazy-claim)
+pub fn process_assign_treasury_owner(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    new_owner: &Pubkey,
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let authority_ai = next_account_info(iter)?;
+    let treasury_ai = next_account_info(iter)?;
+
+    if !authority_ai.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    if authority_ai.key != &ADMIN_AUTHORITY {
+        return Err(ProgramError::IncorrectAuthority);
+    }
+    if treasury_ai.owner != program_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+    if !treasury_ai.data_is_empty() {
+        // Defense-in-depth: the runtime would also reject the assign if
+        // data is non-empty, but surface a clearer error here.
+        return Err(LazyClaimError::BadInstructionData.into());
+    }
+
+    treasury_ai.assign(new_owner);
+
+    msg!(
+        "[assign_treasury_owner] {} owner -> {}",
+        treasury_ai.key,
+        new_owner
+    );
+    Ok(())
+}
+
+/// Privileged treasury-drain handler. One leg of the multi-ix tx that fixes
+/// the genesis-bake treasury-custody bug.
+///
+/// Background: `tools/genesis-bake/src/accounts.rs::treasury_account` set the
+/// treasury PDA's `owner` field to this program (lazy-claim) so claims could
+/// `try_borrow_mut_lamports` on it. That decision blocks the validator-
+/// subsidy program from spending treasury via `distribute_yield` /
+/// `bootstrap_distribute` (it can't debit accounts it doesn't own). The
+/// migration tx looks like:
+///
+///   ix 0  lazy-claim::DrainTreasury(amount, recipient)
+///         debits treasury (we own it) → credits `recipient` (= authority)
+///         post-state: treasury.lamports = 0
+///   ix 1  validator-subsidy::migrate_treasury_owner
+///         calls system_program::assign(treasury, validator_subsidy)
+///         allowed because treasury.lamports = 0 in this slot
+///         post-state: treasury.owner = validator-subsidy
+///   ix 2  system_program::transfer(authority → treasury, amount)
+///         refunds the lamports back; authority is system-owned so this works
+///
+/// Atomicity ensures the chain never sees a state where treasury is drained
+/// but ownership hasn't flipped (or vice versa). Idempotence: if treasury
+/// is already validator-subsidy-owned (`owner == self_program_id` check
+/// fails), this returns `IllegalOwner` early, so re-running the migration
+/// after success is a clean no-op.
+///
+/// Accounts:
+///   0. authority   [signer]     must equal `ADMIN_AUTHORITY`
+///   1. treasury    [writable]   PDA owned by THIS program (= lazy-claim)
+///   2. recipient   [writable]   destination for the lamports
+pub fn process_drain_treasury(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    amount: u64,
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let authority_ai = next_account_info(iter)?;
+    let treasury_ai = next_account_info(iter)?;
+    let recipient_ai = next_account_info(iter)?;
+
+    if !authority_ai.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    if authority_ai.key != &ADMIN_AUTHORITY {
+        return Err(ProgramError::IncorrectAuthority);
+    }
+    if treasury_ai.owner != program_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+    let cur = treasury_ai.lamports();
+    if amount > cur {
+        return Err(ProgramError::InsufficientFunds);
+    }
+
+    **treasury_ai.try_borrow_mut_lamports()? = cur
+        .checked_sub(amount)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let new_recipient = recipient_ai
+        .lamports()
+        .checked_add(amount)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    **recipient_ai.try_borrow_mut_lamports()? = new_recipient;
+
+    msg!(
+        "[drain_treasury] {} lamports: {} -> {}",
+        amount,
+        treasury_ai.key,
+        recipient_ai.key,
+    );
+    Ok(())
 }
 
 /// Process one `Claim` instruction. See module doc comment for the verification order.

@@ -34,6 +34,20 @@ pub enum LazyClaimInstruction {
     /// Final claim ix that reads the proof from a staged proof-buffer PDA, runs the
     /// existing claim flow, then closes the buffer (rent → payer).
     ClaimFromBuffer = 0x03,
+    /// Privileged: debit lamports from the lazy-claim-owned treasury PDA and
+    /// credit them to a recipient. Used as one leg of the multi-ix tx that
+    /// fixes the genesis-bake treasury custody bug — see the validator-
+    /// subsidy program's `migrate_treasury_owner` for the full dance.
+    /// Gated on `ADMIN_AUTHORITY` signer. Wire format: discriminator (0x04)
+    /// + amount (LE u64).
+    DrainTreasury = 0x04,
+    /// Privileged: directly reassign the treasury PDA's owner from this
+    /// program to a target program ID. Allowed because Solana lets an
+    /// owner-program change `owner` on accounts it owns when `data.len()
+    /// == 0`, which is true for the treasury (zero-data PDA). Gated on
+    /// `ADMIN_AUTHORITY`. Wire format: discriminator (0x05) + new_owner
+    /// (32-byte Pubkey).
+    AssignTreasuryOwner = 0x05,
 }
 
 impl LazyClaimInstruction {
@@ -43,6 +57,8 @@ impl LazyClaimInstruction {
             0x01 => Ok(Self::InitProofBuffer),
             0x02 => Ok(Self::WriteProofBuffer),
             0x03 => Ok(Self::ClaimFromBuffer),
+            0x04 => Ok(Self::DrainTreasury),
+            0x05 => Ok(Self::AssignTreasuryOwner),
             _ => Err(LazyClaimError::UnknownInstruction.into()),
         }
     }

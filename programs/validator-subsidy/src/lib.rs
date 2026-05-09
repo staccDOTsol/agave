@@ -144,6 +144,39 @@ pub mod staccana_validator_subsidy {
         instructions::unregister_validator::handler(ctx, args)
     }
 
+    /// Admin-only escape hatch. Sets a validator's metrics directly,
+    /// bypassing federation attestation. Bootstrap-only — federation
+    /// attestor for validator metrics isn't running yet, so without this
+    /// `bootstrap_distribute` would never have non-zero `total_weight`.
+    /// See [`instructions::admin_set_metrics`].
+    pub fn admin_set_validator_metrics(
+        ctx: Context<AdminSetMetrics>,
+        args: AdminSetMetricsArgs,
+    ) -> Result<()> {
+        instructions::admin_set_metrics::handler(ctx, args)
+    }
+
+    /// Governance-gated one-shot. Re-assigns the treasury PDA's owner field
+    /// from the genesis-baked `LAZY_CLAIM_PLACEHOLDER` to THIS program, so
+    /// `distribute_yield` / `bootstrap_distribute` (which `try_borrow_mut_lamports`
+    /// on the treasury) actually work. See [`instructions::migrate_treasury_owner`].
+    pub fn migrate_treasury_owner(ctx: Context<MigrateTreasuryOwner>) -> Result<()> {
+        instructions::migrate_treasury_owner::handler(ctx)
+    }
+
+    /// Governance-gated. Allocates a fresh native-stake account from
+    /// treasury lamports, initializes it with the treasury PDA as
+    /// staker+withdrawer authorities, and delegates it to a validator's
+    /// vote account. Native warmup activates the stake over ~1 epoch;
+    /// drip schedules are achieved by calling this multiple times with
+    /// smaller amounts. See [`instructions::delegate_treasury_stake`].
+    pub fn delegate_treasury_stake(
+        ctx: Context<DelegateTreasuryStake>,
+        args: DelegateTreasuryStakeArgs,
+    ) -> Result<()> {
+        instructions::delegate_treasury_stake::handler(ctx, args)
+    }
+
     /// Federation-attested update of a validator's per-epoch metrics
     /// (`uptime_bps`, `delegated_stake`, `votes_cast`). Verifies M ed25519 precompile
     /// signatures over the canonical `STACCANA_VALIDATOR_METRICS_V1` message.
