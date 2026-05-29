@@ -3,13 +3,15 @@
 #
 # What it does:
 #   1. Clones (or fast-forwards) the staccDOTsol/agave fork at ./agave-src
-#   2. Checks out the staccana-3.1.14 branch
+#   2. Checks out the staccana-ct-fixes branch
 #   3. Runs `cargo build --release` to produce target/release/agave-validator
 #
-# What's in the patched branch vs. upstream anza-xyz/agave v3.1.14:
-#   - fs/src/buffered_reader.rs  : assert!(io_uring_supported()) → if/else fallback
-#   - fs/src/dirs.rs              : same, two more spots
-#   That's it. 35 lines. Zero consensus, ledger, FBA, or program-activation changes.
+# What's in the staccana-ct-fixes branch vs. its agave base (solana-core 2.3.0 line):
+#   - zk-sdk percentage_with_cap: append c_max_proof to the Fiat-Shamir transcript
+#     (confidential-transfer-with-fee soundness).
+#   - feature-set / svm-feature-set / programs/zk-elgamal-proof: declare + honor the
+#     disable/reenable_zk_elgamal_proof_program gates so the proof program runs when
+#     both are active (staccana full-feature genesis). Validated on devnet-sigma-v2.
 #
 # Why a separate branch and not a patch file:
 #   The fork keeps `git log` clean for downstream contributors (Ooze, etc.)
@@ -24,7 +26,7 @@
 set -euo pipefail
 
 REPO_URL="${STACCANA_AGAVE_REPO:-https://github.com/staccDOTsol/agave}"
-BRANCH="${STACCANA_AGAVE_BRANCH:-staccana-3.1.14}"
+BRANCH="${STACCANA_AGAVE_BRANCH:-staccana-ct-fixes}"
 DEST_DIR="${STACCANA_AGAVE_DIR:-$(pwd)/agave-src}"
 
 echo "[build-agave] $(date -Iseconds) starting"
@@ -46,13 +48,11 @@ fi
 
 cd "$DEST_DIR"
 
-# Sanity check — fail loudly if anyone accidentally builds vanilla 3.1.14
-# without the patches, since the missing fallbacks would crash on any
-# non-io_uring host (WSL2, older kernels). The marker comment is committed
-# in the patched branch; absence means the wrong branch is checked out.
-if ! grep -q "staccana patch: fall back" fs/src/buffered_reader.rs 2>/dev/null; then
-  echo "[build-agave] ERROR: io_uring fallback patch missing in fs/src/buffered_reader.rs."
-  echo "             The wrong branch is checked out — expected staccana-3.1.14."
+# Sanity check — confirm the staccana confidential-transfer fixes are present,
+# so we fail loudly if the wrong branch is checked out.
+if ! grep -q 'append_scalar(b"c_max_proof"' zk-sdk/src/sigma_proofs/percentage_with_cap.rs 2>/dev/null; then
+  echo "[build-agave] ERROR: percentage_with_cap c_max_proof transcript fix missing."
+  echo "             The wrong branch is checked out — expected staccana-ct-fixes."
   echo "             git status:"
   git status --short
   exit 1
