@@ -166,11 +166,11 @@ fn mixed_size_and_tie_break_order() {
 
     let result = batch_match(
         vec![
-            buy(15, base, quote, 200), // tied at 200, higher signer
-            buy(10, base, quote, 200), // tied at 200, lower signer ⇒ matches first of the pair
-            buy(20, base, quote, 100), // tied at 100, lower signer
-            buy(25, base, quote, 100), // tied at 100, higher signer
-            buy(5, base, quote, 300),  // largest
+            buy(15, base, quote, 200),   // tied at 200, higher signer
+            buy(10, base, quote, 200),   // tied at 200, lower signer ⇒ matches first of the pair
+            buy(20, base, quote, 100),   // tied at 100, lower signer
+            buy(25, base, quote, 100),   // tied at 100, higher signer
+            buy(5, base, quote, 300),    // largest
             sell(50, base, quote, 1000), // single seller absorbs everyone
         ],
         &BatchConfig {

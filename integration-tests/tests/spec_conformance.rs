@@ -16,6 +16,7 @@
 //! boundary: the bytes a producer crate emits must equal the bytes the consumer crate
 //! expects, and both must equal the literal bytes the spec describes.
 
+use solana_program::pubkey::Pubkey;
 use staccana_claim_cli::tx::{
     build_claim_message as cli_build_claim_message, ClaimArgs as CliClaimArgs,
     LAZY_CLAIM_PROGRAM_ID, STACCANA_CLAIM_DOMAIN,
@@ -25,7 +26,6 @@ use staccana_federation_attestor::sign::{
 };
 use staccana_lazy_claim::{build_claim_message as program_build_claim_message, ClaimArgs};
 use staccana_matcher::SwapIntent;
-use solana_program::pubkey::Pubkey;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // §4.2 — Claim message
@@ -45,7 +45,10 @@ fn claim_message_matches_spec_4_2_byte_for_byte() {
     expected.extend_from_slice(program_id.as_ref());
 
     let from_program = program_build_claim_message(&pubkey, lamports, &program_id);
-    assert_eq!(from_program, expected, "lazy-claim message disagrees with spec");
+    assert_eq!(
+        from_program, expected,
+        "lazy-claim message disagrees with spec"
+    );
 }
 
 #[test]
@@ -57,11 +60,8 @@ fn claim_message_matches_between_lazy_claim_and_claim_cli_for_canonical_program_
     let lamports: u64 = 1_234_567_890;
 
     let cli_msg = cli_build_claim_message(&pubkey, lamports);
-    let program_msg = program_build_claim_message(
-        &pubkey.to_bytes(),
-        lamports,
-        &LAZY_CLAIM_PROGRAM_ID,
-    );
+    let program_msg =
+        program_build_claim_message(&pubkey.to_bytes(), lamports, &LAZY_CLAIM_PROGRAM_ID);
     assert_eq!(cli_msg, program_msg);
 }
 
@@ -113,7 +113,10 @@ fn claim_args_layout_matches_spec_4_1() {
     expected.extend_from_slice(&proof_1);
     expected.extend_from_slice(&proof_flags);
 
-    assert_eq!(serialized, expected, "lazy-claim ClaimArgs does not match spec");
+    assert_eq!(
+        serialized, expected,
+        "lazy-claim ClaimArgs does not match spec"
+    );
     assert_eq!(serialized.len(), 1 + 32 + 8 + 2 + 64 + 1);
 }
 

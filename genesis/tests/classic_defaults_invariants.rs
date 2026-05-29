@@ -43,20 +43,29 @@ fn fee_governor_emits_pinned_fixed_fee() {
 
 #[test]
 fn cte_feature_gates_count_matches_spec() {
-    // SPEC §2.4: exactly four ZK ElGamal Proof / confidential transfer gates ship ON at
-    // slot 0.
-    assert_eq!(CTE_FEATURE_GATES_AT_GENESIS.len(), 4);
+    // SPEC §2.4: 4 ZK / CTE gates + 5 Token-22 v8 syscall prerequisites + 1 SBPFv3
+    // deployment gate = 10 gates ship ON at slot 0. The constant name keeps its `CTE_`
+    // prefix for backwards-compat (see `genesis/src/classic_defaults.rs`).
+    assert_eq!(CTE_FEATURE_GATES_AT_GENESIS.len(), 10);
 }
 
 #[test]
 fn cte_feature_gates_pubkeys_match_spec() {
-    // SPEC §2.4 lists these four pubkeys exactly. The order in the const is normative —
-    // any reordering changes the genesis fingerprint downstream.
+    // SPEC §2.4 lists these ten pubkeys exactly. The order in the const is normative —
+    // any reordering changes the genesis fingerprint downstream. Positions 0..4 are the
+    // ZK / confidential-transfer gates; 4..9 the Token-22 v8 syscall prerequisites;
+    // position 9 the SBPFv3 deployment gate.
     let expected_pubkeys = [
         "zk1snxsc6Fh3wsGNbbHAJNHiJoYgF29mMnTSusGx5EJ",
         "zkesAyFB19sTkX8i9ReoKaMNDA4YNTPYJpZKPDt7FMW",
         "zkNLP7EQALfC1TYeB3biDU7akDckj8iPkvh9y2Mt2K3",
         "zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8",
+        "7rcw5UtqgDTBBv2EcynNfYckgdAaH1MAsCjKgXMkN7Ri",
+        "A16q37opZdQMCbe5qJ6xpBB9usykfv8jZaMkxvZQi4GJ",
+        "EJJewYSddEEtSZHiqugnvhQHiWyZKjkFDQASd7oKSagn",
+        "EeyoXa3AyQuHkhRmT9mhKtTPrLNPBuNQbLEvyt5VrYxv",
+        "EaQpmC6GtRssaZ3PCUM5YksGqUdMLeZ46BQXYtHYakDS",
+        "BUwGLeF3Lxyfv1J1wY8biFHBB2hrk2QhbNftQf3VV3cC",
     ];
     for (i, expected) in expected_pubkeys.iter().enumerate() {
         assert_eq!(

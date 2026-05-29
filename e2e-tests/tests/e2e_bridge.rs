@@ -59,5 +59,7 @@ fn bridge_register_then_mint_then_burn_full_flow() {
     // The implementation outline lives in the file header. Keeping it as a single
     // ignored test (rather than a `todo!()` body) so the test runner reports a clear
     // skipped count in CI without spuriously failing.
-    panic!("unreachable: this test is gated by #[ignore] until the bridge .so build pipeline lands");
+    panic!(
+        "unreachable: this test is gated by #[ignore] until the bridge .so build pipeline lands"
+    );
 }

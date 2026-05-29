@@ -38,9 +38,8 @@ use staccana_lazy_claim::state::{find_claimed_marker_pda, LazyClaimConfig};
 /// Bytes: ASCII "STACCANA_LAZY_CLAIM_TEST_PROGRAM" (32 bytes — a recognizable signal in
 /// transaction logs).
 pub const LAZY_CLAIM_TEST_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
-    b'S', b'T', b'A', b'C', b'C', b'A', b'N', b'A', b'_', b'L', b'A', b'Z', b'Y', b'_', b'C',
-    b'L', b'A', b'I', b'M', b'_', b'T', b'E', b'S', b'T', b'_', b'P', b'R', b'O', b'G', b'R',
-    b'A', b'M',
+    b'S', b'T', b'A', b'C', b'C', b'A', b'N', b'A', b'_', b'L', b'A', b'Z', b'Y', b'_', b'C', b'L',
+    b'A', b'I', b'M', b'_', b'T', b'E', b'S', b'T', b'_', b'P', b'R', b'O', b'G', b'R', b'A', b'M',
 ]);
 
 /// Seed for the treasury PDA. SPEC §3.5 says the PDA is at

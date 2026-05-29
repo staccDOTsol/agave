@@ -63,6 +63,21 @@ impl Account for SyntheticSnapshotAccount {
     }
 }
 
+impl Account for &SyntheticSnapshotAccount {
+    fn pubkey(&self) -> &Pubkey {
+        &self.pubkey
+    }
+    fn owner(&self) -> &Pubkey {
+        &self.owner
+    }
+    fn data_len(&self) -> usize {
+        self.data_len
+    }
+    fn lamports(&self) -> u64 {
+        self.lamports
+    }
+}
+
 /// Derive a deterministic ed25519 keypair from a single seed byte. Matches the convention
 /// used by `staccana-integration-tests`'s `deterministic_keypair`.
 pub fn deterministic_keypair(seed_byte: u8) -> Keypair {
@@ -176,8 +191,14 @@ mod tests {
     #[test]
     fn mixed_snapshot_split_is_three_two() {
         let snap = mixed_synthetic_snapshot();
-        let claimable = snap.iter().filter(|a| partition(*a) == Disposition::Claimable).count();
-        let treasury = snap.iter().filter(|a| partition(*a) == Disposition::Treasury).count();
+        let claimable = snap
+            .iter()
+            .filter(|a| partition(*a) == Disposition::Claimable)
+            .count();
+        let treasury = snap
+            .iter()
+            .filter(|a| partition(*a) == Disposition::Treasury)
+            .count();
         assert_eq!(claimable, 3);
         assert_eq!(treasury, 2);
     }

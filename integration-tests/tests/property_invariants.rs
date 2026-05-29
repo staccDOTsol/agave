@@ -42,23 +42,22 @@ fn arb_owner() -> impl Strategy<Value = Pubkey> {
 fn arb_data_len() -> impl Strategy<Value = usize> {
     // Bias toward zero (so the system-owned branch can hit the Claimable disposition)
     // while still occasionally producing system-owned-with-data PDAs.
-    prop_oneof![
-        Just(0usize),
-        Just(0usize),
-        Just(0usize),
-        1usize..256,
-    ]
+    prop_oneof![Just(0usize), Just(0usize), Just(0usize), 1usize..256,]
 }
 
 fn arb_account() -> impl Strategy<Value = SyntheticAccount> {
-    (arb_pubkey(), arb_owner(), arb_data_len(), 0u64..1_000_000_000_000u64).prop_map(
-        |(pubkey, owner, data_len, lamports)| SyntheticAccount {
+    (
+        arb_pubkey(),
+        arb_owner(),
+        arb_data_len(),
+        0u64..1_000_000_000_000u64,
+    )
+        .prop_map(|(pubkey, owner, data_len, lamports)| SyntheticAccount {
             pubkey,
             owner,
             data_len,
             lamports,
-        },
-    )
+        })
 }
 
 fn arb_account_set() -> impl Strategy<Value = Vec<SyntheticAccount>> {
@@ -66,10 +65,8 @@ fn arb_account_set() -> impl Strategy<Value = Vec<SyntheticAccount>> {
 }
 
 fn arb_leaf() -> impl Strategy<Value = ClaimableLeaf> {
-    (arb_pubkey(), 0u64..1_000_000_000_000u64).prop_map(|(pubkey, lamports)| ClaimableLeaf {
-        pubkey,
-        lamports,
-    })
+    (arb_pubkey(), 0u64..1_000_000_000_000u64)
+        .prop_map(|(pubkey, lamports)| ClaimableLeaf { pubkey, lamports })
 }
 
 fn arb_leaf_set() -> impl Strategy<Value = Vec<ClaimableLeaf>> {

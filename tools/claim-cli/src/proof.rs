@@ -331,8 +331,11 @@ mod tests {
     #[test]
     fn proof_root_matches_genesis_tree_root_two_leaves() {
         let accounts = vec![acct(1, 100), acct(2, 200)];
-        let leaves: Vec<ClaimableLeaf> =
-            accounts.iter().cloned().map(ClaimableAccount::into_leaf).collect();
+        let leaves: Vec<ClaimableLeaf> = accounts
+            .iter()
+            .cloned()
+            .map(ClaimableAccount::into_leaf)
+            .collect();
         let tree = MerkleTree::build(leaves);
         let proof = build_inclusion_proof(&accounts, &pk(1)).expect("build");
         assert_eq!(proof.root, tree.root.0);
@@ -345,8 +348,11 @@ mod tests {
     fn proof_root_matches_for_each_leaf_in_balanced_tree() {
         // 4 leaves ⇒ tree of depth 2; proofs are 2 siblings each.
         let accounts = vec![acct(1, 100), acct(2, 200), acct(3, 300), acct(4, 400)];
-        let leaves: Vec<ClaimableLeaf> =
-            accounts.iter().cloned().map(ClaimableAccount::into_leaf).collect();
+        let leaves: Vec<ClaimableLeaf> = accounts
+            .iter()
+            .cloned()
+            .map(ClaimableAccount::into_leaf)
+            .collect();
         let tree = MerkleTree::build(leaves);
         for byte in 1u8..=4 {
             let proof = build_inclusion_proof(&accounts, &pk(byte)).expect("build");
@@ -365,8 +371,11 @@ mod tests {
     fn proof_root_matches_for_each_leaf_in_odd_tree() {
         // 3 leaves ⇒ odd leaf at index 2 pairs with itself.
         let accounts = vec![acct(1, 100), acct(2, 200), acct(3, 300)];
-        let leaves: Vec<ClaimableLeaf> =
-            accounts.iter().cloned().map(ClaimableAccount::into_leaf).collect();
+        let leaves: Vec<ClaimableLeaf> = accounts
+            .iter()
+            .cloned()
+            .map(ClaimableAccount::into_leaf)
+            .collect();
         let tree = MerkleTree::build(leaves);
         for byte in 1u8..=3 {
             let proof = build_inclusion_proof(&accounts, &pk(byte)).expect("build");
@@ -385,8 +394,11 @@ mod tests {
         // first reduction (the 7th leaf pairs with itself).
         let accounts: Vec<ClaimableAccount> =
             (1u8..=7).map(|b| acct(b, 100u64 * b as u64)).collect();
-        let leaves: Vec<ClaimableLeaf> =
-            accounts.iter().cloned().map(ClaimableAccount::into_leaf).collect();
+        let leaves: Vec<ClaimableLeaf> = accounts
+            .iter()
+            .cloned()
+            .map(ClaimableAccount::into_leaf)
+            .collect();
         let tree = MerkleTree::build(leaves);
         for byte in 1u8..=7 {
             let proof = build_inclusion_proof(&accounts, &pk(byte)).expect("build");
@@ -428,8 +440,11 @@ mod tests {
     fn proof_for_single_leaf_tree_is_empty() {
         // Single-leaf tree: proof has zero siblings, root is the leaf hash.
         let accounts = vec![acct(7, 500)];
-        let leaves: Vec<ClaimableLeaf> =
-            accounts.iter().cloned().map(ClaimableAccount::into_leaf).collect();
+        let leaves: Vec<ClaimableLeaf> = accounts
+            .iter()
+            .cloned()
+            .map(ClaimableAccount::into_leaf)
+            .collect();
         let tree = MerkleTree::build(leaves);
         let proof = build_inclusion_proof(&accounts, &pk(7)).expect("build");
         assert!(proof.proof.is_empty());

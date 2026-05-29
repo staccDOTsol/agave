@@ -33,8 +33,7 @@ pub const RATIO_STATE_LEN: usize = 45;
 /// python3 -c "import hashlib; print(hashlib.sha256(b'account:RatioState').digest()[:8].hex())"
 /// # → c96c35e7d203ae05
 /// ```
-pub const RATIO_STATE_DISCRIMINATOR: [u8; 8] =
-    [0xc9, 0x6c, 0x35, 0xe7, 0xd2, 0x03, 0xae, 0x05];
+pub const RATIO_STATE_DISCRIMINATOR: [u8; 8] = [0xc9, 0x6c, 0x35, 0xe7, 0xd2, 0x03, 0xae, 0x05];
 
 /// Q64.64 representation of `1.0`. Useful as a sanity check and as the expected initial
 /// value at asset registration.
@@ -241,7 +240,9 @@ mod tests {
         let h = s.r_as_hex();
         assert_eq!(h.len(), 32);
         assert_eq!(h, "00000000000000010000000000000000");
-        assert!(h.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
     }
 
     #[test]

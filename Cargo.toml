@@ -1,8 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
+    "agent-messaging",
     "matcher",
     "genesis",
+    "programs/agent-faucet",
     "programs/lazy-claim",
     "programs/bridge",
     "programs/bridge-vault",
@@ -19,6 +21,7 @@ members = [
     "tools/megadrop-init",
     "tools/subsidy-cli",
     "tools/wssol-init",
+    "tools/agent-mail",
     "tools/federation-attestor",
     "tools/megadrop-merkle",
     "tools/megadrop-snapshot",

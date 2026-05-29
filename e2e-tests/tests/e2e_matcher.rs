@@ -36,7 +36,10 @@ impl MockPool {
         if self.base == 0 {
             return 0;
         }
-        self.quote.checked_shl(64).map(|n| n / self.base).unwrap_or(u128::MAX)
+        self.quote
+            .checked_shl(64)
+            .map(|n| n / self.base)
+            .unwrap_or(u128::MAX)
     }
 
     fn post_q64(&self, amount: u64, side: Side) -> u128 {
@@ -47,7 +50,11 @@ impl MockPool {
         let k = self.base.saturating_mul(self.quote);
         let (new_base, _new_quote) = match side {
             Side::Buy => {
-                let new_base = if amt >= self.base { 1u128 } else { self.base - amt };
+                let new_base = if amt >= self.base {
+                    1u128
+                } else {
+                    self.base - amt
+                };
                 let new_quote = k / new_base;
                 (new_base, new_quote)
             }
@@ -73,7 +80,9 @@ struct MockAmm {
 
 impl MockAmm {
     fn new() -> Self {
-        Self { pools: BTreeMap::new() }
+        Self {
+            pools: BTreeMap::new(),
+        }
     }
 
     fn add_pool(&mut self, base: Pubkey, quote: Pubkey, base_reserve: u128, quote_reserve: u128) {
@@ -191,9 +200,18 @@ fn batch_clears_three_base_mints_with_residuals() {
     for r in &results {
         assert_eq!(r.quote_mint, quote, "quote consistent across results");
     }
-    let result_a = results.iter().find(|r| r.base_mint == base_a).expect("base_a result");
-    let result_b = results.iter().find(|r| r.base_mint == base_b).expect("base_b result");
-    let result_c = results.iter().find(|r| r.base_mint == base_c).expect("base_c result");
+    let result_a = results
+        .iter()
+        .find(|r| r.base_mint == base_a)
+        .expect("base_a result");
+    let result_b = results
+        .iter()
+        .find(|r| r.base_mint == base_b)
+        .expect("base_b result");
+    let result_c = results
+        .iter()
+        .find(|r| r.base_mint == base_c)
+        .expect("base_c result");
 
     // (2) Clearing price is the midpoint of P_pre and P_post (SPEC §6.3). We can't
     //     conveniently recompute P_post here without reproducing the matcher's net-flow

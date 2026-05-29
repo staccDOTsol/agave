@@ -46,14 +46,43 @@ FEDERATION_M_OF_N          = 5 of 9 (v1)
 R_PUBLISH_INTERVAL_SLOTS   = 150  (~1 minute at 400ms slots)
 ```
 
-### 2.4 CTE feature gates active at slot 0
+### 2.4 Feature gates active at slot 0
+
+Ten gates ship ON at slot 0 (constant retains its `CTE_` prefix for backwards-compat —
+see `genesis/src/classic_defaults.rs::CTE_FEATURE_GATES_AT_GENESIS`). In addition, every
+gate in `agave_feature_set::FEATURE_NAMES` is activated by Layer 2 of the genesis bake,
+so the runtime behaves as if it were running the latest mainnet feature set from slot 0.
+
+ZK ElGamal proof + confidential transfer (4):
 
 ```
-zk1snxsc6Fh3wsGNbbHAJNHiJoYgF29mMnTSusGx5EJ
-zkesAyFB19sTkX8i9ReoKaMNDA4YNTPYJpZKPDt7FMW
-zkNLP7EQALfC1TYeB3biDU7akDckj8iPkvh9y2Mt2K3
-zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8
+zk1snxsc6Fh3wsGNbbHAJNHiJoYgF29mMnTSusGx5EJ   enable Zk Token proof program and syscalls
+zkesAyFB19sTkX8i9ReoKaMNDA4YNTPYJpZKPDt7FMW   Re-enables zk-elgamal-proof program (PR #6523, v2.3.13)
+zkNLP7EQALfC1TYeB3biDU7akDckj8iPkvh9y2Mt2K3   transfer with fee
+zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8   read proof from accounts
 ```
+
+Token-22 v8 syscall prerequisites (5):
+
+```
+7rcw5UtqgDTBBv2EcynNfYckgdAaH1MAsCjKgXMkN7Ri   sol_curve_group_op / sol_curve_multiscalar_mul / sol_curve_validate_point
+A16q37opZdQMCbe5qJ6xpBB9usykfv8jZaMkxvZQi4GJ   sol_alt_bn128_group_op
+EJJewYSddEEtSZHiqugnvhQHiWyZKjkFDQASd7oKSagn   sol_big_mod_exp
+EeyoXa3AyQuHkhRmT9mhKtTPrLNPBuNQbLEvyt5VrYxv   sol_alt_bn128_compression
+EaQpmC6GtRssaZ3PCUM5YksGqUdMLeZ46BQXYtHYakDS   sol_poseidon
+```
+
+SBPFv3 deployment + execution (1):
+
+```
+BUwGLeF3Lxyfv1J1wY8biFHBB2hrk2QhbNftQf3VV3cC   SIMD-0178/0179/0189
+```
+
+The companion `disable_zk_elgamal_proof_program`
+(`zkdoVwnSFnSLtGJG7irJPEYUpmb4i7sGMGcnN6T9rnC`) gate from PR #6523 is also active at
+slot 0 (via Layer 2), but the program's runtime check evaluates
+`disable && !reenable` → `false`, so the ZK ElGamal Proof Program processes
+instructions normally from boot.
 
 ## 3. Genesis
 

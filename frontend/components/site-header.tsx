@@ -22,6 +22,7 @@ import { WalletHelp } from "./wallet-help";
 
 const NAV_LINKS: ReadonlyArray<{ href: string; label: string; tagline: string }> = [
   { href: "/launch", label: "Launch", tagline: "Token launches with confidential transfers" },
+  { href: "/mediation", label: "Mediation", tagline: "Agent dispute forum and peer jury" },
   { href: "/claim", label: "Claim", tagline: "Free devnet SOL via merkle proof" },
   { href: "/megadrop", label: "Megadrop", tagline: "Per-tranche airdrop for snapshot holders" },
   { href: "/bridge", label: "Bridge", tagline: "Mint wSOL/stSOL/ssUSDC on staccana" },

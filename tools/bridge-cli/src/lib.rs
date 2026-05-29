@@ -69,6 +69,20 @@ pub const MAINNET_BRIDGE_VAULT_PROGRAM_ID_SSUSDC: Pubkey = Pubkey::new_from_arra
     0x73, 0x64, 0x63, 0x5F, 0x54, 0x42, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ]);
 
+/// Placeholder for the mainnet bridge vault program id for wSOL.
+pub const MAINNET_BRIDGE_VAULT_PROGRAM_ID_WSOL: Pubkey = Pubkey::new_from_array([
+    // ASCII "bridge_vault_wsol_TBD" then padding
+    0x62, 0x72, 0x69, 0x64, 0x67, 0x65, 0x5F, 0x76, 0x61, 0x75, 0x6C, 0x74, 0x5F, 0x77, 0x73, 0x6F,
+    0x6C, 0x5F, 0x54, 0x42, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]);
+
+/// Placeholder for the mainnet bridge vault program id for Staccana.
+pub const MAINNET_BRIDGE_VAULT_PROGRAM_ID_STACCANA: Pubkey = Pubkey::new_from_array([
+    // ASCII "bridge_vault_staccana_TBD" then padding
+    0x62, 0x72, 0x69, 0x64, 0x67, 0x65, 0x5F, 0x76, 0x61, 0x75, 0x6C, 0x74, 0x5F, 0x73, 0x74, 0x61,
+    0x63, 0x63, 0x61, 0x6E, 0x61, 0x5F, 0x54, 0x42, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]);
+
 /// Resolve the per-asset mainnet vault program id from the asset.
 ///
 /// Each asset has its own mainnet program (BRIDGE.md "Asset model"). This
@@ -82,6 +96,8 @@ pub fn mainnet_vault_program_id(asset: AssetId) -> Pubkey {
     match asset {
         AssetId::StSol => MAINNET_BRIDGE_VAULT_PROGRAM_ID_STSOL,
         AssetId::SsUsdc => MAINNET_BRIDGE_VAULT_PROGRAM_ID_SSUSDC,
+        AssetId::WSol => MAINNET_BRIDGE_VAULT_PROGRAM_ID_WSOL,
+        AssetId::Staccana => MAINNET_BRIDGE_VAULT_PROGRAM_ID_STACCANA,
     }
 }
 
@@ -98,6 +114,8 @@ mod tests {
         assert_ne!(STACCANA_BRIDGE_PROGRAM_ID, Pubkey::default());
         assert_ne!(MAINNET_BRIDGE_VAULT_PROGRAM_ID_STSOL, Pubkey::default());
         assert_ne!(MAINNET_BRIDGE_VAULT_PROGRAM_ID_SSUSDC, Pubkey::default());
+        assert_ne!(MAINNET_BRIDGE_VAULT_PROGRAM_ID_WSOL, Pubkey::default());
+        assert_ne!(MAINNET_BRIDGE_VAULT_PROGRAM_ID_STACCANA, Pubkey::default());
     }
 
     #[test]
@@ -116,6 +134,14 @@ mod tests {
             MAINNET_BRIDGE_VAULT_PROGRAM_ID_STSOL,
             MAINNET_BRIDGE_VAULT_PROGRAM_ID_SSUSDC
         );
+        assert_ne!(
+            MAINNET_BRIDGE_VAULT_PROGRAM_ID_STSOL,
+            MAINNET_BRIDGE_VAULT_PROGRAM_ID_WSOL
+        );
+        assert_ne!(
+            MAINNET_BRIDGE_VAULT_PROGRAM_ID_STSOL,
+            MAINNET_BRIDGE_VAULT_PROGRAM_ID_STACCANA
+        );
     }
 
     #[test]
@@ -127,6 +153,14 @@ mod tests {
         assert_eq!(
             mainnet_vault_program_id(AssetId::SsUsdc),
             MAINNET_BRIDGE_VAULT_PROGRAM_ID_SSUSDC
+        );
+        assert_eq!(
+            mainnet_vault_program_id(AssetId::WSol),
+            MAINNET_BRIDGE_VAULT_PROGRAM_ID_WSOL
+        );
+        assert_eq!(
+            mainnet_vault_program_id(AssetId::Staccana),
+            MAINNET_BRIDGE_VAULT_PROGRAM_ID_STACCANA
         );
     }
 }

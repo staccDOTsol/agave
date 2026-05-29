@@ -211,7 +211,21 @@ fn clear_pair<A: AmmAdapter>(
             continue;
         }
 
-        let cross_quote = base_to_quote_q64(cross_base, clearing_price_q64) as u64;
+        let cross_quote = base_to_quote_q64_ceil(cross_base, clearing_price_q64)
+            .min(buy_remaining_quote as u128)
+            .min(u64::MAX as u128) as u64;
+        if cross_quote == 0 {
+            residual.push(SwapIntent {
+                signer: current_buyer.expect("buyer set above"),
+                in_mint: quote,
+                in_amount: buy_remaining_quote,
+                out_mint: base,
+                min_out: 0,
+                nonce: 0,
+            });
+            buy_remaining_quote = 0;
+            continue;
+        }
 
         matches.push(Match {
             buyer: current_buyer.expect("buyer set above"),
@@ -259,8 +273,11 @@ fn quote_to_base_q64(quote_amount: u64, price_q64: u128) -> u128 {
 }
 
 #[inline]
-fn base_to_quote_q64(base_amount: u64, price_q64: u128) -> u128 {
-    ((base_amount as u128) * price_q64) >> 64
+fn base_to_quote_q64_ceil(base_amount: u64, price_q64: u128) -> u128 {
+    let numerator = (base_amount as u128).saturating_mul(price_q64);
+    let whole = numerator >> 64;
+    let remainder = numerator & ((1u128 << 64) - 1);
+    whole.saturating_add(u128::from(remainder != 0))
 }
 
 #[inline]
@@ -383,6 +400,29 @@ mod tests {
         assert_eq!(r.residual.len(), 1);
         assert_eq!(r.residual[0].signer, pk(10));
         assert_eq!(r.residual[0].in_amount, 100);
+    }
+
+    #[test]
+    fn sub_unit_price_cross_never_settles_zero_quote() {
+        let amm = StubAmm {
+            spot_q64: 1u128 << 63,
+            post_q64: 1u128 << 63,
+        };
+        let base = pk(2);
+        let quote = pk(1);
+
+        let result = batch_match(
+            vec![buy(10, base, quote, 1), sell(20, base, quote, 1)],
+            &BatchConfig {
+                registry: registry(),
+            },
+            &amm,
+        );
+
+        let r = &result[0];
+        assert_eq!(r.matches.len(), 1);
+        assert_eq!(r.matches[0].base_amount, 1);
+        assert_eq!(r.matches[0].quote_amount, 1);
     }
 
     #[test]

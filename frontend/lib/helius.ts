@@ -22,7 +22,7 @@ import { get as idbGet, set as idbSet } from "idb-keyval";
 
 /** Default Helius RPC URL. Overridable via NEXT_PUBLIC_HELIUS_RPC_URL. */
 const DEFAULT_HELIUS_RPC_URL =
-  "https://mainnet.helius-rpc.com/?api-key=1fdb9b1c-5dcb-4979-a991-7dc4d5a6de18";
+  "https://mainnet.helius-rpc.com/?api-key=eb505de9-2e36-46c8-895a-20e5f5bea7a6";
 
 /** Resolved Helius RPC URL. */
 export const HELIUS_RPC_URL =

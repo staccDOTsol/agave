@@ -17,7 +17,6 @@
 //! 7. **Invariant I1** is asserted: total claimed lamports + remaining treasury balance
 //!    == sum of all snapshot lamports.
 
-use solana_program::hash::Hash;
 use solana_program::instruction::{AccountMeta, Instruction};
 use solana_program::pubkey::Pubkey;
 use solana_program::system_program;
@@ -25,7 +24,7 @@ use solana_program::sysvar::instructions as sysvar_instructions;
 use solana_sdk::signature::{Keypair, Signer};
 use solana_sdk::transaction::Transaction;
 use staccana_claim_cli::{
-    build_ed25519_precompile_instruction, build_inclusion_proof, ClaimableAccount, ClaimArgs,
+    build_ed25519_precompile_instruction, build_inclusion_proof, ClaimArgs, ClaimableAccount,
 };
 use staccana_e2e_tests::{
     build_lazy_claim_program_test, install_claim_pre_state, mixed_synthetic_snapshot,
@@ -52,7 +51,10 @@ fn claim_instruction(
     payer: Pubkey,
 ) -> Instruction {
     let recipient = Pubkey::new_from_array(args.pubkey);
-    let data = args.to_wire_bytes().expect("encode claim args");
+    let body = args.to_wire_bytes().expect("encode claim args");
+    let mut data = Vec::with_capacity(1 + body.len());
+    data.push(0x00);
+    data.extend_from_slice(&body);
     let accounts = vec![
         AccountMeta::new(recipient, false),
         AccountMeta::new_readonly(config_account, false),
@@ -128,8 +130,7 @@ async fn full_pipeline_claim_all_and_verify_sol_conservation() {
         .sum();
 
     let mut pt = build_lazy_claim_program_test();
-    let pre =
-        install_claim_pre_state(&mut pt, &genesis, &claimable_targets, claimable_pool);
+    let pre = install_claim_pre_state(&mut pt, &genesis, &claimable_targets, claimable_pool);
     let (mut banks_client, payer, _initial_blockhash) = pt.start().await;
 
     // (6) Claim each account in its own transaction so we get independent blockhashes

@@ -123,8 +123,7 @@ fn single_leaf_tree_proof_is_empty_and_root_is_leaf_hash() {
     assert_eq!(tree.leaf_count, 1);
     assert_eq!(tree.root.0, leaf_hash(&pk(1).to_bytes(), 100));
 
-    let cli_proof =
-        build_inclusion_proof(&cli_accounts_for_test(1), &pk(1)).expect("proof");
+    let cli_proof = build_inclusion_proof(&cli_accounts_for_test(1), &pk(1)).expect("proof");
     assert!(cli_proof.proof.is_empty());
     assert!(cli_proof.proof_flags.is_empty());
     // lazy-claim accepts the empty proof.
@@ -140,7 +139,10 @@ fn input_order_independence_holds_for_all_three_crates() {
     // genesis or the cli must not change the root or the proof.
     let order_a = leaves_for_test(7);
     let order_b: Vec<ClaimableLeaf> = order_a.iter().rev().cloned().collect();
-    assert_eq!(MerkleTree::build(order_a).root, MerkleTree::build(order_b).root);
+    assert_eq!(
+        MerkleTree::build(order_a).root,
+        MerkleTree::build(order_b).root
+    );
 
     let cli_a = cli_accounts_for_test(7);
     let cli_b: Vec<ClaimableAccount> = cli_a.iter().rev().cloned().collect();
@@ -175,7 +177,12 @@ fn tampered_sibling_hash_breaks_lazy_claim_verification() {
     let mut bytes = tampered[0].to_bytes();
     bytes[0] ^= 0xFF;
     tampered[0] = Hash::new_from_array(bytes);
-    assert!(!verify_inclusion(leaf, &tampered, &proof.proof_flags, &tree.root.0));
+    assert!(!verify_inclusion(
+        leaf,
+        &tampered,
+        &proof.proof_flags,
+        &tree.root.0
+    ));
 }
 
 #[test]

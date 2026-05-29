@@ -27,10 +27,11 @@ use solana_program::instruction::{AccountMeta, Instruction};
 use solana_program::pubkey::Pubkey;
 use solana_program::system_program;
 use solana_program::sysvar::instructions as sysvar_instructions;
+use solana_program_test::ProgramTestBanksClientExt;
 use solana_sdk::signature::{Keypair, Signer};
 use solana_sdk::transaction::Transaction;
 use staccana_claim_cli::{
-    build_ed25519_precompile_instruction, build_inclusion_proof, ClaimableAccount, ClaimArgs,
+    build_ed25519_precompile_instruction, build_inclusion_proof, ClaimArgs, ClaimableAccount,
 };
 use staccana_e2e_tests::{
     build_lazy_claim_program_test, install_claim_pre_state, mixed_synthetic_snapshot,
@@ -67,7 +68,10 @@ fn claim_instruction(
     payer: Pubkey,
 ) -> Instruction {
     let recipient = Pubkey::new_from_array(args.pubkey);
-    let data = args.to_wire_bytes().expect("encode claim args");
+    let body = args.to_wire_bytes().expect("encode claim args");
+    let mut data = Vec::with_capacity(1 + body.len());
+    data.push(0x00);
+    data.extend_from_slice(&body);
     let accounts = vec![
         AccountMeta::new(recipient, false),
         AccountMeta::new_readonly(config_account, false),
@@ -87,7 +91,7 @@ fn claim_instruction(
 #[tokio::test]
 async fn claim_succeeds_credits_recipient_and_marks_pda() {
     let snapshot = mixed_synthetic_snapshot();
-    let genesis = build_genesis(snapshot.clone());
+    let genesis = build_genesis(snapshot.iter());
 
     // Pull out one of the claimable accounts to claim.
     let target_acct = snapshot
@@ -111,12 +115,16 @@ async fn claim_succeeds_credits_recipient_and_marks_pda() {
 
     // Spin up the program test with the lazy-claim program registered + pre-state baked.
     let mut pt = build_lazy_claim_program_test();
-    let pre =
-        install_claim_pre_state(&mut pt, &genesis, &[target_pubkey], expected_lamports);
+    let pre = install_claim_pre_state(&mut pt, &genesis, &[target_pubkey], expected_lamports);
     let (mut banks_client, payer, recent_blockhash) = pt.start().await;
 
     let proof_hashes: Vec<Hash> = proof.proof.clone();
-    let args = ClaimArgs::new(target_pubkey, expected_lamports, proof_hashes, proof.proof_flags);
+    let args = ClaimArgs::new(
+        target_pubkey,
+        expected_lamports,
+        proof_hashes,
+        proof.proof_flags,
+    );
 
     let message = claim_message(&target_pubkey, expected_lamports);
     let ed25519_ix = build_ed25519_precompile_instruction(target_keypair, &message);
@@ -170,7 +178,7 @@ async fn claim_succeeds_credits_recipient_and_marks_pda() {
 #[tokio::test]
 async fn claim_replay_is_rejected() {
     let snapshot = mixed_synthetic_snapshot();
-    let genesis = build_genesis(snapshot.clone());
+    let genesis = build_genesis(snapshot.iter());
 
     let target_acct = snapshot
         .iter()
@@ -190,13 +198,16 @@ async fn claim_replay_is_rejected() {
     let proof = build_inclusion_proof(&claimable, &target_pubkey).expect("inclusion proof");
 
     let mut pt = build_lazy_claim_program_test();
-    let pre =
-        install_claim_pre_state(&mut pt, &genesis, &[target_pubkey], target_acct.lamports);
+    let pre = install_claim_pre_state(&mut pt, &genesis, &[target_pubkey], target_acct.lamports);
     let (mut banks_client, payer, recent_blockhash) = pt.start().await;
 
     let proof_hashes: Vec<Hash> = proof.proof.clone();
-    let args =
-        ClaimArgs::new(target_pubkey, target_acct.lamports, proof_hashes, proof.proof_flags);
+    let args = ClaimArgs::new(
+        target_pubkey,
+        target_acct.lamports,
+        proof_hashes,
+        proof.proof_flags,
+    );
 
     let message = claim_message(&target_pubkey, target_acct.lamports);
     let ed25519_ix = build_ed25519_precompile_instruction(target_keypair, &message);
@@ -223,9 +234,9 @@ async fn claim_replay_is_rejected() {
     // Second submission: rebuild the tx with a fresh blockhash so the runtime doesn't
     // dedup on tx-hash, then assert the claim itself rejects (not a runtime-level dedup).
     let second_blockhash = banks_client
-        .get_latest_blockhash()
+        .get_new_latest_blockhash(&recent_blockhash)
         .await
-        .expect("get blockhash");
+        .expect("get fresh blockhash");
     let tx2 = Transaction::new_signed_with_payer(
         &[ed25519_ix, claim_ix],
         Some(&payer.pubkey()),
@@ -242,7 +253,7 @@ async fn claim_replay_is_rejected() {
 #[tokio::test]
 async fn claim_with_wrong_proof_is_rejected() {
     let snapshot = mixed_synthetic_snapshot();
-    let genesis = build_genesis(snapshot.clone());
+    let genesis = build_genesis(snapshot.iter());
 
     // Claim attempt: target account A but use the inclusion proof for account B.
     let claimables: Vec<&_> = snapshot.iter().filter(|a| a.keypair.is_some()).collect();

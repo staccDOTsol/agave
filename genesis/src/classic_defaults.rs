@@ -82,6 +82,13 @@ pub const CTE_FEATURE_GATES_AT_GENESIS: &[(&str, &str)] = &[
         "enable Zk Token proof program and syscalls",
     ),
     (
+        // Pubkey matches `agave_feature_set::reenable_zk_elgamal_proof_program::id()` as
+        // shipped in crates.io v2.3.13 (the version `tools/genesis-bake` links against).
+        // Introduced upstream in agave PR #6523 (Phantom Challenge fix bundle); Anza
+        // re-keyed the gate between PR merge and the v2.3.13 release. Activated at slot 0
+        // alongside the disable gate (which Layer 2 of `tools/genesis-bake/src/features.rs`
+        // flips on via `FEATURE_NAMES`); the program's runtime check evaluates
+        // `disable && !reenable` → `false`, so the program runs.
         "zkesAyFB19sTkX8i9ReoKaMNDA4YNTPYJpZKPDt7FMW",
         "Re-enables zk-elgamal-proof program",
     ),

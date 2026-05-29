@@ -231,8 +231,7 @@ fn parse_pubkey(s: &str, flag: &str) -> Result<Pubkey> {
 
 /// Load a keypair JSON file (the standard `solana-keygen`-format JSON array).
 fn load_keypair(path: &PathBuf) -> Result<Keypair> {
-    read_keypair_file(path)
-        .map_err(|e| anyhow!("failed to load keypair {}: {e}", path.display()))
+    read_keypair_file(path).map_err(|e| anyhow!("failed to load keypair {}: {e}", path.display()))
 }
 
 fn run_deposit(
@@ -274,8 +273,7 @@ fn run_deposit(
         payer.pubkey(),
         true,
     )];
-    let ix =
-        build_deposit_instruction(vault_program, asset, amount_base, dest, metas);
+    let ix = build_deposit_instruction(vault_program, asset, amount_base, dest, metas);
 
     if dry_run {
         print_instruction_summary(&ix);
@@ -286,12 +284,7 @@ fn run_deposit(
     let blockhash = rpc
         .get_latest_blockhash()
         .context("failed to fetch latest blockhash from mainnet RPC")?;
-    let tx = Transaction::new_signed_with_payer(
-        &[ix],
-        Some(&payer.pubkey()),
-        &[&payer],
-        blockhash,
-    );
+    let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[&payer], blockhash);
     let sig = rpc
         .send_and_confirm_transaction(&tx)
         .context("failed to submit deposit transaction")?;
@@ -385,7 +378,11 @@ fn run_withdraw(
     Ok(())
 }
 
-fn run_ratio(asset_label: &str, rpc_url: &str, bridge_program_override: Option<&str>) -> Result<()> {
+fn run_ratio(
+    asset_label: &str,
+    rpc_url: &str,
+    bridge_program_override: Option<&str>,
+) -> Result<()> {
     let asset = AssetId::from_label(asset_label)?;
     let bridge_program_id = resolve_program_id(
         bridge_program_override,
@@ -403,7 +400,11 @@ fn run_ratio(asset_label: &str, rpc_url: &str, bridge_program_override: Option<&
     // Print both the raw Q64.64 hex (load-bearing) and a decimal approximation
     // (display-only). Users should never read decimal `R` and round-trip it
     // back into the chain; the hex is the authoritative form.
-    println!("asset:                 {} (id={})", asset.label(), state.asset_id);
+    println!(
+        "asset:                 {} (id={})",
+        asset.label(),
+        state.asset_id
+    );
     println!("ratio PDA:             {pda}");
     println!("R (Q64.64 hex):        {}", state.r_as_hex());
     println!("R (~ decimal, lossy):  {:.18}", state.r_as_f64());

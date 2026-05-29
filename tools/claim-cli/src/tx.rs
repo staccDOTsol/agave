@@ -61,9 +61,8 @@ pub const STACCANA_CLAIM_DOMAIN: &[u8] = b"STACCANA_CLAIM_V1";
 /// The bytes here come from the ASCII string `LAZY_CLAIM_PROGRAM_PLACEHOLDER111` (32 bytes
 /// — chosen so a base58-decoded version is recognizable in logs).
 pub const LAZY_CLAIM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
-    b'L', b'A', b'Z', b'Y', b'_', b'C', b'L', b'A', b'I', b'M', b'_', b'P', b'R', b'O', b'G',
-    b'R', b'A', b'M', b'_', b'P', b'L', b'A', b'C', b'E', b'H', b'O', b'L', b'D', b'E', b'R',
-    b'1', b'1',
+    b'L', b'A', b'Z', b'Y', b'_', b'C', b'L', b'A', b'I', b'M', b'_', b'P', b'R', b'O', b'G', b'R',
+    b'A', b'M', b'_', b'P', b'L', b'A', b'C', b'E', b'H', b'O', b'L', b'D', b'E', b'R', b'1', b'1',
 ]);
 
 /// `ClaimArgs` per `docs/SPEC.md` §4.1.
@@ -116,9 +115,8 @@ impl ClaimArgs {
             ));
         }
 
-        let mut out = Vec::with_capacity(
-            32 + 8 + 2 + (32 * self.proof.len()) + self.proof_flags.len(),
-        );
+        let mut out =
+            Vec::with_capacity(32 + 8 + 2 + (32 * self.proof.len()) + self.proof_flags.len());
         out.extend_from_slice(&self.pubkey);
         out.extend_from_slice(&self.lamports.to_le_bytes());
         out.extend_from_slice(&proof_len.to_le_bytes());
@@ -236,7 +234,10 @@ pub fn build_claim_instruction(
     payer: Pubkey,
 ) -> std::io::Result<Instruction> {
     let recipient = Pubkey::new_from_array(args.pubkey);
-    let data = args.to_wire_bytes()?;
+    let body = args.to_wire_bytes()?;
+    let mut data = Vec::with_capacity(1 + body.len());
+    data.push(0x00);
+    data.extend_from_slice(&body);
     let accounts = vec![
         AccountMeta::new(recipient, false),
         AccountMeta::new_readonly(program_state, false),
@@ -384,6 +385,8 @@ mod tests {
             .expect("ix");
 
         assert_eq!(ix.program_id, LAZY_CLAIM_PROGRAM_ID);
+        assert_eq!(ix.data[0], 0x00);
+        assert_eq!(&ix.data[1..], args.to_wire_bytes().unwrap().as_slice());
         // SPEC §4.1 (post-discovery in e2e harness): recipient, config, sysvar, treasury,
         // marker, payer, system_program.
         assert_eq!(ix.accounts.len(), 7);

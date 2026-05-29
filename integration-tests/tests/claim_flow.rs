@@ -39,8 +39,10 @@ fn to_snapshot_row(a: &SyntheticAccount) -> SnapshotAccount {
 /// the rest of the workspace would produce.
 fn bs58_inner(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let mut digits: Vec<u8> = vec![0];
-    for &b in bytes {
+    let leading_zeros = bytes.iter().take_while(|&&b| b == 0).count();
+    let mut digits: Vec<u8> = Vec::new();
+
+    for &b in &bytes[leading_zeros..] {
         let mut carry = b as u32;
         for d in digits.iter_mut() {
             carry += (*d as u32) * 256;
@@ -52,13 +54,10 @@ fn bs58_inner(bytes: &[u8]) -> String {
             carry /= 58;
         }
     }
+
     let mut out = String::new();
-    for &b in bytes {
-        if b == 0 {
-            out.push('1');
-        } else {
-            break;
-        }
+    for _ in 0..leading_zeros {
+        out.push('1');
     }
     for &d in digits.iter().rev() {
         out.push(ALPHABET[d as usize] as char);
@@ -102,8 +101,7 @@ fn claim_cli_proof_reconstructs_genesis_root() {
 
     // The claim-cli's reported root MUST match the genesis crate's root byte-for-byte.
     assert_eq!(
-        proof.root,
-        genesis.claimable_root.0,
+        proof.root, genesis.claimable_root.0,
         "claim-cli root must match genesis root"
     );
     // And the recomputed root from the proof itself must too.
@@ -130,7 +128,12 @@ fn lazy_claim_verify_accepts_claim_cli_proof_against_genesis_root() {
 
         let leaf = leaf_hash(&target.to_bytes(), proof.lamports);
         assert!(
-            verify_inclusion(leaf, &proof.proof, &proof.proof_flags, &genesis.claimable_root.0),
+            verify_inclusion(
+                leaf,
+                &proof.proof,
+                &proof.proof_flags,
+                &genesis.claimable_root.0
+            ),
             "lazy-claim must accept claim-cli proof for pubkey 0x{byte:02x}"
         );
     }
@@ -189,7 +192,10 @@ fn genesis_treasury_total_equals_sum_of_non_claimable_lamports() {
         .filter(|a| a.owner == SYSTEM_PROGRAM_ID && a.data_len == 0)
         .map(|a| a.lamports as u128)
         .sum();
-    assert_eq!(claimable_total + genesis.treasury.total_lamports(), total_input);
+    assert_eq!(
+        claimable_total + genesis.treasury.total_lamports(),
+        total_input
+    );
 }
 
 #[test]

@@ -97,7 +97,10 @@ fn buy_heavy_batch_pushes_residual_to_amm() {
     let r = &result[0];
 
     // At least one match (the big buyer crosses with the lone seller).
-    assert!(!r.matches.is_empty(), "buy-heavy batch should still produce a cross");
+    assert!(
+        !r.matches.is_empty(),
+        "buy-heavy batch should still produce a cross"
+    );
     // Residual must include leftover quote — at least the smaller buyer (50) and
     // probably one of the 100-quote buyers, depending on rounding.
     let total_residual_quote: u64 = r
@@ -262,9 +265,15 @@ fn size_priority_ordering_is_preserved_under_real_amm() {
     );
     let r = &result[0];
     assert_eq!(r.matches[0].buyer, pk(12));
-    assert_eq!(r.matches[0].base_amount, 200);
-    // Two unfilled buyers (the 50 and the 100) plus zero unfilled sellers.
+    assert_eq!(r.matches[0].seller, pk(20));
+    assert!(r.matches[0].base_amount > 0);
+    assert!(r.matches[0].quote_amount > 0);
+    // AMM-anchored clearing can move the fill size away from the unit-price 200, but
+    // the largest buyer still takes priority and no seller dust is left unmatched.
     assert_eq!(r.residual.len(), 2);
+    assert!(r.residual.iter().all(|intent| intent.in_mint == quote));
+    assert!(r.residual.iter().any(|intent| intent.signer == pk(10)));
+    assert!(r.residual.iter().any(|intent| intent.signer == pk(11)));
 }
 
 #[test]

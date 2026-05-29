@@ -112,13 +112,19 @@ impl AssetId {
     /// Derive the per-asset `AssetConfig` PDA on the staccana bridge program.
     /// SPEC §5.1.
     pub fn asset_config_pda(self, bridge_program_id: &Pubkey) -> (Pubkey, u8) {
-        Pubkey::find_program_address(&[ASSET_SEED, &self.as_u32().to_le_bytes()], bridge_program_id)
+        Pubkey::find_program_address(
+            &[ASSET_SEED, &self.as_u32().to_le_bytes()],
+            bridge_program_id,
+        )
     }
 
     /// Derive the per-asset `RatioState` PDA on the staccana bridge program.
     /// SPEC §5.2.
     pub fn ratio_state_pda(self, bridge_program_id: &Pubkey) -> (Pubkey, u8) {
-        Pubkey::find_program_address(&[RATIO_SEED, &self.as_u32().to_le_bytes()], bridge_program_id)
+        Pubkey::find_program_address(
+            &[RATIO_SEED, &self.as_u32().to_le_bytes()],
+            bridge_program_id,
+        )
     }
 
     /// Derive the per-asset outbound-nonce counter PDA used by the burn ix.
@@ -151,7 +157,9 @@ pub fn parse_amount(amount: &str, decimals: u8) -> Result<u64> {
         None => (amount, ""),
     };
     if int_part.is_empty() && frac_part.is_empty() {
-        return Err(anyhow!("amount must contain at least one digit: {amount:?}"));
+        return Err(anyhow!(
+            "amount must contain at least one digit: {amount:?}"
+        ));
     }
     if !int_part.chars().all(|c| c.is_ascii_digit()) {
         return Err(anyhow!("integer part is not numeric: {int_part:?}"));
@@ -341,7 +349,10 @@ mod tests {
             // Round-trip equality must hold for the canonical (no trailing
             // zero) representation.
             let canonical = parse_amount(&formatted, decimals).unwrap();
-            assert_eq!(raw, canonical, "round-trip failed for {input} ({decimals}dp)");
+            assert_eq!(
+                raw, canonical,
+                "round-trip failed for {input} ({decimals}dp)"
+            );
         }
     }
 }

@@ -169,8 +169,14 @@ mod tests {
     #[test]
     fn mixed_snapshot_yields_expected_partition_split() {
         let accounts = mixed_snapshot();
-        let claimable = accounts.iter().filter(|a| partition(*a) == Disposition::Claimable).count();
-        let treasury = accounts.iter().filter(|a| partition(*a) == Disposition::Treasury).count();
+        let claimable = accounts
+            .iter()
+            .filter(|a| partition(*a) == Disposition::Claimable)
+            .count();
+        let treasury = accounts
+            .iter()
+            .filter(|a| partition(*a) == Disposition::Treasury)
+            .count();
         assert_eq!(claimable, 4);
         assert_eq!(treasury, 4);
     }

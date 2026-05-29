@@ -105,12 +105,19 @@ impl ConstantProductAmm {
 
     /// Insert (or overwrite) a pool keyed by `(base, quote)`.
     pub fn add_pool(&self, base: Pubkey, quote: Pubkey, pool: ConstantProductPool) {
-        self.pools.lock().expect("amm pool lock").insert((base, quote), pool);
+        self.pools
+            .lock()
+            .expect("amm pool lock")
+            .insert((base, quote), pool);
     }
 
     /// Read a pool back for assertions. Returns `None` if the pool isn't present.
     pub fn pool(&self, base: &Pubkey, quote: &Pubkey) -> Option<ConstantProductPool> {
-        self.pools.lock().expect("amm pool lock").get(&(*base, *quote)).copied()
+        self.pools
+            .lock()
+            .expect("amm pool lock")
+            .get(&(*base, *quote))
+            .copied()
     }
 
     /// Apply a swap to a pool, mutating its reserves. Tests use this to simulate the
@@ -201,7 +208,10 @@ mod tests {
         amm.add_pool(pk(1), pk(2), ConstantProductPool::new(1_000, 1_000));
         let pre = amm.spot_price_q64(&pk(1), &pk(2));
         let post = amm.simulate_post_price_q64(&pk(1), &pk(2), 100, Side::Buy);
-        assert!(post > pre, "buy should push price up: pre={pre} post={post}");
+        assert!(
+            post > pre,
+            "buy should push price up: pre={pre} post={post}"
+        );
     }
 
     #[test]
@@ -210,7 +220,10 @@ mod tests {
         amm.add_pool(pk(1), pk(2), ConstantProductPool::new(1_000, 1_000));
         let pre = amm.spot_price_q64(&pk(1), &pk(2));
         let post = amm.simulate_post_price_q64(&pk(1), &pk(2), 100, Side::Sell);
-        assert!(post < pre, "sell should push price down: pre={pre} post={post}");
+        assert!(
+            post < pre,
+            "sell should push price down: pre={pre} post={post}"
+        );
     }
 
     #[test]

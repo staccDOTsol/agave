@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 40-deploy-programs.sh — deploy all 5 staccana programs after the chain is live.
+# 40-deploy-programs.sh — deploy all staccana programs after the chain is live.
 #
 # Prereqs:
 #   - Chain alive (RPC responding, slots rooting)
@@ -34,7 +34,7 @@ solana balance
 # etc) before launch; for tonight's devnet, randoms are fine.
 echo ""
 echo "[deploy] === ensuring program-id keypairs exist ==="
-for p in lazy-claim bridge secret-pump validator-subsidy megadrop; do
+for p in lazy-claim bridge secret-pump validator-subsidy megadrop agent-faucet; do
   if [[ ! -f "$KEY_DIR/program-$p.json" ]]; then
     solana-keygen new --no-passphrase --silent --outfile "$KEY_DIR/program-$p.json"
   fi
@@ -48,13 +48,14 @@ declare -A SO_FILES=(
   [secret-pump]="staccana_secret_pump.so"
   [validator-subsidy]="staccana_validator_subsidy.so"
   [megadrop]="staccana_megadrop.so"
+  [agent-faucet]="staccana_agent_faucet.so"
 )
 
 # Deploy each program, capturing the program ID on success
 declare -A DEPLOYED_IDS
 echo ""
 echo "[deploy] === deploying programs ==="
-for p in lazy-claim bridge secret-pump validator-subsidy megadrop; do
+for p in lazy-claim bridge secret-pump validator-subsidy megadrop agent-faucet; do
   so_path="$DEPLOY_DIR/${SO_FILES[$p]}"
   if [[ ! -f "$so_path" ]]; then
     echo "  $p: SKIPPED (.so not found at $so_path — run step 25 first)" >&2
@@ -78,7 +79,7 @@ mkdir -p /etc/staccana
 {
   echo "{"
   first=1
-  for p in lazy-claim bridge secret-pump validator-subsidy megadrop; do
+  for p in lazy-claim bridge secret-pump validator-subsidy megadrop agent-faucet; do
     if [[ -n "${DEPLOYED_IDS[$p]:-}" ]]; then
       if [[ $first -eq 0 ]]; then echo ","; fi
       printf '  "%s": "%s"' "$p" "${DEPLOYED_IDS[$p]}"
