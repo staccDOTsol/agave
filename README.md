@@ -47,7 +47,7 @@ Staccana is a sovereign Solana chain. Genesis is built from a snapshot of mainne
 
 ## Run a validator
 
-Staccana ships as a single multi-arch Docker image (`linux/amd64` + `linux/arm64`). It's a slightly-patched `agave-validator` 3.1.14 plus a genesis seed and a run script that wires entrypoint / identity / vote / stake on first boot.
+Staccana ships as a single multi-arch Docker image (`linux/amd64` + `linux/arm64`). It's `agave-validator` (solana-core 2.3 line) carrying the staccana confidential-transfer fixes, plus a genesis seed and a run script that wires entrypoint / identity / vote / stake on first boot.
 
 ### Minimum requirements
 
@@ -61,7 +61,7 @@ Staccana ships as a single multi-arch Docker image (`linux/amd64` + `linux/arm64
 | Field | Value |
 |---|---|
 | Genesis hash | `FFwiB5Dq3HshrfzPeQTCWAzVUFgw6r4kJLAmCYdLXLep` |
-| Validator binary version | `agave-validator 3.1.14` |
+| Validator binary version | `agave-validator` (solana-core 2.3.x, branch `staccana-ct-fixes`) |
 | Bootstrap entrypoint | `84.32.220.211:8001` (val-1, identity `BtTrfSMeHSNJc8cfy3AAXEykjGPEuTFzL53Vfp8dsUcb`) |
 | Public RPC | `https://rpc.mp.fun` (or hit any of val-1/2/3/4 directly on `:8899`) |
 | Docker image | `jrsdunn/solana-classic-validator:latest` |
@@ -95,12 +95,12 @@ On first boot the entrypoint script generates fresh `identity.json`, `vote.json`
 
 ### Building the validator from source
 
-The deployed binary is a thin patch on `anza-xyz/agave v3.1.14` — three `assert!(io_uring_supported())` calls in `fs/src/buffered_reader.rs` and `fs/src/dirs.rs` turned into `if/else` fallbacks that use `std::fs` on WSL2 / pre-5.10 kernels. **Zero consensus, ledger, FBA, or program-activation changes.** Published as a branch on a fork:
+The deployed binary is built from the `staccana-ct-fixes` branch on the fork — agave (solana-core 2.3 line) plus the staccana confidential-transfer fixes: the ZK ElGamal proof-program re-enable gate and the `percentage_with_cap` Fiat-Shamir transcript fix. Validated end-to-end on devnet-sigma-v2 (commit `df71095f16`). Build it with:
 
 ```bash
 git clone https://github.com/staccDOTsol/agave staccana-agave
 cd staccana-agave
-git checkout staccana-3.1.14    # rebases cleanly on tag v3.1.14
+git checkout staccana-ct-fixes  # agave 2.3 line + staccana confidential-transfer fixes
 ./cargo build --release          # ~25 min on a beefy box
 ```
 
@@ -110,7 +110,7 @@ The resulting `target/release/agave-validator` is byte-equivalent to what's runn
 ./infra/scripts/build-agave.sh    # in this (staccana) repo
 ```
 
-If your build syncs cleanly past slot ~900K and then trips on `inconsistent program activation on snapshot restore`, you're almost certainly building **v2.x**, not v3.1.14 — the major-version gap covers many feature-gate activations baked into the snapshot.
+Build from the `staccana-ct-fixes` branch (the validated source); set `STACCANA_AGAVE_BRANCH` to override if you maintain your own fork.
 
 ### Joining the validator subsidy
 
@@ -138,11 +138,14 @@ Distributions are pull-free — they land in the identity address whenever `dist
 
 ## Status
 
-Pre-alpha scaffold. The matcher and genesis crates are the only compilable code; everything else is design docs and future crate stubs.
+Pre-alpha scaffold with several live subsystems. The matcher/genesis pipeline,
+lazy-claim, bridge/megadrop scaffolding, agent messaging codec, and agent-only
+`MSG` faucet all compile in the workspace.
 
 ```bash
 cargo test -p staccana-matcher
 cargo test -p staccana-genesis
+cargo test -p staccana-agent-messaging -p staccana-agent-mail -p staccana-agent-faucet
 ```
 
 ## Why
