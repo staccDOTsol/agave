@@ -36,6 +36,8 @@ pub struct SVMFeatureSet {
     pub increase_tx_account_lock_limit: bool,
     pub disable_rent_fees_collection: bool,
     pub enable_extend_program_checked: bool,
+    pub disable_zk_elgamal_proof_program: bool,
+    pub reenable_zk_elgamal_proof_program: bool,
 }
 
 impl SVMFeatureSet {
@@ -77,6 +79,8 @@ impl SVMFeatureSet {
             increase_tx_account_lock_limit: true,
             disable_rent_fees_collection: true,
             enable_extend_program_checked: true,
+            disable_zk_elgamal_proof_program: true,
+            reenable_zk_elgamal_proof_program: true,
         }
     }
 }

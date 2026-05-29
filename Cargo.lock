@@ -11824,6 +11824,7 @@ dependencies = [
 name = "solana-zk-elgamal-proof-program"
 version = "2.3.0"
 dependencies = [
+ "agave-feature-set",
  "bytemuck",
  "criterion",
  "curve25519-dalek 4.1.3",
@@ -14275,3 +14276,13 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "proc-macro2"
+version = "1.0.79"
+source = "git+https://github.com/dtolnay/proc-macro2?rev=1.0.79#4ba4ab1ec52d9e8286826a898430683ba002a002"
+
+[[patch.unused]]
+name = "quote"
+version = "1.0.35"
+source = "git+https://github.com/dtolnay/quote?rev=1.0.35#b01743f24cb5b19f96a3eac6bce0e7aee10f6199"

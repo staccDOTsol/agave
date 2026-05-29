@@ -153,6 +153,10 @@ impl FeatureSet {
             increase_tx_account_lock_limit: self.is_active(&increase_tx_account_lock_limit::id()),
             disable_rent_fees_collection: self.is_active(&disable_rent_fees_collection::id()),
             enable_extend_program_checked: self.is_active(&enable_extend_program_checked::id()),
+            disable_zk_elgamal_proof_program: self
+                .is_active(&disable_zk_elgamal_proof_program::id()),
+            reenable_zk_elgamal_proof_program: self
+                .is_active(&reenable_zk_elgamal_proof_program::id()),
         }
     }
 }
@@ -1095,6 +1099,14 @@ pub mod enable_extend_program_checked {
     solana_pubkey::declare_id!("2oMRZEDWT2tqtYMofhmmfQ8SsjqUFzT6sYXppQDavxwz");
 }
 
+pub mod disable_zk_elgamal_proof_program {
+    solana_pubkey::declare_id!("zkdoVwnSFnSLtGJG7irJPEYUpmb4i7sGMGcnN6T9rnC");
+}
+
+pub mod reenable_zk_elgamal_proof_program {
+    solana_pubkey::declare_id!("zkesAyFB19sTkX8i9ReoKaMNDA4YNTPYJpZKPDt7FMW");
+}
+
 pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::new(|| {
     [
         (secp256k1_program_enabled::id(), "secp256k1 program"),
@@ -1330,6 +1342,8 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
         (mask_out_rent_epoch_in_vm_serialization::id(), "SIMD-0267: Sets rent_epoch to a constant in the VM"),
         (enshrine_slashing_program::id(), "SIMD-0204: Slashable event verification"),
         (enable_extend_program_checked::id(), "Enable ExtendProgramChecked instruction"),
+        (disable_zk_elgamal_proof_program::id(), "Disables zk-elgamal-proof program"),
+        (reenable_zk_elgamal_proof_program::id(), "Re-enables zk-elgamal-proof program"),
         /*************** ADD NEW FEATURES HERE ***************/
     ]
     .iter()

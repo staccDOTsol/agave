@@ -1,5 +1,5 @@
 use {
-    bytemuck::{bytes_of, Pod},
+    bytemuck::{bytes_of, bytes_of_mut, Pod},
     solana_account::Account,
     solana_instruction::error::InstructionError,
     solana_keypair::Keypair,
@@ -698,6 +698,53 @@ async fn test_batched_grouped_ciphertext_3_handles_validity() {
         ProofInstruction::VerifyBatchedGroupedCiphertext3HandlesValidity,
         size_of::<ProofContextState<BatchedGroupedCiphertext3HandlesValidityProofContext>>(),
         &success_proof_data,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_percentage_with_cap() {
+    // "at-cap" branch: percentage_amount == max_value makes the percentage-max
+    // proof the real branch and the equality branch simulated, so any delta /
+    // claimed commitments still yield a verifying proof.
+    let max_value: u64 = 3;
+    let percentage_amount: u64 = max_value;
+    let (percentage_commitment, percentage_opening) = Pedersen::new(percentage_amount);
+    let delta_amount: u64 = 0;
+    let (delta_commitment, delta_opening) = Pedersen::new(delta_amount);
+    let (claimed_commitment, claimed_opening) = Pedersen::new(0_u64);
+
+    let success_proof_data = PercentageWithCapProofData::new(
+        &percentage_commitment,
+        &percentage_opening,
+        percentage_amount,
+        &delta_commitment,
+        &delta_opening,
+        delta_amount,
+        &claimed_commitment,
+        &claimed_opening,
+        max_value,
+    )
+    .unwrap();
+
+    // Corrupting a proof byte must make verification reject. This is the
+    // regression guard for the `c_max_proof` Fiat-Shamir transcript fix: a sound
+    // transcript binds the proof so a mutated proof cannot verify.
+    let mut fail_proof_data = success_proof_data;
+    bytes_of_mut(&mut fail_proof_data.proof)[0] ^= 1;
+
+    test_verify_proof_without_context(
+        ProofInstruction::VerifyPercentageWithCap,
+        &success_proof_data,
+        &fail_proof_data,
+    )
+    .await;
+
+    test_verify_proof_with_context(
+        ProofInstruction::VerifyPercentageWithCap,
+        size_of::<ProofContextState<PercentageWithCapProofContext>>(),
+        &success_proof_data,
+        &fail_proof_data,
     )
     .await;
 }
