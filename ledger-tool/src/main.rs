@@ -2232,8 +2232,7 @@ fn main() {
                     let mut process_options = parse_process_options(&ledger_path, arg_matches);
 
                     // crekk: snapshot-only surgery — mint a bare ledger if none exists
-                    eprintln!("CREKK-TRACE snapshot_only={snapshot_only} rocksdb_exists={}", ledger_path.join("rocksdb").exists());
-                    if snapshot_only && !ledger_path.join("rocksdb").exists() {
+                    if snapshot_only && !ledger_path.join("rocksdb/CURRENT").exists() {
                         create_new_ledger(
                             &ledger_path,
                             &genesis_config,
