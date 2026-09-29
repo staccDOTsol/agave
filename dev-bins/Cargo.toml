@@ -151,6 +151,7 @@ solana-unified-scheduler-pool = { path = "../unified-scheduler-pool", version = 
 solana-version = { path = "../version", version = "=4.3.0", features = ["agave-unstable-api"] }
 solana-vote = { path = "../vote", version = "=4.3.0", features = ["agave-unstable-api"] }
 solana-vote-program = { path = "../programs/vote", version = "=4.3.0", default-features = false, features = ["agave-unstable-api"] }
+ed25519-dalek = "2.2"
 spl-token-2022-interface = "3.1.0"
 tempfile = "3.23.0"
 thiserror = "2.0.17"

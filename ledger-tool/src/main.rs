@@ -57,6 +57,7 @@ use {
         leader_schedule_cache::LeaderScheduleCache,
         shred::{ProcessShredsStats, ReedSolomonCache, Shred, Shredder},
     },
+    solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_measure::{measure::Measure, measure_time},
     solana_message::SimpleAddressLoader,
     solana_native_token::{LAMPORTS_PER_SOL, Sol},
@@ -1470,6 +1471,30 @@ fn main() {
                         ),
                 )
                 .arg(
+                    Arg::with_name("freeze_mint_authorities")
+                        .required(false)
+                        .long("freeze-mint-authorities")
+                        .takes_value(false)
+                        .help(
+                            "Null the mint and freeze authorities of every SPL Token / \
+                             Token-2022 mint whose authority is an on-curve key (issuer \
+                             wallets); off-curve PDA authorities are kept so LSTs and \
+                             stake pools keep working",
+                        ),
+                )
+                .arg(
+                    Arg::with_name("program_upgrade_authority")
+                        .required(false)
+                        .long("set-program-upgrade-authority")
+                        .takes_value(true)
+                        .value_name("PUBKEY")
+                        .validator(is_pubkey)
+                        .help(
+                            "Set the upgrade authority of every BPF upgradeable \
+                             program-data account to PUBKEY while creating the snapshot",
+                        ),
+                )
+                .arg(
                     Arg::with_name("feature_gates_to_deactivate")
                         .required(false)
                         .long("deactivate-feature-gate")
@@ -2161,6 +2186,10 @@ fn main() {
                             .collect();
                     let redelegate_stake_to: Vec<Pubkey> =
                         pubkeys_of(arg_matches, "redelegate_stake_to").unwrap_or_default();
+                    let freeze_mint_authorities =
+                        arg_matches.is_present("freeze_mint_authorities");
+                    let program_upgrade_authority =
+                        pubkey_of(arg_matches, "program_upgrade_authority");
                     let snapshot_version = arg_matches.value_of("snapshot_version").map_or(
                         SnapshotVersion::default(),
                         |s| {
@@ -2299,6 +2328,8 @@ fn main() {
                         || !accounts_to_replace.is_empty()
                         || !token_account_owners_to_set.is_empty()
                         || !redelegate_stake_to.is_empty()
+                        || freeze_mint_authorities
+                        || program_upgrade_authority.is_some()
                         || !feature_gates_to_deactivate.is_empty()
                         || !vote_accounts_to_destake.is_empty()
                         || faucet_pubkey.is_some()
@@ -2489,6 +2520,110 @@ fn main() {
                                 }
                             }
                         }
+                    }
+
+                    // crekk: freeze invented value. Null the mint/freeze authority of any
+                    // mint whose authority is an on-curve key (Circle, Tether, team
+                    // wallets); off-curve PDA authorities (SPL stake pool, Marinade,
+                    // Sanctum) only mint against deposits, so they stay and LSTs keep
+                    // working. SPL mint base: [mint_authority COption<Pubkey> 36]
+                    // [supply u64][decimals u8][is_initialized u8]
+                    // [freeze_authority COption<Pubkey> 36]; Token-2022 marks mints with
+                    // AccountType::Mint at data[82].
+                    if freeze_mint_authorities {
+                        let on_curve = |bytes: &[u8]| {
+                            let mut pk = [0u8; 32];
+                            pk.copy_from_slice(bytes);
+                            ed25519_dalek::VerifyingKey::from_bytes(&pk).is_ok()
+                        };
+                        let mut nulled = 0usize;
+                        let mut kept_pda = 0usize;
+                        for token_program_id in [
+                            spl_token_2022_interface::inline_spl_token::id(),
+                            spl_token_2022_interface::id(),
+                        ] {
+                            for (address, mut account) in bank
+                                .get_program_accounts(&token_program_id)
+                                .unwrap()
+                                .into_iter()
+                            {
+                                let mut data = account.data().to_vec();
+                                let is_mint = if data.len() == 82 {
+                                    data[45] != 0
+                                } else if data.len() > 82
+                                    && data.len() != 165
+                                    && data.len() != 355
+                                {
+                                    data[82]
+                                        == spl_token_2022_interface::extension::AccountType::Mint
+                                            as u8
+                                } else {
+                                    false
+                                };
+                                if !is_mint {
+                                    continue;
+                                }
+                                let mut changed = false;
+                                for (tag, key) in [(0..4usize, 4..36usize), (46..50, 50..82)] {
+                                    if data[tag] != [0, 0, 0, 0] {
+                                        if on_curve(&data[key]) {
+                                            data[tag].copy_from_slice(&[0, 0, 0, 0]);
+                                            changed = true;
+                                            nulled += 1;
+                                        } else {
+                                            kept_pda += 1;
+                                            if verbose_level > 1 {
+                                                warn!(
+                                                    "Kept PDA {} authority {} on mint {}",
+                                                    if tag.start == 0 {
+                                                        "mint"
+                                                    } else {
+                                                        "freeze"
+                                                    },
+                                                    Pubkey::new_from_array(
+                                                        data[key].try_into().unwrap()
+                                                    ),
+                                                    address
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                if changed {
+                                    account.set_data_from_slice(&data);
+                                    bank.store_account(&address, &account);
+                                }
+                            }
+                        }
+                        info!(
+                            "Mint authorities frozen: {nulled} nulled (on-curve), \
+                             {kept_pda} kept (PDA)"
+                        );
+                    }
+
+                    // crekk: nobody upgrades programs but us. Swap the upgrade authority
+                    // of every BPF upgradeable program-data account.
+                    if let Some(new_authority) = program_upgrade_authority {
+                        let mut count = 0usize;
+                        for (address, mut account) in bank
+                            .get_program_accounts(&solana_sdk_ids::bpf_loader_upgradeable::id())
+                            .unwrap()
+                            .into_iter()
+                        {
+                            if let Ok(UpgradeableLoaderState::ProgramData { slot, .. }) =
+                                account.state()
+                            {
+                                account
+                                    .set_state(&UpgradeableLoaderState::ProgramData {
+                                        slot,
+                                        upgrade_authority: Some(new_authority),
+                                    })
+                                    .unwrap();
+                                bank.store_account(&address, &account);
+                                count += 1;
+                            }
+                        }
+                        info!("Program upgrade authorities set on {count} program-data accounts");
                     }
 
                     if let Some(bootstrap_validator_pubkeys) = bootstrap_validator_pubkeys {
