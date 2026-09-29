@@ -1427,6 +1427,19 @@ fn main() {
                         .help("List of accounts to remove while creating the snapshot"),
                 )
                 .arg(
+                    Arg::with_name("accounts_to_replace")
+                        .required(false)
+                        .long("replace-account")
+                        .takes_value(true)
+                        .value_name("ADDRESS:FILENAME.JSON")
+                        .multiple(true)
+                        .help(
+                            "Store the account in FILENAME.JSON (`solana account --output json` \
+                             format) at ADDRESS while creating the snapshot, creating or \
+                             overwriting it",
+                        ),
+                )
+                .arg(
                     Arg::with_name("feature_gates_to_deactivate")
                         .required(false)
                         .long("deactivate-feature-gate")
@@ -2054,6 +2067,39 @@ fn main() {
                         pubkeys_of(arg_matches, "bootstrap_validator");
                     let accounts_to_remove =
                         pubkeys_of(arg_matches, "accounts_to_remove").unwrap_or_default();
+                    let accounts_to_replace: Vec<(Pubkey, AccountSharedData)> = arg_matches
+                        .values_of("accounts_to_replace")
+                        .into_iter()
+                        .flatten()
+                        .map(|value| {
+                            let (address, path) = value.split_once(':').unwrap_or_else(|| {
+                                eprintln!("Error: expected ADDRESS:FILENAME.JSON, got {value}");
+                                exit(1);
+                            });
+                            let address = Pubkey::from_str(address).unwrap_or_else(|err| {
+                                eprintln!("Error: invalid address {address}: {err}");
+                                exit(1);
+                            });
+                            let raw = std::fs::read_to_string(path).unwrap_or_else(|err| {
+                                eprintln!("Error: unable to read {path}: {err}");
+                                exit(1);
+                            });
+                            let cli_account: solana_cli_output::CliAccount =
+                                serde_json::from_str(&raw).unwrap_or_else(|err| {
+                                    eprintln!("Error: unable to parse {path}: {err}");
+                                    exit(1);
+                                });
+                            let account = cli_account
+                                .keyed_account
+                                .account
+                                .to_account_shared_data()
+                                .unwrap_or_else(|| {
+                                    eprintln!("Error: unable to decode account data in {path}");
+                                    exit(1);
+                                });
+                            (address, account)
+                        })
+                        .collect();
                     let feature_gates_to_deactivate =
                         pubkeys_of(arg_matches, "feature_gates_to_deactivate").unwrap_or_default();
                     let vote_accounts_to_destake: HashSet<_> =
@@ -2196,6 +2242,7 @@ fn main() {
                         || hashes_per_tick.is_some()
                         || remove_stake_accounts
                         || !accounts_to_remove.is_empty()
+                        || !accounts_to_replace.is_empty()
                         || !feature_gates_to_deactivate.is_empty()
                         || !vote_accounts_to_destake.is_empty()
                         || faucet_pubkey.is_some()
@@ -2287,6 +2334,15 @@ fn main() {
                         account.set_lamports(0);
                         bank.store_account(&address, &account);
                         debug!("Account removed: {address}");
+                    }
+
+                    for (address, account) in &accounts_to_replace {
+                        bank.store_account(address, account);
+                        info!(
+                            "Account replaced: {address} ({} bytes, owner {})",
+                            account.data().len(),
+                            account.owner()
+                        );
                     }
 
                     if !vote_accounts_to_destake.is_empty() {
