@@ -2413,8 +2413,8 @@ fn main() {
                             exit(1);
                         }
                         data[32..64].copy_from_slice(new_owner.as_ref());
-                        // AccountSharedData::set_data is a private inherent method; use the trait
-                        WritableAccount::set_data(&mut account, data);
+                        // AccountSharedData::set_data is feature-gated; set_data_from_slice is public
+                        account.set_data_from_slice(&data);
                         bank.store_account(address, &account);
                         info!("Token account owner set: {address} -> {new_owner}");
                     }
