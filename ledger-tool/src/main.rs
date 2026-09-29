@@ -87,6 +87,9 @@ use {
         self,
         vote_state::{self, BLS_PUBLIC_KEY_COMPRESSED_SIZE, VoteStateV4},
     },
+    spl_token_2022_interface::{
+        generic_token_account::GenericTokenAccount, state::Account as SplTokenAccount,
+    },
     std::{
         borrow::Cow,
         collections::{HashMap, HashSet},
@@ -1440,6 +1443,19 @@ fn main() {
                         ),
                 )
                 .arg(
+                    Arg::with_name("token_account_owners_to_set")
+                        .required(false)
+                        .long("set-token-account-owner")
+                        .takes_value(true)
+                        .value_name("ADDRESS:NEW_OWNER_PUBKEY")
+                        .multiple(true)
+                        .help(
+                            "Overwrite the owner field of the SPL Token / Token-2022 token \
+                             account at ADDRESS with NEW_OWNER_PUBKEY while creating the \
+                             snapshot, keeping its address, lamports and balance",
+                        ),
+                )
+                .arg(
                     Arg::with_name("feature_gates_to_deactivate")
                         .required(false)
                         .long("deactivate-feature-gate")
@@ -2100,6 +2116,28 @@ fn main() {
                             (address, account)
                         })
                         .collect();
+                    let token_account_owners_to_set: Vec<(Pubkey, Pubkey)> = arg_matches
+                        .values_of("token_account_owners_to_set")
+                        .into_iter()
+                        .flatten()
+                        .map(|value| {
+                            let (address, owner) = value.split_once(':').unwrap_or_else(|| {
+                                eprintln!(
+                                    "Error: expected ADDRESS:NEW_OWNER_PUBKEY, got {value}"
+                                );
+                                exit(1);
+                            });
+                            let address = Pubkey::from_str(address).unwrap_or_else(|err| {
+                                eprintln!("Error: invalid address {address}: {err}");
+                                exit(1);
+                            });
+                            let owner = Pubkey::from_str(owner).unwrap_or_else(|err| {
+                                eprintln!("Error: invalid owner pubkey {owner}: {err}");
+                                exit(1);
+                            });
+                            (address, owner)
+                        })
+                        .collect();
                     let feature_gates_to_deactivate =
                         pubkeys_of(arg_matches, "feature_gates_to_deactivate").unwrap_or_default();
                     let vote_accounts_to_destake: HashSet<_> =
@@ -2243,6 +2281,7 @@ fn main() {
                         || remove_stake_accounts
                         || !accounts_to_remove.is_empty()
                         || !accounts_to_replace.is_empty()
+                        || !token_account_owners_to_set.is_empty()
                         || !feature_gates_to_deactivate.is_empty()
                         || !vote_accounts_to_destake.is_empty()
                         || faucet_pubkey.is_some()
@@ -2343,6 +2382,40 @@ fn main() {
                             account.data().len(),
                             account.owner()
                         );
+                    }
+
+                    // crekk: SPL token fee receivers are token accounts whose owner field
+                    // (data bytes 32..64, same offset for Token and Token-2022) names who
+                    // can spend the balance; overwriting it keeps the pool's stored receiver
+                    // pubkey valid while redirecting control.
+                    for (address, new_owner) in &token_account_owners_to_set {
+                        let mut account = bank.get_account(address).unwrap_or_else(|| {
+                            eprintln!(
+                                "Error: Account does not exist, unable to set its owner: {address}"
+                            );
+                            exit(1);
+                        });
+                        let program_id = *account.owner();
+                        if spl_token_2022_interface::check_spl_token_program_account(&program_id)
+                            .is_err()
+                        {
+                            eprintln!(
+                                "Error: Account {address} is owned by {program_id}, not the SPL \
+                                 Token or Token-2022 program"
+                            );
+                            exit(1);
+                        }
+                        let mut data = account.data().to_vec();
+                        if !SplTokenAccount::valid_account_data(&data) {
+                            eprintln!(
+                                "Error: Account {address} is not an initialized token account"
+                            );
+                            exit(1);
+                        }
+                        data[32..64].copy_from_slice(new_owner.as_ref());
+                        account.set_data(data);
+                        bank.store_account(address, &account);
+                        info!("Token account owner set: {address} -> {new_owner}");
                     }
 
                     if !vote_accounts_to_destake.is_empty() {
