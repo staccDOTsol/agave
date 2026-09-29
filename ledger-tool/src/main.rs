@@ -1456,6 +1456,20 @@ fn main() {
                         ),
                 )
                 .arg(
+                    Arg::with_name("redelegate_stake_to")
+                        .required(false)
+                        .long("redelegate-stake-to")
+                        .takes_value(true)
+                        .value_name("VOTE_ACCOUNT_PUBKEY")
+                        .validator(is_pubkey)
+                        .multiple(true)
+                        .help(
+                            "Repoint every delegated stake account at a deterministic random \
+                             one of these vote accounts while creating the snapshot; takes \
+                             effect at the next epoch boundary",
+                        ),
+                )
+                .arg(
                     Arg::with_name("feature_gates_to_deactivate")
                         .required(false)
                         .long("deactivate-feature-gate")
@@ -2145,6 +2159,8 @@ fn main() {
                             .unwrap_or_default()
                             .into_iter()
                             .collect();
+                    let redelegate_stake_to: Vec<Pubkey> =
+                        pubkeys_of(arg_matches, "redelegate_stake_to").unwrap_or_default();
                     let snapshot_version = arg_matches.value_of("snapshot_version").map_or(
                         SnapshotVersion::default(),
                         |s| {
@@ -2282,6 +2298,7 @@ fn main() {
                         || !accounts_to_remove.is_empty()
                         || !accounts_to_replace.is_empty()
                         || !token_account_owners_to_set.is_empty()
+                        || !redelegate_stake_to.is_empty()
                         || !feature_gates_to_deactivate.is_empty()
                         || !vote_accounts_to_destake.is_empty()
                         || faucet_pubkey.is_some()
@@ -2436,6 +2453,40 @@ fn main() {
                                 }
                                 account.set_state(&StakeStateV2::Initialized(meta)).unwrap();
                                 bank.store_account(&address, &account);
+                            }
+                        }
+                    }
+
+                    // crekk: all staked SOL goes to our validators. Deterministic "random"
+                    // assignment: hash the stake account address to pick a vote account so
+                    // the split is even and reproducible; takes effect at the next epoch
+                    // boundary, where stake maps and leader schedules are recomputed.
+                    if !redelegate_stake_to.is_empty() {
+                        for (address, mut account) in bank
+                            .get_program_accounts(&stake::program::id())
+                            .unwrap()
+                            .into_iter()
+                        {
+                            if let Ok(StakeStateV2::Stake(meta, mut stake, extras)) = account.state() {
+                                let pick = redelegate_stake_to[(address
+                                    .as_ref()
+                                    .iter()
+                                    .fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(*b as u64))
+                                    % redelegate_stake_to.len() as u64)
+                                    as usize];
+                                if stake.delegation.voter_pubkey != pick {
+                                    if verbose_level > 0 {
+                                        warn!(
+                                            "Redelegating stake account {} from {} to {}",
+                                            address, stake.delegation.voter_pubkey, pick
+                                        );
+                                    }
+                                    stake.delegation.voter_pubkey = pick;
+                                    account
+                                        .set_state(&StakeStateV2::Stake(meta, stake, extras))
+                                        .unwrap();
+                                    bank.store_account(&address, &account);
+                                }
                             }
                         }
                     }
