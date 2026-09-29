@@ -6,6 +6,7 @@ use {
     solana_clock::{MAX_TRANSACTION_FORWARDING_DELAY, Slot},
     solana_compute_budget::compute_budget::SVMTransactionExecutionBudget,
     solana_fee::calculate_fee_details,
+    solana_fee_structure::FeeDetails,
     solana_nonce::{
         NONCED_TX_MARKER_IX_INDEX,
         state::{Data as NonceData, DurableNonce, State as NonceState},
@@ -178,6 +179,14 @@ impl Bank {
                                 self.fee_structure.lamports_per_signature,
                                 config.priority_fee_lamports,
                                 fee_features,
+                            );
+                            // crekk: base fee * k^2 for the k-th write to the busiest account.
+                            let k = self.write_repetition(tx.borrow());
+                            let fee_details = FeeDetails::new(
+                                fee_details
+                                    .transaction_fee()
+                                    .saturating_mul(k.saturating_mul(k)),
+                                fee_details.prioritization_fee(),
                             );
                             if let Some(compute_budget) = self.compute_budget {
                                 // This block of code is only necessary to retain legacy behavior of the code.

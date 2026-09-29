@@ -699,6 +699,7 @@ impl PartialEq for Bank {
             transaction_processor: _,
             check_program_deployment_slot: _,
             collector_fee_details: _,
+            write_repetition: _,
             compute_budget: _,
             transaction_account_lock_limit: _,
             fee_structure: _,
@@ -1029,6 +1030,10 @@ pub struct Bank {
     /// Collected fee details
     collector_fee_details: RwLock<CollectorFeeDetails>,
 
+    /// crekk: committed write-locks per account in this slot. The k-th committed
+    /// transaction to write an account pays lamports_per_signature * k^2 per signature.
+    write_repetition: dashmap::DashMap<Pubkey, u64, ahash::RandomState>,
+
     /// The compute budget to use for transaction execution.
     compute_budget: Option<ComputeBudget>,
 
@@ -1269,6 +1274,7 @@ impl Bank {
             transaction_processor: TransactionBatchProcessor::default(),
             check_program_deployment_slot: false,
             collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
+            write_repetition: dashmap::DashMap::default(),
             compute_budget: None,
             transaction_account_lock_limit: None,
             fee_structure: FeeStructure::default(),
@@ -1537,6 +1543,7 @@ impl Bank {
             transaction_processor,
             check_program_deployment_slot: false,
             collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
+            write_repetition: dashmap::DashMap::default(),
             compute_budget: parent.compute_budget,
             transaction_account_lock_limit: parent.transaction_account_lock_limit,
             fee_structure: parent.fee_structure.clone(),
@@ -2204,6 +2211,7 @@ impl Bank {
             check_program_deployment_slot: false,
             // collector_fee_details is not serialized to snapshot
             collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
+            write_repetition: dashmap::DashMap::default(),
             compute_budget: runtime_config.compute_budget,
             transaction_account_lock_limit: runtime_config.transaction_account_lock_limit,
             fee_structure: FeeStructure::default(),
@@ -4353,6 +4361,22 @@ impl Bank {
         self.bank_hash_stats.accumulate(&stats);
     }
 
+    /// crekk: 1 + the highest committed write count among this transaction's writable accounts.
+    pub fn write_repetition(&self, tx: &impl TransactionWithMeta) -> u64 {
+        if tx.is_simple_vote_transaction() {
+            return 1;
+        }
+        let prior = tx
+            .account_keys()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| tx.is_writable(*i))
+            .filter_map(|(_, key)| self.write_repetition.get(key).map(|n| *n))
+            .max()
+            .unwrap_or(0);
+        prior.saturating_add(1)
+    }
+
     pub fn commit_transactions(
         &self,
         sanitized_txs: &[impl TransactionWithMeta],
@@ -4372,6 +4396,19 @@ impl Bank {
             processed_with_successful_result_count,
             signature_count,
         } = *processed_counts;
+
+        // crekk: count committed (fee-paying) transactions per written account. Fees for later
+        // transactions read these counts; same-account transactions never share a batch, so every
+        // validator sees the same order.
+        for (tx, result) in sanitized_txs.iter().zip(processing_results.iter()) {
+            if result.is_ok() && !tx.is_simple_vote_transaction() {
+                for (i, key) in tx.account_keys().iter().enumerate() {
+                    if tx.is_writable(i) {
+                        *self.write_repetition.entry(*key).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
 
         self.increment_transaction_count(processed_transactions_count);
         self.increment_non_vote_transaction_count_since_restart(

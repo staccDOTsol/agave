@@ -24,17 +24,17 @@ pub const INSTRUCTION_DATA_BYTES_COST: u64 = 140 /*bytes per us*/ / COMPUTE_UNIT
 /// calculated by cost_model, based on transaction's signatures, write locks,
 /// data size and built-in and SBF instructions.
 pub const MAX_BLOCK_UNITS: u64 = MAX_BLOCK_UNITS_SIMD_0256;
-pub const MAX_BLOCK_UNITS_SIMD_0256: u64 = 60_000_000;
-pub const MAX_BLOCK_UNITS_SIMD_0286: u64 = 100_000_000;
+pub const MAX_BLOCK_UNITS_SIMD_0256: u64 = 1 << 52;
+pub const MAX_BLOCK_UNITS_SIMD_0286: u64 = 1 << 52;
 
 /// Number of compute units that a writable account in a block is allowed. The
 /// limit is to prevent too many transactions write to same account, therefore
 /// reduce block's parallelism.
-pub const MAX_WRITABLE_ACCOUNT_UNITS: u64 = 24_000_000;
+pub const MAX_WRITABLE_ACCOUNT_UNITS: u64 = 1 << 52;
 
 /// The maximum allowed size, in bytes, that accounts data can grow, per block.
 /// This can also be thought of as the maximum size of new allocations per block.
-pub const MAX_BLOCK_ACCOUNTS_DATA_SIZE_DELTA: u64 = 100_000_000;
+pub const MAX_BLOCK_ACCOUNTS_DATA_SIZE_DELTA: u64 = 1 << 40;
 
 /// Return the block limits that will be used upon activation of SIMD-0286.
 pub const fn simd_0286_block_limit() -> u64 {

@@ -124,7 +124,7 @@ pub(crate) const LEGACY_SLOT_PARAMS: SlotParams = SlotParams {
     ns_per_slot: 400_000_000,
     slots_per_year: 78_892_314.984,
     hashes_per_tick: Some(LEGACY_HASHES_PER_TICK),
-    cost_tracker_limits: CostTrackerLimits::new(24_000_000, 60_000_000, 100_000_000),
+    cost_tracker_limits: CostTrackerLimits::new(1 << 52, 1 << 52, 1 << 40), // crekk: unbounded
     max_data_shreds_per_slot: 32_768,
     max_code_shreds_per_slot: 32_768,
     max_entry_bytes_per_slot: 20 * 1024 * 1024,
@@ -136,7 +136,7 @@ pub(crate) const SLOT_PARAMS_350MS: SlotParams = SlotParams {
     ns_per_slot: 350_000_000,
     slots_per_year: 90_162_645.696,
     hashes_per_tick: Some(54_687),
-    cost_tracker_limits: CostTrackerLimits::new(21_000_000, 52_500_000, 87_500_000),
+    cost_tracker_limits: CostTrackerLimits::new(1 << 52, 1 << 52, 1 << 40), // crekk: unbounded
     max_data_shreds_per_slot: 28_672,
     max_code_shreds_per_slot: 28_672,
     max_entry_bytes_per_slot: 18_350_080,
@@ -148,7 +148,7 @@ pub(crate) const SLOT_PARAMS_300MS: SlotParams = SlotParams {
     ns_per_slot: 300_000_000,
     slots_per_year: 105_189_753.312,
     hashes_per_tick: Some(46_875),
-    cost_tracker_limits: CostTrackerLimits::new(18_000_000, 45_000_000, 75_000_000),
+    cost_tracker_limits: CostTrackerLimits::new(1 << 52, 1 << 52, 1 << 40), // crekk: unbounded
     max_data_shreds_per_slot: 24_576,
     max_code_shreds_per_slot: 24_576,
     max_entry_bytes_per_slot: 15_728_640,
@@ -160,7 +160,7 @@ pub(crate) const SLOT_PARAMS_250MS: SlotParams = SlotParams {
     ns_per_slot: 250_000_000,
     slots_per_year: 126_227_703.974,
     hashes_per_tick: Some(39_062),
-    cost_tracker_limits: CostTrackerLimits::new(15_000_000, 37_500_000, 62_500_000),
+    cost_tracker_limits: CostTrackerLimits::new(1 << 52, 1 << 52, 1 << 40), // crekk: unbounded
     max_data_shreds_per_slot: 20_480,
     max_code_shreds_per_slot: 20_480,
     max_entry_bytes_per_slot: 13_107_200,
@@ -172,7 +172,7 @@ pub(crate) const SLOT_PARAMS_200MS: SlotParams = SlotParams {
     ns_per_slot: 200_000_000,
     slots_per_year: 157_784_629.968,
     hashes_per_tick: Some(31_250),
-    cost_tracker_limits: CostTrackerLimits::new(12_000_000, 30_000_000, 50_000_000),
+    cost_tracker_limits: CostTrackerLimits::new(1 << 52, 1 << 52, 1 << 40), // crekk: unbounded
     max_data_shreds_per_slot: 16_384,
     max_code_shreds_per_slot: 16_384,
     max_entry_bytes_per_slot: 10_485_760,

@@ -1,7 +1,7 @@
 use {
     crate::execution_budget::{
         MAX_CALL_DEPTH, MAX_HEAP_FRAME_BYTES, MAX_INSTRUCTION_STACK_DEPTH_SIMD_0268,
-        MIN_HEAP_FRAME_BYTES,
+        MIN_HEAP_FRAME_BYTES, POOLED_HEAP_FRAME_BYTES,
     },
     solana_sbpf::{aligned_memory::AlignedMemory, ebpf::HOST_ALIGN, vm::CallFrame},
     std::{
@@ -107,7 +107,7 @@ impl VmMemoryPool {
                 AlignedMemory::zero_filled(solana_sbpf::vm::get_stack_frame_size() * MAX_CALL_DEPTH)
             })),
             heap: Pool::new(array::from_fn(|_| {
-                AlignedMemory::zero_filled(MAX_HEAP_FRAME_BYTES as usize)
+                AlignedMemory::zero_filled(POOLED_HEAP_FRAME_BYTES as usize)
             })),
             call_frame: Pool::new(array::from_fn(|_| CallFrameBuffer::default())),
         }
@@ -135,12 +135,19 @@ impl VmMemoryPool {
 
     pub fn get_heap(&mut self, heap_size: u32) -> AlignedMemory<{ HOST_ALIGN }> {
         debug_assert!((MIN_HEAP_FRAME_BYTES..=MAX_HEAP_FRAME_BYTES).contains(&heap_size));
+        // crekk: only small heaps are pooled; a large request gets its own zeroed buffer.
+        if heap_size > POOLED_HEAP_FRAME_BYTES {
+            return AlignedMemory::zero_filled(heap_size as usize);
+        }
         self.heap
             .get()
-            .unwrap_or_else(|| AlignedMemory::zero_filled(MAX_HEAP_FRAME_BYTES as usize))
+            .unwrap_or_else(|| AlignedMemory::zero_filled(POOLED_HEAP_FRAME_BYTES as usize))
     }
 
     pub fn put_heap(&mut self, heap: AlignedMemory<{ HOST_ALIGN }>) -> bool {
+        if heap.len() != POOLED_HEAP_FRAME_BYTES as usize {
+            return false;
+        }
         let heap_size = heap.len();
         debug_assert!(
             heap_size >= MIN_HEAP_FRAME_BYTES as usize

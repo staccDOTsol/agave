@@ -23,7 +23,8 @@ pub const DEFAULT_INVOCATION_COST: u64 = 946;
 /// Max call depth. This is the maximum nesting of SBF to SBF call that can happen within a program.
 pub const MAX_CALL_DEPTH: usize = 64;
 
-pub const MAX_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
+// crekk: per-transaction CU ceiling raised to the u32 maximum.
+pub const MAX_COMPUTE_UNIT_LIMIT: u32 = u32::MAX;
 
 /// Roughly 0.5us/page, where page is 32K; given roughly 15CU/us, the
 /// default heap page cost = 0.5 * 15 ~= 8CU/page
@@ -32,7 +33,10 @@ pub const DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT: u32 = 200_000;
 // SIMD-170 defines max CUs to be allocated for any builtin program instructions, that
 // have not been migrated to sBPF programs.
 pub const MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT: u32 = 3_000;
-pub const MAX_HEAP_FRAME_BYTES: u32 = 256 * 1024;
+// crekk: heap may use the whole 4 GiB SBF heap region (kept a multiple of 1 KiB).
+pub const MAX_HEAP_FRAME_BYTES: u32 = u32::MAX & !1023;
+/// Heaps up to this size are pooled and reused; larger ones are allocated per invocation.
+pub const POOLED_HEAP_FRAME_BYTES: u32 = 256 * 1024;
 pub const MIN_HEAP_FRAME_BYTES: u32 = HEAP_LENGTH as u32;
 
 /// The total accounts data a transaction can load is limited to 64MiB to not break
