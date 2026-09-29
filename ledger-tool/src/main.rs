@@ -2563,10 +2563,13 @@ fn main() {
                                     continue;
                                 }
                                 let mut changed = false;
-                                for (tag, key) in [(0..4usize, 4..36usize), (46..50, 50..82)] {
-                                    if data[tag] != [0, 0, 0, 0] {
-                                        if on_curve(&data[key]) {
-                                            data[tag].copy_from_slice(&[0, 0, 0, 0]);
+                                for (label, tag_off, key_off) in
+                                    [("mint", 0usize, 4usize), ("freeze", 46, 50)]
+                                {
+                                    if data[tag_off..tag_off + 4] != [0, 0, 0, 0] {
+                                        if on_curve(&data[key_off..key_off + 32]) {
+                                            data[tag_off..tag_off + 4]
+                                                .copy_from_slice(&[0, 0, 0, 0]);
                                             changed = true;
                                             nulled += 1;
                                         } else {
@@ -2574,13 +2577,11 @@ fn main() {
                                             if verbose_level > 1 {
                                                 warn!(
                                                     "Kept PDA {} authority {} on mint {}",
-                                                    if tag.start == 0 {
-                                                        "mint"
-                                                    } else {
-                                                        "freeze"
-                                                    },
+                                                    label,
                                                     Pubkey::new_from_array(
-                                                        data[key].try_into().unwrap()
+                                                        data[key_off..key_off + 32]
+                                                            .try_into()
+                                                            .unwrap()
                                                     ),
                                                     address
                                                 );
