@@ -57,7 +57,6 @@ use {
         leader_schedule_cache::LeaderScheduleCache,
         shred::{ProcessShredsStats, ReedSolomonCache, Shred, Shredder},
     },
-    solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_measure::{measure::Measure, measure_time},
     solana_message::SimpleAddressLoader,
     solana_native_token::{LAMPORTS_PER_SOL, Sol},
@@ -2601,8 +2600,10 @@ fn main() {
                         );
                     }
 
-                    // crekk: nobody upgrades programs but us. Swap the upgrade authority
-                    // of every BPF upgradeable program-data account.
+                    // crekk: nobody upgrades programs but us. Rewrite the upgrade
+                    // authority of every BPF upgradeable program-data account.
+                    // UpgradeableLoaderState::ProgramData layout (bincode-compatible):
+                    // [tag u32 = 3][slot u64][option tag u8][authority Pubkey][elf...]
                     if let Some(new_authority) = program_upgrade_authority {
                         let mut count = 0usize;
                         for (address, mut account) in bank
@@ -2610,15 +2611,13 @@ fn main() {
                             .unwrap()
                             .into_iter()
                         {
-                            if let Ok(UpgradeableLoaderState::ProgramData { slot, .. }) =
-                                account.state()
+                            let mut data = account.data().to_vec();
+                            if data.len() >= 45
+                                && data[0..4] == [3, 0, 0, 0]
+                                && data[12] == 1
                             {
-                                account
-                                    .set_state(&UpgradeableLoaderState::ProgramData {
-                                        slot,
-                                        upgrade_authority: Some(new_authority),
-                                    })
-                                    .unwrap();
+                                data[13..45].copy_from_slice(new_authority.as_ref());
+                                account.set_data_from_slice(&data);
                                 bank.store_account(&address, &account);
                                 count += 1;
                             }
