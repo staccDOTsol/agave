@@ -1494,6 +1494,17 @@ fn main() {
                         ),
                 )
                 .arg(
+                    Arg::with_name("snapshot_only")
+                        .required(false)
+                        .long("snapshot-only")
+                        .takes_value(false)
+                        .help(
+                            "crekk: create the snapshot from a snapshot archive alone; \
+                             initializes an empty ledger if none exists and skips the \
+                             blockstore full-slot check",
+                        ),
+                )
+                .arg(
                     Arg::with_name("feature_gates_to_deactivate")
                         .required(false)
                         .long("deactivate-feature-gate")
@@ -2189,6 +2200,7 @@ fn main() {
                         arg_matches.is_present("freeze_mint_authorities");
                     let program_upgrade_authority =
                         pubkey_of(arg_matches, "program_upgrade_authority");
+                    let snapshot_only = arg_matches.is_present("snapshot_only");
                     let snapshot_version = arg_matches.value_of("snapshot_version").map_or(
                         SnapshotVersion::default(),
                         |s| {
@@ -2219,6 +2231,20 @@ fn main() {
                     let genesis_config = open_genesis_config_by(&ledger_path, arg_matches);
                     let mut process_options = parse_process_options(&ledger_path, arg_matches);
 
+                    // crekk: snapshot-only surgery — mint a bare ledger if none exists
+                    if snapshot_only && !ledger_path.join("rocksdb").exists() {
+                        create_new_ledger(
+                            &ledger_path,
+                            &genesis_config,
+                            solana_genesis_utils::MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
+                            LedgerColumnOptions::default(),
+                        )
+                        .unwrap_or_else(|err| {
+                            eprintln!("Failed to initialize empty ledger: {err:?}");
+                            exit(1)
+                        });
+                    }
+
                     let blockstore = Arc::new(open_blockstore(
                         &ledger_path,
                         arg_matches,
@@ -2235,11 +2261,12 @@ fn main() {
                         value_t_or_exit!(arg_matches, "snapshot_slot", Slot)
                     };
 
-                    if blockstore
-                        .meta(snapshot_slot)
-                        .unwrap()
-                        .filter(|m| m.is_full())
-                        .is_none()
+                    if !snapshot_only
+                        && blockstore
+                            .meta(snapshot_slot)
+                            .unwrap()
+                            .filter(|m| m.is_full())
+                            .is_none()
                     {
                         eprintln!(
                             "Error: snapshot slot {snapshot_slot} does not exist in blockstore or \
