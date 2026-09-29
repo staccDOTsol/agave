@@ -245,6 +245,7 @@ dependencies = [
  "solana-version",
  "solana-vote",
  "solana-vote-program",
+ "spl-token-2022-interface",
  "tempfile",
  "thiserror 2.0.19",
  "tikv-jemallocator",
