@@ -321,18 +321,36 @@ impl Accounts {
         program_id: &Pubkey,
     ) -> ScanResult<Vec<KeyedAccountSharedData>> {
         let mut collector = Vec::new();
-        self.accounts_db
-            .scan_accounts(
-                ancestors,
-                bank_id,
-                |some_account_tuple| {
-                    Self::load_while_filtering(&mut collector, some_account_tuple, |account| {
-                        account.owner() == program_id
-                    })
-                },
-                &ScanConfig::default(),
-            )
-            .map(|_| collector)
+        // crekk: same index-first path as load_by_program_with_filter — the
+        // surgery's program walks call this entry point
+        if self.accounts_db.account_indexes.include_key(program_id) {
+            self.accounts_db
+                .index_scan_accounts(
+                    ancestors,
+                    bank_id,
+                    IndexKey::ProgramId(*program_id),
+                    |some_account_tuple| {
+                        Self::load_while_filtering(&mut collector, some_account_tuple, |account| {
+                            account.owner() == program_id
+                        })
+                    },
+                    &ScanConfig::default(),
+                )
+                .map(|_| collector)
+        } else {
+            self.accounts_db
+                .scan_accounts(
+                    ancestors,
+                    bank_id,
+                    |some_account_tuple| {
+                        Self::load_while_filtering(&mut collector, some_account_tuple, |account| {
+                            account.owner() == program_id
+                        })
+                    },
+                    &ScanConfig::default(),
+                )
+                .map(|_| collector)
+        }
     }
 
     pub fn load_by_program_with_filter<F: Fn(&AccountSharedData) -> bool>(
