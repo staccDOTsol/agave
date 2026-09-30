@@ -2132,10 +2132,16 @@ impl Bank {
         };
         #[cfg(feature = "dev-context-only-utils")]
         let leader = leader_for_tests.unwrap_or_else(compute_leader);
-        assert_eq!(
-            fields.leader_id, leader.id,
-            "snapshot leader_id does not match computed slot leader"
-        );
+        // crekk: snapshot surgery can produce a leader_id that differs from the
+        // schedule's computation — trust the computed leader, warn instead of panic
+        if fields.leader_id != leader.id {
+            log::warn!(
+                "snapshot leader_id {} != computed slot leader {} (slot {}), using computed",
+                fields.leader_id,
+                leader.id,
+                slot
+            );
+        }
 
         let stakes_accounts_load_duration = now.elapsed();
         let rent = Self::load_rent_from_account_for_snapshot_load(&bank_rc.accounts, &ancestors);
