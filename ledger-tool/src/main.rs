@@ -2519,11 +2519,17 @@ fn main() {
                     // the split is even and reproducible; takes effect at the next epoch
                     // boundary, where stake maps and leader schedules are recomputed.
                     if !redelegate_stake_to.is_empty() {
-                        for (address, mut account) in bank
+                        let stake_accounts = bank
                             .get_program_accounts(&stake::program::id())
-                            .unwrap()
-                            .into_iter()
-                        {
+                            .unwrap();
+                        if stake_accounts.is_empty() {
+                            eprintln!(
+                                "Error: no stake accounts found — program-id index not built? \
+                                 refusing to produce a chain with no stake"
+                            );
+                            exit(1);
+                        }
+                        for (address, mut account) in stake_accounts.into_iter() {
                             if let Ok(StakeStateV2::Stake(meta, mut stake, extras)) = account.state() {
                                 let pick = redelegate_stake_to[(address
                                     .as_ref()

@@ -343,18 +343,37 @@ impl Accounts {
         filter: F,
     ) -> ScanResult<Vec<KeyedAccountSharedData>> {
         let mut collector = Vec::new();
-        self.accounts_db
-            .scan_accounts(
-                ancestors,
-                bank_id,
-                |some_account_tuple| {
-                    Self::load_while_filtering(&mut collector, some_account_tuple, |account| {
-                        account.owner() == program_id && filter(account)
-                    })
-                },
-                &ScanConfig::default(),
-            )
-            .map(|_| collector)
+        // crekk: prefer the program-id secondary index — direct lookups over this
+        // program's pubkeys instead of a full crawl of every account. Fall back to
+        // the full scan only for callers that did not enable the index.
+        if self.accounts_db.account_indexes.include_key(program_id) {
+            self.accounts_db
+                .index_scan_accounts(
+                    ancestors,
+                    bank_id,
+                    IndexKey::ProgramId(*program_id),
+                    |some_account_tuple| {
+                        Self::load_while_filtering(&mut collector, some_account_tuple, |account| {
+                            filter(account)
+                        })
+                    },
+                    &ScanConfig::default(),
+                )
+                .map(|_| collector)
+        } else {
+            self.accounts_db
+                .scan_accounts(
+                    ancestors,
+                    bank_id,
+                    |some_account_tuple| {
+                        Self::load_while_filtering(&mut collector, some_account_tuple, |account| {
+                            account.owner() == program_id && filter(account)
+                        })
+                    },
+                    &ScanConfig::default(),
+                )
+                .map(|_| collector)
+        }
     }
 
     fn calc_scan_result_size(account: &AccountSharedData) -> usize {
