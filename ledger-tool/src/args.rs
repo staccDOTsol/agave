@@ -7,9 +7,9 @@ use {
         accounts_db::{AccountShrinkThreshold, AccountsDbConfig},
         accounts_file::AccountsFileProvider,
         accounts_index::{
-            AccountIndex, AccountSecondaryIndexes, AccountsIndexConfig,
-            DEFAULT_NUM_ENTRIES_OVERHEAD, DEFAULT_NUM_ENTRIES_TO_EVICT, IndexLimit,
-            IndexLimitThreshold, MINIMAL_THRESHOLD_NUM_BYTES, ScanFilter,
+            AccountsIndexConfig, DEFAULT_NUM_ENTRIES_OVERHEAD,
+            DEFAULT_NUM_ENTRIES_TO_EVICT, IndexLimit, IndexLimitThreshold,
+            MINIMAL_THRESHOLD_NUM_BYTES, ScanFilter,
         },
         partitioned_rewards::PartitionedEpochRewardsConfig,
     },
@@ -364,13 +364,7 @@ pub fn get_accounts_db_config(
 
     AccountsDbConfig {
         index: Some(accounts_index_config),
-        // crekk: program-id secondary index, so program-account walks are direct
-        // lookups instead of full crawls
-        account_indexes: {
-            let mut indexes = std::collections::HashSet::new();
-            indexes.insert(AccountIndex::ProgramId);
-            Some(AccountSecondaryIndexes { indexes, keys: None })
-        },
+        account_indexes: None,
         bank_hash_details_dir: ledger_tool_ledger_path,
         shrink_ratio: AccountShrinkThreshold::default(),
         read_cache_limit_bytes: None,
