@@ -2133,10 +2133,13 @@ impl Bank {
         #[cfg(feature = "dev-context-only-utils")]
         let leader = leader_for_tests.unwrap_or_else(compute_leader);
         // crekk: snapshot surgery can produce a leader_id that differs from the
-        // schedule's computation — trust the computed leader, warn instead of panic
+        // schedule's computation. the computed leader is derived from OUR stake —
+        // if the snapshot says a mainnet validator, ours is the truth. only warn
+        // if the snapshot disagrees with what our stake says it should be.
         if fields.leader_id != leader.id {
             log::warn!(
-                "snapshot leader_id {} != computed slot leader {} (slot {}), using computed",
+                "snapshot leader_id {} != computed slot leader {} (slot {}), \
+                 our schedule is correct — using computed",
                 fields.leader_id,
                 leader.id,
                 slot
