@@ -7,7 +7,7 @@ use {
         accounts_db::{AccountShrinkThreshold, AccountsDbConfig},
         accounts_file::AccountsFileProvider,
         accounts_index::{
-            AccountsIndexConfig, DEFAULT_NUM_ENTRIES_OVERHEAD,
+            AccountIndex, AccountSecondaryIndexes, AccountsIndexConfig, DEFAULT_NUM_ENTRIES_OVERHEAD,
             DEFAULT_NUM_ENTRIES_TO_EVICT, IndexLimit, IndexLimitThreshold,
             MINIMAL_THRESHOLD_NUM_BYTES, ScanFilter,
         },
@@ -364,7 +364,13 @@ pub fn get_accounts_db_config(
 
     AccountsDbConfig {
         index: Some(accounts_index_config),
-        account_indexes: None,
+        // crekk: program-id secondary index — the warp's epoch-stake recompute
+        // needs get_program_accounts(stake); direct lookups, not the crawl
+        account_indexes: {
+            let mut indexes = std::collections::HashSet::new();
+            indexes.insert(AccountIndex::ProgramId);
+            Some(AccountSecondaryIndexes { indexes, keys: None })
+        },
         bank_hash_details_dir: ledger_tool_ledger_path,
         shrink_ratio: AccountShrinkThreshold::default(),
         read_cache_limit_bytes: None,
