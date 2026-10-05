@@ -344,6 +344,22 @@ mod tests {
             &FeatureSet::all_enabled()
         );
 
+        // crekk: allow a transaction to read several weight shards beyond the
+        // old 64 MiB ceiling without requiring the full model in one bank load.
+        let shard_read_size = 200 * 1024 * 1024;
+        test!(
+            &[
+                ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(shard_read_size),
+                Instruction::new_with_bincode(Pubkey::new_unique(), &0_u8, vec![]),
+            ],
+            Ok(ComputeBudgetLimits {
+                compute_unit_limit: DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT
+                    + MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT,
+                loaded_accounts_bytes: NonZeroU32::new(shard_read_size).unwrap(),
+                ..ComputeBudgetLimits::default()
+            })
+        );
+
         // Assert when set_loaded_accounts_data_size_limit presents, with greater than max value
         // budget is set to max data size
         let data_size = MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES.get() + 1;

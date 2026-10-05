@@ -39,10 +39,12 @@ pub const MAX_HEAP_FRAME_BYTES: u32 = u32::MAX & !1023;
 pub const POOLED_HEAP_FRAME_BYTES: u32 = 256 * 1024;
 pub const MIN_HEAP_FRAME_BYTES: u32 = HEAP_LENGTH as u32;
 
-/// The total accounts data a transaction can load is limited to 64MiB to not break
-/// anyone in Mainnet-beta today. It can be set by set_loaded_accounts_data_size_limit instruction
+/// crekk: permit reading more independent model-weight shards in one transaction.
+/// The 4,224,531,264-byte (3.934401 GiB) export stays split across accounts
+/// and transactions. This bounds each transaction's loaded account data to
+/// 256 MiB.
 pub const MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES: NonZeroU32 =
-    NonZeroU32::new(64 * 1024 * 1024).unwrap();
+    NonZeroU32::new(256 * 1024 * 1024).unwrap();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SVMTransactionExecutionBudget {
