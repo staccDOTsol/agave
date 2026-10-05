@@ -238,7 +238,8 @@ mod tests {
                 Instruction::new_with_bincode(Pubkey::new_unique(), &0_u8, vec![]),
             ],
             Ok(ComputeBudgetLimits {
-                compute_unit_limit: DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT * 7,
+                compute_unit_limit:
+                    (DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT * 8).min(MAX_COMPUTE_UNIT_LIMIT),
                 ..ComputeBudgetLimits::default()
             })
         );
