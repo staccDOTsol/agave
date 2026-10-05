@@ -80,7 +80,9 @@ mod tests {
         );
         test!(
             &[
-                ComputeBudgetInstruction::set_compute_unit_limit(MAX_COMPUTE_UNIT_LIMIT + 1),
+                ComputeBudgetInstruction::set_compute_unit_limit(
+                    MAX_COMPUTE_UNIT_LIMIT.saturating_add(1),
+                ),
                 Instruction::new_with_bincode(Pubkey::new_unique(), &0_u8, vec![]),
             ],
             Ok(ComputeBudgetLimits {
