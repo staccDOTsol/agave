@@ -36,8 +36,9 @@ The configured genesis allocation is 2,000,000,000 SOL to the treasury,
 1,000,000 SOL to bootstrap stake, and 500 SOL to the validator identity: a
 2,001,000,500 SOL discretionary allocation (2,001,000,500,000,000,000
 lamports). Genesis also funds vote, sysvar, feature, and executable accounts
-at rent exemption; record exact total capitalization from the new chain's
-`solana supply` RPC response after boot. The treasury is the
+at rent exemption. The first server genesis had exact capitalization
+2,001,000,672.488321040 SOL (2,001,000,672,488,321,040 lamports) across 312
+accounts; verify the exact value for any later genesis. The treasury is the
 existing agent wallet `D88qwUFs75jLzVD9noGp8nyPEw4yqqvco3oMrRote2wa`,
 which is distinct from the unused vanity model mint address
 `DxNXApfiPXYcobrM3NsePAXMDYyaPgB8jfK4yc9ichat`. The script generates
@@ -60,6 +61,10 @@ export is 4,224,531,264 bytes (3.934401 GiB). Its weights are uploaded as
 separate accounts after the chain produces blocks; they are not
 part of the genesis archive. Agave's `--enable-warmup-epochs` accelerates the
 initial validator stake activation.
+Development genesis activates the registered features, including transaction
+v1 and direct account data mapping, except Alpenglow. The chain starts with
+Agave's default inflation policy; the genesis allocation is not a permanent
+fixed supply cap.
 
 ## Start the bootstrap validator
 
@@ -72,10 +77,10 @@ RPC publicly.
 "$HOME/agave-crekk/target/release/agave-validator" \
   --ledger "$HOME/crekk-chain/ledger" \
   --identity "$HOME/crekk-chain/keys/identity.json" \
-  --vote-account "$HOME/crekk-chain/keys/vote.json" \
+  --vote-account "$("$HOME/agave-crekk/target/release/solana-keygen" pubkey "$HOME/crekk-chain/keys/vote.json")" \
   --bind-address 0.0.0.0 \
   --rpc-bind-address 0.0.0.0 --rpc-port 8899 \
-  --gossip-port 8001 --dynamic-port-range 8002-8020 \
+  --gossip-port 8001 --dynamic-port-range 8002-8040 \
   --full-rpc-api \
   --snapshot-interval-slots 10000 --no-incremental-snapshots \
   --no-wait-for-vote-to-start-leader \
@@ -83,12 +88,16 @@ RPC publicly.
   --log "$HOME/crekk-chain/validator.log"
 ```
 
+On Ubuntu, ensure `net.core.rmem_max` and `net.core.wmem_max` are at least
+`134217728` before startup; the validator's network limit check otherwise
+refuses to start. Its QUIC TPU binds UDP port 8003 in this configuration.
+
 Check the network's distinct genesis hash, health, and advancing slots:
 
 ```bash
-solana --url http://127.0.0.1:8899 genesis-hash
-solana --url http://127.0.0.1:8899 block-height
-solana --url http://127.0.0.1:8899 supply  # record exact capitalization
+"$HOME/agave-crekk/target/release/solana" --url http://127.0.0.1:8899 genesis-hash
+"$HOME/agave-crekk/target/release/solana" --url http://127.0.0.1:8899 block-height
+"$HOME/agave-crekk/target/release/solana" --url http://127.0.0.1:8899 supply
 ```
 
 ## Create the model mint from the local signing machine
